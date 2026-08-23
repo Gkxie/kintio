@@ -160,7 +160,8 @@ test('[O08] long text reserves a compact async-delivery fallback', async (t) => 
   assert.equal(prepared.attempts[1]?.status, 'blocked');
   assert.equal(prepared.attempts[1]?.fallbackForIndex, 0);
   const fallback = prepared.attempts[1]?.payload.text as { content?: unknown };
-  assert.ok(Buffer.byteLength(String(fallback.content), 'utf8') <= 384);
+  assert.ok(Buffer.byteLength(String(fallback.content), 'utf8') <= 300);
+  assert.doesNotMatch(String(fallback.content), /[\r\n•]/u);
   assert.match(String(fallback.content), /…$/u);
 });
 

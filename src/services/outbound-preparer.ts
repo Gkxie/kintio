@@ -82,8 +82,13 @@ function fallbackText(message: SendIntent): string {
       ].filter(Boolean).join('\n');
     case 'image':
       return '暂时无法发送该图片，请重新发送后再试。';
-    case 'text':
-      return truncateUtf8(message.content, 384, '…');
+    case 'text': {
+      const compact = message.content
+        .replace(/[\r\n]+\s*[•●▪*-]?\s*/gu, ' ')
+        .replace(/\s+/gu, ' ')
+        .trim();
+      return truncateUtf8(compact, 300, '…');
+    }
   }
 }
 
