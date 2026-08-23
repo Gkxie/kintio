@@ -2021,10 +2021,15 @@ export class SqliteStore {
         .prepare(`
           UPDATE send_attempts
           SET status = 'failed', fail_type = ?, error_code = 'msg_send_fail',
-              error_message = 'WeChat reported delivery failure', updated_at = ?
+              error_message = ?, updated_at = ?
           WHERE attempt_key = ?
         `)
-        .run(Number(failType || 0), now, current.attempt_key);
+        .run(
+          Number(failType || 0),
+          `WeChat reported delivery failure (fail_type=${Number(failType || 0)})`,
+          now,
+          current.attempt_key,
+        );
       this.#activateFallback(current, now);
       return true;
     });

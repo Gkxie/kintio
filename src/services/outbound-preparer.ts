@@ -83,7 +83,7 @@ function fallbackText(message: SendIntent): string {
     case 'image':
       return '暂时无法发送该图片，请重新发送后再试。';
     case 'text':
-      return '';
+      return truncateUtf8(message.content, 384, '…');
   }
 }
 
@@ -248,7 +248,10 @@ export class OutboundPreparer {
           sentType: message.type,
           payload: exactPayload(message, mediaId),
         });
-        if (message.type !== 'text') fallbackIndexes.push(index);
+        if (
+          message.type !== 'text' ||
+          Buffer.byteLength(message.content, 'utf8') > 384
+        ) fallbackIndexes.push(index);
       } catch (error) {
         const content = truncateUtf8(fallbackText(message), 2048);
         if (!content) throw error;

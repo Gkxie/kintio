@@ -155,6 +155,7 @@ test('[R03] msg_send_fail marks accepted send failed and activates its blocked f
   const attempts = inspectAttempts(harness.store.database, sourceKey);
   assert.deepEqual(attempts.map((item) => item.status), ['failed', 'pending']);
   assert.equal(attempts[0]?.failType, 13);
+  assert.match(attempts[0]?.errorMessage || '', /fail_type=13/u);
   assert.equal(harness.kicks(), 1);
   assert.equal(finalized.attempts.length, 2);
 });

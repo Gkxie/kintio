@@ -146,6 +146,24 @@ test('reserves blocked fallbacks within five slots and rejects a sixth primary',
   );
 });
 
+test('[O08] long text reserves a compact async-delivery fallback', async (t) => {
+  const { preparer } = await createHarness(t);
+  const content = '北京餐厅特色推荐。'.repeat(30);
+  const prepared = await preparer.prepare({
+    messageKey: 'long-text-fallback',
+    candidates: [{ type: 'text', content }],
+  });
+  assert.equal(prepared.attempts.length, 2);
+  assert.deepEqual(prepared.attempts[0]?.payload, {
+    msgtype: 'text', text: { content },
+  });
+  assert.equal(prepared.attempts[1]?.status, 'blocked');
+  assert.equal(prepared.attempts[1]?.fallbackForIndex, 0);
+  const fallback = prepared.attempts[1]?.payload.text as { content?: unknown };
+  assert.ok(Buffer.byteLength(String(fallback.content), 'utf8') <= 384);
+  assert.match(String(fallback.content), /…$/u);
+});
+
 test('[I04] durable generated-image spool is consumed after a preparation crash', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'generated-spool-'));
   t.after(() => fs.rm(directory, { recursive: true, force: true }));
