@@ -1,9 +1,7 @@
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import readline from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 
-const require = createRequire(import.meta.url);
 const REQUEST_TIMEOUT_MS = 30_000;
 
 type JsonRecord = Record<string, unknown>;
@@ -189,13 +187,8 @@ export class CodexAppServer implements CodexBoundary {
   async #initialize(): Promise<void> {
     const configArguments = (this.#options.configOverrides || [])
       .flatMap((value) => ['--config', value]);
-    const command = this.#options.codexPathOverride || process.execPath;
-    const argumentsList = this.#options.codexPathOverride
-      ? ['app-server', '--stdio', ...configArguments]
-      : [
-          require.resolve('@openai/codex/bin/codex.js'),
-          'app-server', '--stdio', ...configArguments,
-        ];
+    const command = this.#options.codexPathOverride || 'codex';
+    const argumentsList = ['app-server', '--stdio', ...configArguments];
     const childEnvironment: NodeJS.ProcessEnv = this.#options.env
       ? { ...this.#options.env }
       : { ...process.env };

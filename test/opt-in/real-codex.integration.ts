@@ -76,7 +76,7 @@ async function createRealHarness(): Promise<RealHarness> {
   await fs.mkdir(generatedImageDirectory, { recursive: true, mode: 0o700 });
   const generatedBefore = new Set(await fs.readdir(generatedImageDirectory));
   const config = {
-    pathOverride: process.env.CODEX_PATH || '',
+    pathOverride: process.env.CODEX_PATH || 'codex',
     model: process.env.CODEX_MODEL || 'gpt-5.6-luna',
     reasoningEffort: reasoningEffort(process.env.CODEX_REASONING_EFFORT),
     sandboxMode: 'read-only' as const,

@@ -62,7 +62,7 @@ Codex 原生输入只接受：
 staging MCP 不拥有 CorpID、Secret、客户 ID、`open_kfid`、原始 `media_id`、数据库
 路径或微信 HTTP 客户端。它只校验工具字段与 `media:N` 语法；宿主在 outbox 事务前用
 当前会话目录再次验证媒体所有权。真实目标由宿主从 inbox 绑定，模型无法选择收件人。
-MCP 另运行在无网络的嵌套 bubblewrap namespace 中。
+MCP 是项目内可信的纯校验 Node 子进程，不包含微信凭据、数据库或 HTTP 客户端。
 
 Codex 直接复用当前运行用户已经登录的本机 Codex CLI，并使用项目级配置：
 
@@ -74,10 +74,9 @@ Codex 直接复用当前运行用户已经登录的本机 Codex CLI，并使用�
 - `codex-workspace/AGENTS.md` 与每轮提示禁止读取本机内容、访问私网或跨客户取数；
 - 不复制、不改写本机 Codex 凭据或用户级配置。
 
-这是按用户选择采用的提示词和工具暴露边界，不是 Codex 主进程的 OS 级文件隔离：
-本机登录态会使 app-server 使用同一个 `CODEX_HOME`，提示词不能提供和容器、独立用户或
-mount namespace 相同的强制保证。staging MCP 仍单独运行在无网络 bubblewrap namespace
-中，且不接收微信凭据、客户目标或数据库路径。
+这是按用户选择采用的提示词、能力开关和可信项目代码边界，不是 OS 级文件或网络隔离：
+本机登录态会使 app-server 使用同一个 `CODEX_HOME`；staging MCP 也直接由宿主 Codex CLI
+启动。两者都依赖项目固定 instructions 与可信实现，MCP 不接收微信凭据、客户目标或数据库路径。
 
 当进程以 root 运行时，`WECOM_ALLOWED_USER_IDS=*` 会拒绝启动。
 

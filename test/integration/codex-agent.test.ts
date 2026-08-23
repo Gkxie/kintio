@@ -523,3 +523,24 @@ test('performs at most one format retry', async (t) => {
   await assert.rejects(submission.completion, /valid final WeChat batch/u);
   assert.equal(boundary.runCalls.length, 2);
 });
+
+test('[R04][S02] transport-closed staging intent is revalidated without another model turn', async (t) => {
+  const boundary = new FakeBoundary([{
+    items: [{
+      id: 'closed-send', type: 'mcpToolCall', server: 'wechat_kf',
+      tool: 'send_text', status: 'failed', startedSequence: 1,
+      arguments: { content: '恢复后的客服回复' },
+      error: { message: 'tool call failed: Transport closed' },
+    }],
+  }]);
+  const { agent } = createAgent(t, boundary);
+  const submission = await agent.submit({
+    message: message('transport-closed'), contextText: '测试传输恢复',
+  });
+  assert.equal(submission.kind, 'started');
+  if (submission.kind !== 'started') return;
+  assert.deepEqual((await submission.completion).candidates, [{
+    type: 'text', content: '恢复后的客服回复',
+  }]);
+  assert.equal(boundary.runCalls.length, 1);
+});

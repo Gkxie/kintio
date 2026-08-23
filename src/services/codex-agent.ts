@@ -9,7 +9,10 @@ import type {
   ResolvedImage,
 } from '../types.ts';
 import type { CodexConfig } from '../config.ts';
-import { SEND_TOOL_NAMES } from '../domain/send-contract.ts';
+import {
+  SEND_TOOL_NAMES,
+  normalizeSendIntent,
+} from '../domain/send-contract.ts';
 import type { SqliteStore } from '../state/sqlite-store.ts';
 import {
   MAX_WECHAT_IMAGE_BYTES,
@@ -138,16 +141,10 @@ type ServerConfig = Pick<
 > & Partial<Pick<
   CodexConfig,
   | 'workingDirectory'
-  | 'imageTempDirectory'
-  | 'generatedImageDirectory'
-  | 'bubblewrapPath'
 >>;
 type ResolvedServerConfig = ServerConfig & Required<Pick<
   CodexConfig,
   | 'workingDirectory'
-  | 'imageTempDirectory'
-  | 'generatedImageDirectory'
-  | 'bubblewrapPath'
 >>;
 type AgentStore = Pick<
   SqliteStore,
@@ -208,18 +205,12 @@ function resolveServerConfig(config: ServerConfig): ResolvedServerConfig {
     ...config,
     workingDirectory:
       config.workingDirectory || path.join(PROJECT_ROOT, 'codex-workspace'),
-    imageTempDirectory:
-      config.imageTempDirectory || path.join(PROJECT_ROOT, 'data/codex-input'),
-    generatedImageDirectory:
-      config.generatedImageDirectory ||
-      path.join(PROJECT_ROOT, 'codex-workspace/generated_images'),
-    bubblewrapPath: config.bubblewrapPath || '/usr/bin/bwrap',
   };
 }
 
 function sanitizedEnvironment(config: ResolvedServerConfig): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
-    PATH: `${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
+    PATH: process.env.PATH || `${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
   };
   for (const name of [
     'HOME', 'CODEX_HOME', 'XDG_CONFIG_HOME', 'USER', 'LOGNAME',
@@ -234,28 +225,6 @@ function sanitizedEnvironment(config: ResolvedServerConfig): NodeJS.ProcessEnv {
   return environment;
 }
 
-function directoryMounts(targets: readonly string[]): string[] {
-  const directories = new Set<string>();
-  for (const target of targets) {
-    let current = path.dirname(target);
-    while (current !== '/' && current !== path.dirname(current)) {
-      if (!['/usr', '/bin', '/lib', '/lib64', '/etc'].includes(current)) {
-        directories.add(current);
-      }
-      current = path.dirname(current);
-    }
-  }
-  return [...directories]
-    .sort((left, right) => left.length - right.length)
-    .flatMap((directory) => ['--dir', directory]);
-}
-
-function readOnlyBinds(paths: readonly string[]): string[] {
-  return paths.flatMap((source) =>
-    existsSync(source) ? ['--ro-bind', source, source] : []
-  );
-}
-
 export function createCodexAppServer(
   config: ServerConfig,
   options: {
@@ -267,37 +236,10 @@ export function createCodexAppServer(
   const stagingArguments = existsSync(BUILT_STAGING_SERVER)
     ? [BUILT_STAGING_SERVER]
     : ['--experimental-strip-types', SOURCE_STAGING_SERVER];
-  const nodeRoot = path.dirname(path.dirname(process.execPath));
-  const stagingSandboxArguments = [
-    '--die-with-parent',
-    '--new-session',
-    '--unshare-all',
-    '--as-pid-1',
-    '--cap-drop',
-    'ALL',
-    ...directoryMounts([PROJECT_ROOT, nodeRoot, resolvedConfig.workingDirectory]),
-    ...readOnlyBinds(['/usr', '/bin', '/lib', '/lib64']),
-    '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
-    '--ro-bind', nodeRoot, nodeRoot,
-    ...readOnlyBinds([
-      path.join(PROJECT_ROOT, 'node_modules'),
-      path.join(PROJECT_ROOT, 'dist'),
-      path.join(PROJECT_ROOT, 'src'),
-      resolvedConfig.workingDirectory,
-    ]),
-    '--clearenv',
-    '--setenv',
-    'PATH',
-    `${path.dirname(process.execPath)}:/usr/bin:/bin`,
-    '--chdir',
-    resolvedConfig.workingDirectory,
-    process.execPath,
-    ...stagingArguments,
-  ];
   const overrides = [
     'mcp_servers={}',
-    `mcp_servers.wechat_kf.command=${JSON.stringify(resolvedConfig.bubblewrapPath)}`,
-    `mcp_servers.wechat_kf.args=${JSON.stringify(stagingSandboxArguments)}`,
+    `mcp_servers.wechat_kf.command=${JSON.stringify(process.execPath)}`,
+    `mcp_servers.wechat_kf.args=${JSON.stringify(stagingArguments)}`,
     `mcp_servers.wechat_kf.cwd=${JSON.stringify(resolvedConfig.workingDirectory)}`,
     'mcp_servers.wechat_kf.env_vars=[]',
     `mcp_servers.wechat_kf.enabled_tools=${JSON.stringify(SEND_TOOL_NAMES)}`,
@@ -384,6 +326,31 @@ export function stagedCandidates(result: CodexTurnResult): StagedCandidate[] {
     return candidate && typeof candidate.type === 'string'
       ? [{ ...candidate, type: candidate.type }]
       : [];
+  });
+}
+
+function recoverTransportClosedCandidates(
+  result: CodexTurnResult,
+): StagedCandidate[] {
+  const boundary = result.lastSteerSequence || 0;
+  return result.items.flatMap((item) => {
+    const error = asRecord(item.error);
+    if (
+      item.type !== 'mcpToolCall' ||
+      item.server !== 'wechat_kf' ||
+      item.status !== 'failed' ||
+      typeof item.tool !== 'string' ||
+      !SEND_TOOL_NAMES.includes(item.tool as (typeof SEND_TOOL_NAMES)[number]) ||
+      (boundary && (item.startedSequence || 0) <= boundary) ||
+      !/transport closed|connection closed/iu.test(String(error?.message || ''))
+    ) return [];
+    try {
+      return [normalizeSendIntent(item.tool, asRecord(item.arguments), {
+        allowUnboundMediaReference: true,
+      })];
+    } catch {
+      return [];
+    }
   });
 }
 
@@ -550,6 +517,9 @@ export class CodexAgent {
     const generated = await generatedCandidate(result, this.#config.generatedImageDirectory);
     if (generated) return [generated];
     let candidates = stagedCandidates(result);
+    if (candidates.length === 0) {
+      candidates = recoverTransportClosedCandidates(result);
+    }
     if (state.imageRequested && state.hasImageInput && !state.imageRetryUsed) {
       state.imageRetryUsed = true;
       const retry = await thread.startRun(

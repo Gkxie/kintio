@@ -74,6 +74,7 @@ test('allowed users and safe Codex defaults are parsed', () => {
   assert.equal(config.codex.enabled, true);
   assert.equal(config.wecom.expectedReceiveId, 'ww-test');
   assert.equal(config.codex.webSearchMode, 'live');
+  assert.equal(config.codex.pathOverride, 'codex');
   assert.equal(config.codex.model, 'gpt-5.6-luna');
   assert.equal(config.codex.reasoningEffort, 'none');
 });

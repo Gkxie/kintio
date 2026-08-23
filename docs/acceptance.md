@@ -70,7 +70,7 @@
 |---|---|---|---|
 | S01 | 连发消息曾逐条排队 | active turn 的后续消息使用 `turn/steer`，只形成一轮最终交付 | covered |
 | S02 | steering 前工具曾真实发送 | MCP 永远无副作用；只在 `turn/completed` 后由宿主提交 | partial |
-| S03 | `deferSends` 曾漏传 | 删除该安全开关；staging MCP 无凭据、无网络、无 DB，结构上不可能真发 | missing |
+| S03 | `deferSends` 曾漏传 | 删除该安全开关；staging MCP 无凭据、无 DB/HTTP 客户端，只返回纯校验候选，不能真实发送 | missing |
 | S04 | steering 边界曾取错 | 以匹配 client ID 的最后 `UserMessage` 完成事件为边界 | covered |
 | S05 | 多次混合 steering | 2、3、5、10 条 text/image/link 连发后，只提交最后边界后的完整批次 | missing |
 | S06 | 淘汰草稿消耗额度 | steering 前 staged 调用不消耗最终批次的五条额度 | missing |
@@ -137,8 +137,8 @@
 
 自动完成门槛不包含 `manual` 项。重构前生产 JS baseline 为 6,358 行。用户追加 strict
 TypeScript 后，源文件会包含不会进入运行时的类型声明，因此可比的 5,100 行目标改为普通
-`tsc` 未压缩产物 `dist/index.js + dist/src/**/*.js`，原 5,100 行目标在最终安全 review 后为
-bubblewrap 的 MCP 独立禁网边界计入显式预算，最终上限为 5,200 行；
+`tsc` 未压缩产物 `dist/index.js + dist/src/**/*.js`。最终安全、恢复与协议审查后的上限为
+5,200 行；
 `index.ts + src/**/*.ts` 另行报告，不设
 鼓励删类型的物理行门槛。两者都必须通过极简性 review，禁止压缩排版、降低类型质量、移动
 类型到统计目录外或合并无关职责凑行数。

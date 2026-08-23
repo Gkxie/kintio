@@ -51,7 +51,6 @@ export interface CodexConfig {
   readonly imageTempDirectory: string;
   readonly workingDirectory: string;
   readonly generatedImageDirectory: string;
-  readonly bubblewrapPath: string;
 }
 
 export interface AppConfig {
@@ -270,7 +269,7 @@ export function createConfig(
       enabled: codexEnabled,
       apiKey: environment.CODEX_API_KEY || '',
       baseUrl: environment.CODEX_BASE_URL || '',
-      pathOverride: environment.CODEX_PATH || '',
+      pathOverride: environment.CODEX_PATH || 'codex',
       model: environment.CODEX_MODEL || '',
       reasoningEffort: parseOptionalEnum<ReasoningEffort>(
         environment.CODEX_REASONING_EFFORT,
@@ -296,9 +295,6 @@ export function createConfig(
       generatedImageDirectory: path.resolve(
         environment.CODEX_GENERATED_IMAGE_DIR ||
           path.join(projectRoot, 'codex-workspace/generated_images'),
-      ),
-      bubblewrapPath: path.resolve(
-        environment.CODEX_BWRAP_PATH || '/usr/bin/bwrap',
       ),
     }),
   });

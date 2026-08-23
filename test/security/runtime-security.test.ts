@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
@@ -50,7 +49,7 @@ class FakeCodexProcess extends EventEmitter {
   }
 }
 
-test('[S03][SEC01][SEC02][SEC05] local Codex login is reused while staging MCP has no network or secrets', async (t) => {
+test('[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive no business secrets', async (t) => {
   const environmentCanaries = {
     WECOM_CORP_ID: 'corp-canary',
     WECOM_KF_SECRET: 'secret-canary',
@@ -119,7 +118,6 @@ test('[S03][SEC01][SEC02][SEC05] local Codex login is reused while staging MCP h
   );
   assert.equal(captured.argumentsList.includes('--strict-config'), false);
   assert.ok(serializedArguments.includes('mcp_servers.wechat_kf.command'));
-  assert.ok(serializedArguments.includes('/usr/bin/bwrap'));
   for (const forbiddenName of Object.keys(environmentCanaries)) {
     assert.equal(forbiddenName in captured.environment, false, forbiddenName);
   }
@@ -136,40 +134,15 @@ test('[S03][SEC01][SEC02][SEC05] local Codex login is reused while staging MCP h
   const nested = JSON.parse(
     mcpArgsOverride.slice(mcpArgsOverride.indexOf('=') + 1),
   ) as string[];
-  const nestedNode = nested.lastIndexOf(process.execPath);
-  assert.ok(nestedNode > 0);
-  assert.ok(nested.includes('--unshare-all'));
-  assert.ok(nested.includes('--as-pid-1'));
-  const networkProbe = spawnSync('/usr/bin/bwrap', [
-    ...nested.slice(0, nestedNode),
+  assert.ok(nested.some((argument) => /staging-server\.(?:js|ts)$/u.test(argument)));
+  const commandOverride = captured.argumentsList.find((argument) =>
+    argument.startsWith('mcp_servers.wechat_kf.command='),
+  );
+  assert.ok(commandOverride);
+  assert.equal(
+    JSON.parse(commandOverride.slice(commandOverride.indexOf('=') + 1)),
     process.execPath,
-    '-e',
-    "fetch('https://example.com',{signal:AbortSignal.timeout(2000)}).then(()=>process.exit(9)).catch(()=>console.log('blocked'))",
-  ], {
-    env: { PATH: captured.environment.PATH },
-    encoding: 'utf8',
-    timeout: 5_000,
-  });
-  assert.equal(networkProbe.status, 0, networkProbe.stderr);
-  assert.match(networkProbe.stdout, /blocked/u);
-
-  const processCanary = 'PROC_ENV_SECRET_CANARY';
-  const processProbe = spawnSync('/usr/bin/bwrap', [
-    ...nested.slice(0, nestedNode),
-    process.execPath,
-    '-e',
-    [
-      "const fs=require('fs')",
-      "const seen=fs.readdirSync('/proc').filter(x=>/^\\d+$/.test(x)).some(x=>{try{return fs.readFileSync('/proc/'+x+'/environ').includes('PROC_ENV_SECRET_CANARY')}catch{return false}})",
-      'console.log(String(seen))',
-    ].join(';'),
-  ], {
-    env: { PATH: captured.environment.PATH, WECOM_KF_SECRET: processCanary },
-    encoding: 'utf8',
-    timeout: 5_000,
-  });
-  assert.equal(processProbe.status, 0, processProbe.stderr);
-  assert.equal(processProbe.stdout.trim(), 'false');
+  );
 });
 
 test('[SEC03] root startup rejects a wildcard customer allowlist before creating runtime state', (t) => {

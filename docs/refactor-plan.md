@@ -5,7 +5,7 @@
 - 精简生产路径，删除已不参与运行的兼容分支。
 - 用单一 SQLite 取代 JSON 状态与独立发送 journal。
 - 把同步、会话处理、Codex 和真实发送的边界变得可事务化、可恢复。
-- staging MCP 在结构上不可能访问微信或其他客户。
+- staging MCP 不接收微信凭据、客户目标、数据库或 HTTP 客户端，只产生纯校验候选。
 - 保留现有授权、人工接管、turn/steer、多模态、原生发送和图片生成能力。
 
 ## 明确不做
@@ -50,7 +50,7 @@
 | 842 行 message processor | `wecom-sync` + `conversation-processor` |
 | 962 行 responder 的两套模式 | 只支持生产 app-server/MCP 路径的 `codex-agent` |
 | adapter + domain message | 一个 `wecom-message`，负责解析与 Codex 投影 |
-| MCP 内真实 WecomSendTools | 无凭据、无网络的 staging MCP |
+| MCP 内真实 WecomSendTools | 无凭据、无发送客户端的 staging MCP |
 | 宿主散落的发送分支 | 一个 `delivery-service` |
 
 这里的拆分只对应真实运行边界：同步事务、会话/turn、外部发送。不会为单个函数再包类。
@@ -239,8 +239,8 @@ app-server thread history API：已存在的 client input 不重复注入；已�
 - Codex command network 保持 false，托管 web search 可独立为 live。
 - shell、view_image 和非白名单 MCP 禁用。
 - staging MCP 不注入网络客户端、Secret、客户 ID、原始 media_id、文件路径或 DB；其代码不包含
-  HTTP/微信客户端。若运行环境不能提供 OS 级禁网，文档不宣称进程绝对无网络，只保证它没有
-  真实发送所需的凭据、目标和实现。
+  HTTP/微信客户端。项目按可信内部代码运行，不宣称进程具有 OS 级文件或网络隔离，只保证它
+  没有真实发送所需的凭据、目标和实现。
 - MCP 只看到 `media:N → kind`；宿主 commit 时再从 SQLite 解析真实 media_id。
 - 宿主不抓取客户给出的任意 URL；允许的公网解析需覆盖 DNS 私网回落、IPv4-mapped IPv6、重定向和大小限制。
 

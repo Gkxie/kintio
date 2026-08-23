@@ -643,7 +643,14 @@
           "classification": "deterministic",
           "suite": "security",
           "file": "test/security/runtime-security.test.ts",
-          "test": "[S03][SEC01][SEC02][SEC05] local Codex login is reused while staging MCP has no network or secrets"
+          "test": "[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive no business secrets"
+        },
+        {
+          "status": "verified",
+          "classification": "deterministic",
+          "suite": "integration",
+          "file": "test/integration/staging-process.test.ts",
+          "test": "[S03][R04][SEC05] staging MCP stays connected across three tool calls"
         }
       ]
     },
@@ -967,6 +974,13 @@
           "suite": "recovery",
           "file": "test/recovery/pipeline-crash.test.ts",
           "test": "[R04] SIGKILL across turn outbox and delivery boundaries preserves Codex at-least-once and WeChat at-most-once semantics"
+        },
+        {
+          "status": "verified",
+          "classification": "deterministic",
+          "suite": "integration",
+          "file": "test/integration/staging-process.test.ts",
+          "test": "[S03][R04][SEC05] staging MCP stays connected across three tool calls"
         }
       ]
     },
@@ -1091,7 +1105,7 @@
           "classification": "deterministic",
           "suite": "security",
           "file": "test/security/runtime-security.test.ts",
-          "test": "[S03][SEC01][SEC02][SEC05] local Codex login is reused while staging MCP has no network or secrets",
+          "test": "[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive no business secrets",
           "status": "verified"
         },
         {
@@ -1112,7 +1126,7 @@
           "classification": "deterministic",
           "suite": "security",
           "file": "test/security/runtime-security.test.ts",
-          "test": "[S03][SEC01][SEC02][SEC05] local Codex login is reused while staging MCP has no network or secrets"
+          "test": "[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive no business secrets"
         },
         {
           "status": "verified",
@@ -1186,7 +1200,7 @@
           "classification": "deterministic",
           "suite": "security",
           "file": "test/security/runtime-security.test.ts",
-          "test": "[S03][SEC01][SEC02][SEC05] local Codex login is reused while staging MCP has no network or secrets"
+          "test": "[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive no business secrets"
         },
         {
           "status": "verified",
@@ -1201,6 +1215,13 @@
           "suite": "unit",
           "file": "test/unit/staging-server.test.ts",
           "test": "[O06][SEC05] image staging validates syntax and host enforces ownership"
+        },
+        {
+          "status": "verified",
+          "classification": "deterministic",
+          "suite": "integration",
+          "file": "test/integration/staging-process.test.ts",
+          "test": "[S03][R04][SEC05] staging MCP stays connected across three tool calls"
         }
       ]
     },

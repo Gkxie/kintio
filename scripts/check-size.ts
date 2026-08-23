@@ -1,9 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-// The hardened bubblewrap mount/network boundary is runtime code, not generated
-// type overhead. Keep the limit close to the original 5,100 target while
-// allowing that security boundary to remain explicit and reviewable.
+// Keep the limit close to the original 5,100 target while leaving the reviewed
+// recovery, security, and protocol invariants explicit.
 const MAX_RUNTIME_LINES = 5_200;
 
 function filesBelow(directory: string, extension: string): string[] {
