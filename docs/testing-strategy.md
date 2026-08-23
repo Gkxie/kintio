@@ -14,25 +14,22 @@
 ```text
 test/
 ├── support/
-│   ├── wecom-message.js
-│   ├── temp-sqlite.js
-│   ├── fake-wecom-server.js
-│   ├── fake-codex-process.js
-│   └── barriers.js
-├── fixtures/
-│   ├── wecom/
-│   ├── codex/
-│   └── migration/
+│   ├── wecom-message.ts
+│   ├── temp-sqlite.ts
+│   ├── fake-wecom-server.ts
+│   ├── child-process.ts
+│   └── barriers.ts
 ├── unit/
 ├── integration/
 ├── recovery/
 ├── security/
 └── opt-in/
-    ├── real-codex.integration.js
-    └── live-wecom.integration.js
+    ├── real-codex.integration.ts
+    └── live-wecom.integration.ts
 ```
 
-`opt-in` 文件不使用 `.test.js` 后缀，避免被默认 `node --test` 发现。
+`opt-in` 文件使用 `.integration.ts` 后缀，不使用默认测试 `.test.ts` 后缀。唯一豁免条件是
+文件实际位于 `test/opt-in`。
 
 ## 分层
 
@@ -95,21 +92,21 @@ test/
 - root wildcard 拒绝。
 - 跨客户 thread/media 隔离。
 - Secret canary 不进入 prompt、日志或工具环境。
-- shell、本地文件、私网网络禁止；托管 web search 仍可用。
+- shell/额外工具被关闭；项目指令要求模型拒绝本机文件和私网访问，托管 web search 仍可用。
 - generated path 必须位于配置的受信目录，不能只按路径片段删除。
 - 媒体下载流式限制大小。
 - SQLite 参数化与恶意 ID。
 
 ### Real Codex / Fake WeChat
 
-手动或 nightly：
+在已登录 Codex CLI 的本机或受控自托管 runner 手动运行：
 
 - 使用真实 Codex app-server 和 staging MCP。
 - 微信 API 指向本地 fake server。
 - 验证原生工具选择、steering、五条额度和目标绑定。
 - 不断言完整文案。
 - 至少三个互不相关的图片编辑意图验证 delta/preservation 语义；这是模型 eval，不冒充纯单元测试。
-- hosted web search 可用且私网/本机不可达的行为探针只在这里运行；默认安全测试只验证启动配置。
+- hosted web search 可用且模型拒绝私网/本机请求的行为探针只在这里运行；默认安全测试验证启动配置和提示词。该结果是行为约束证据，不等同于 OS 级不可达证明。
 
 ### Upstream-only Mock / Real Downstream
 
@@ -136,7 +133,9 @@ mock sync_msg
   和客户端显示不由 mock-upstream 测试证明，放入独立部署 smoke/人工记录。
 - 禁止从生产 DB 自动选择客户。
 - Secret 只从受保护环境注入，不出现在命令行、测试名称或日志。
-- 运行结束打印实际 `send_msg` 次数和 `N/5`；客户端显示仍由失败事件观察窗或人工截图确认。
+- 运行结束打印实际 `send_msg` 次数和 `N/5`。该测试只把 `accepted` 判定为“微信 API
+  已接受”，不宣称客户端已送达，也不在 mock 上游的进程内伪造异步失败观察窗；后续
+  `msg_send_fail` 由正常运行服务记录，客户端显示由人工截图确认。
 
 ## SQLite 契约矩阵
 
@@ -176,14 +175,14 @@ mock sync_msg
 ```json
 {
   "test": "npm run test:deterministic",
-  "test:unit": "node --test test/unit/*.test.js",
-  "test:integration": "node --test test/integration/*.test.js",
-  "test:recovery": "node --test --test-concurrency=1 test/recovery/*.test.js",
-  "test:security": "node --test test/security/*.test.js",
-  "test:deterministic": "node scripts/check-test-markers.js && node --test test/unit/*.test.js test/integration/*.test.js test/recovery/*.test.js test/security/*.test.js",
-  "test:coverage": "node --test --experimental-test-coverage --test-coverage-lines=90 --test-coverage-branches=80 --test-coverage-functions=90 test/unit/*.test.js test/integration/*.test.js test/recovery/*.test.js test/security/*.test.js",
-  "test:agent": "node --test --test-concurrency=1 test/opt-in/real-codex.integration.js",
-  "test:live": "node --test --test-concurrency=1 test/opt-in/live-wecom.integration.js"
+  "build": "npm run clean && tsc -p tsconfig.json",
+  "typecheck": "tsc -p tsconfig.test.json",
+  "test:unit": "node --import tsx --test test/unit/*.test.ts",
+  "test:integration": "node --import tsx --test test/integration/*.test.ts",
+  "test:recovery": "node --import tsx --test --test-concurrency=1 test/recovery/*.test.ts",
+  "test:security": "node --import tsx --test test/security/*.test.ts",
+  "test:agent": "node --import tsx --test --test-concurrency=1 test/opt-in/real-codex.integration.ts",
+  "test:live": "node --import tsx --test --test-concurrency=1 test/opt-in/live-wecom.integration.ts"
 }
 ```
 
@@ -200,7 +199,8 @@ PR：
 7. 确认 opt-in/live 未被默认发现
 8. 不允许 flaky retry
 
-Nightly 运行 real Codex＋fake WeChat。真实微信只在受保护的手动环境运行。
+仓库托管 CI 不持有用户 Codex 登录态，因此不伪装成 nightly model eval。需要定时评估时，
+由有独立登录态的自托管 runner 执行 `npm run test:release`。真实微信只在受保护的手动环境运行。
 
 ## 验收追踪
 
@@ -208,6 +208,7 @@ Nightly 运行 real Codex＋fake WeChat。真实微信只在受保护的手动�
 测试文件、测试名称和运行命令。Phase 5 生成 `ID → test → command → result` 报告；manual 项
 单独记录运维证据，不伪装成自动测试。图片像素质量、来源可信度和 Agent 是否遵循策略属于
 real Codex eval 或人工验收，不能标成 deterministic covered。
+`scripts/check-test-markers.ts` 同时校验文档 ID、分类、verified 文件及真实测试标题。
 
 Agent eval 固定场景、重复次数和零容忍安全断言，不以随机自然语言相似度打分；视觉观感与
 客户端实际显示只记录人工证据，不阻塞 deterministic CI，但属于 release 前验收。

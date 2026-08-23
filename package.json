@@ -5,12 +5,32 @@
   "type": "module",
   "description": "WeCom customer-service callback built with Hono",
   "scripts": {
-    "dev": "node --watch index.js",
-    "start": "node index.js",
-    "test": "node --test"
+    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
+    "build": "npm run clean && tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "dev": "tsx watch index.ts",
+    "start": "npm run build && node dist/index.js",
+    "pause": "tsx scripts/runtime-control.ts pause",
+    "resume": "tsx scripts/runtime-control.ts resume",
+    "status": "tsx scripts/runtime-control.ts status",
+    "migrate:legacy": "tsx scripts/migrate-legacy.ts",
+    "auth": "tsx scripts/authorization.ts",
+    "test": "npm run test:deterministic",
+    "test:markers": "tsx scripts/check-test-markers.ts",
+    "test:acceptance": "REQUIRE_DETERMINISTIC_ACCEPTANCE=1 tsx scripts/check-test-markers.ts",
+    "test:release": "REQUIRE_VERIFIED_ACCEPTANCE=1 tsx scripts/check-test-markers.ts && npm run test:coverage && RUN_REAL_CODEX=1 npm run test:agent",
+    "test:size": "npm run build && tsx scripts/check-size.ts",
+    "test:unit": "node --import tsx --test test/unit/*.test.ts",
+    "test:integration": "node --import tsx --test test/integration/*.test.ts",
+    "test:recovery": "node --import tsx --test --test-concurrency=1 test/recovery/*.test.ts",
+    "test:security": "node --import tsx --test test/security/*.test.ts",
+    "test:deterministic": "npm run typecheck && npm run test:acceptance && npm run test:size && node --import tsx --test --test-concurrency=1 test/unit/*.test.ts test/integration/*.test.ts test/recovery/*.test.ts test/security/*.test.ts",
+    "test:coverage": "npm run typecheck && npm run test:acceptance && npm run test:size && node --import tsx --test --test-concurrency=1 --experimental-test-coverage --test-coverage-exclude='dist/**' --test-coverage-exclude='test/**' --test-coverage-lines=90 --test-coverage-branches=80 --test-coverage-functions=90 test/unit/*.test.ts test/integration/*.test.ts test/recovery/*.test.ts test/security/*.test.ts",
+    "test:agent": "node --import tsx --test --test-concurrency=1 test/opt-in/real-codex.integration.ts",
+    "test:live": "node --import tsx --test --test-concurrency=1 test/opt-in/live-wecom.integration.ts"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=22.13.0"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.12",
@@ -18,5 +38,10 @@
     "@openai/codex": "^0.149.0",
     "hono": "^4.12.8",
     "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "22.13",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
   }
 }
