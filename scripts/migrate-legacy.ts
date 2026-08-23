@@ -11,8 +11,8 @@ import {
   type LegacyStateSnapshot,
   stableClientMessageId,
   stableMessageKey,
-} from '../src/state/sqlite-store.js';
-import type { Logger } from '../src/types.js';
+} from '../src/state/sqlite-store.ts';
+import type { Logger } from '../src/types.ts';
 
 interface LegacyJournalRow {
   attempt_key: string;
@@ -796,7 +796,7 @@ export function migrateLegacyState({
 }
 
 import { fileURLToPath } from 'node:url';
-import { loadConfig } from '../src/config.js';
+import { loadConfig } from '../src/config.ts';
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const config = loadConfig();

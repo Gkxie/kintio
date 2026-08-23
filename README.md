@@ -106,7 +106,7 @@ msgid 独立保存。
 SQLite，并把旧文件改名为带时间戳的备份：
 
 ```bash
-npm run migrate:legacy
+pnpm run migrate:legacy
 ```
 
 若旧状态仍存在而新 DB 不存在，主服务会 fail closed 并提示先迁移，不会悄悄创建空库。
@@ -131,29 +131,31 @@ CODEX_REASONING_EFFORT=none
 
 ## 启动与运维
 
-要求 Node.js `>=22.13.0`，项目使用当前最新版 TypeScript（lockfile 当前锁定
-TypeScript 7）。
+要求 Node.js `>=22.13.0`，包管理器固定为 pnpm 10.34.5，项目使用当前最新版
+TypeScript（lockfile 当前锁定 TypeScript 7）。生产代码只由 `tsc` 编译；测试、开发和
+运维脚本使用 Node 原生 `--experimental-strip-types`，不依赖 `tsx` 或 esbuild。
 
 ```bash
-npm ci
-npm start
+corepack enable pnpm
+pnpm install --frozen-lockfile
+pnpm start
 ```
 
 先确保启动服务的同一系统用户执行 `codex login status` 能看到有效登录态。项目不会复制
-或改写该登录态。`npm start` 会先执行 strict TypeScript 构建，再运行 `dist/index.js`；本地开发可使用
-`npm run dev`。暂停状态进入 SQLite：
+或改写该登录态。`pnpm start` 会先执行 strict TypeScript 构建，再运行 `dist/index.js`；本地开发可使用
+`pnpm run dev`。暂停状态进入 SQLite：
 
 ```bash
-npm run pause
-npm run status
-npm run resume
+pnpm run pause
+pnpm run status
+pnpm run resume
 ```
 
 动态授权可由运维显式查询或全局撤销：
 
 ```bash
-npm run auth -- status wm_external_userid
-npm run auth -- revoke wm_external_userid
+pnpm run auth -- status wm_external_userid
+pnpm run auth -- revoke wm_external_userid
 ```
 
 SIGTERM/SIGINT 会先关闭 8888 listener，再限时等待同步、Codex 和投递任务。
@@ -161,22 +163,22 @@ SIGTERM/SIGINT 会先关闭 8888 listener，再限时等待同步、Codex 和投
 ## 测试
 
 ```bash
-npm test
-npm run test:coverage
+pnpm test
+pnpm run test:coverage
 ```
 
 默认测试使用真实临时 SQLite 和 fake 外部边界，必须 0 fail / 0 skip。真实 Codex 与
 真实微信测试不参与默认发现：
 
 ```bash
-RUN_REAL_CODEX=1 npm run test:agent
+RUN_REAL_CODEX=1 pnpm run test:agent
 
 LIVE_WECOM_OPEN_KFID=... \
 LIVE_WECOM_EXTERNAL_USER_ID=... \
 LIVE_WECOM_ALLOWLIST=... \
 LIVE_SCENARIO=text \
 LIVE_WECOM_ACK=SEND_REAL_MESSAGE \
-npm run test:live
+pnpm run test:live
 ```
 
 live 测试只 mock 上游输入，目标必须显式提供并同时存在于独立 allowlist。自动结果只证明

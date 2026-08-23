@@ -10,7 +10,7 @@ import {
   cleanupStagedImageOrphans,
   detectImageFormat,
   withStagedImages,
-} from '../../src/services/image-stager.js';
+} from '../../src/services/image-stager.ts';
 
 test('image stager detects formats by magic bytes instead of headers', () => {
   assert.deepEqual(

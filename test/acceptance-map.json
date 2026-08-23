@@ -9,12 +9,12 @@
     "manual": "Requires protected live delivery, visual judgment, or deployment evidence and is not reported as deterministic coverage."
   },
   "suites": {
-    "unit": "npm run test:unit",
-    "integration": "npm run test:integration",
-    "recovery": "npm run test:recovery",
-    "security": "npm run test:security",
-    "agent-eval": "npm run test:agent",
-    "live": "npm run test:live",
+    "unit": "pnpm run test:unit",
+    "integration": "pnpm run test:integration",
+    "recovery": "pnpm run test:recovery",
+    "security": "pnpm run test:security",
+    "agent-eval": "pnpm run test:agent",
+    "live": "pnpm run test:live",
     "manual": null
   },
   "entries": [
@@ -1227,7 +1227,7 @@
           "classification": "deterministic",
           "suite": "recovery",
           "file": "test/recovery/service-lifecycle.test.ts",
-          "test": "[DEP01] npm start builds and runs dist/index.js without Baota artifacts"
+          "test": "[DEP01] pnpm start builds and runs dist/index.js without Baota artifacts"
         }
       ]
     },

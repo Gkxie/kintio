@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import test from 'node:test';
 
-import { createApp } from '../../src/app.js';
-import { createConfig } from '../../src/config.js';
-import type { MessageSync } from '../../src/routes/wecom.js';
+import { createApp } from '../../src/app.ts';
+import { createConfig } from '../../src/config.ts';
+import type { MessageSync } from '../../src/routes/wecom.ts';
 
 const testConfig = createConfig({
   WECOM_CALLBACK_TOKEN: 'TestToken123',

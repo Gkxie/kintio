@@ -5,9 +5,9 @@ import test from 'node:test';
 import {
   SqliteStore,
   stableMessageKey,
-} from '../../src/state/sqlite-store.js';
-import { createTempSqlite } from '../support/temp-sqlite.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/state/sqlite-store.ts';
+import { createTempSqlite } from '../support/temp-sqlite.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 const historySizes = [100, 10_000, 100_000] as const;
 type SqlInputValue = null | number | bigint | string | Uint8Array;

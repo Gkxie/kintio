@@ -1,16 +1,16 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 
-import { prepareSendBatch, type SendIntent } from '../domain/send-contract.js';
-import { truncateUtf8 } from '../lib/text.js';
-import type { MediaCatalogEntry, PreparedAttempt } from '../types.js';
+import { prepareSendBatch, type SendIntent } from '../domain/send-contract.ts';
+import { truncateUtf8 } from '../lib/text.ts';
+import type { MediaCatalogEntry, PreparedAttempt } from '../types.ts';
 import type {
   AgentCandidate,
   GeneratedCandidate,
   StagedCandidate,
-} from './codex-agent.js';
-import { MAX_WECHAT_IMAGE_BYTES, detectImageFormat } from './image-stager.js';
-import type { WecomMediaGateway } from './media-gateway.js';
+} from './codex-agent.ts';
+import { MAX_WECHAT_IMAGE_BYTES, detectImageFormat } from './image-stager.ts';
+import type { WecomMediaGateway } from './media-gateway.ts';
 
 type Payload = Readonly<Record<string, unknown>>;
 type SendCandidate = SendIntent;

@@ -5,17 +5,17 @@ import path from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
-import { normalizeWecomMessage } from '../../src/domain/wecom-message.js';
+import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
 import type {
   AgentCompletion,
   AgentInput,
   AgentSubmission,
   HistoryInspection,
-} from '../../src/services/codex-agent.js';
-import { ConversationProcessor } from '../../src/services/conversation-processor.js';
-import { DeliveryService } from '../../src/services/delivery-service.js';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.js';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.js';
+} from '../../src/services/codex-agent.ts';
+import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
+import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
+import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;

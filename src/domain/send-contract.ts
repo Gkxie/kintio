@@ -1,6 +1,6 @@
 import { isIP } from 'node:net';
 
-import { splitUtf8 } from '../lib/text.js';
+import { splitUtf8 } from '../lib/text.ts';
 
 export const SEND_TYPES = [
   'text',

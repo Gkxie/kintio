@@ -1,8 +1,8 @@
-import { normalizeWecomMessage } from '../domain/wecom-message.js';
-import type { Logger } from '../types.js';
-import type { SqliteStore } from '../state/sqlite-store.js';
-import type { ConversationProcessor } from './conversation-processor.js';
-import type { WecomApiClient } from './wecom-api.js';
+import { normalizeWecomMessage } from '../domain/wecom-message.ts';
+import type { Logger } from '../types.ts';
+import type { SqliteStore } from '../state/sqlite-store.ts';
+import type { ConversationProcessor } from './conversation-processor.ts';
+import type { WecomApiClient } from './wecom-api.ts';
 
 const MAX_SYNC_PAGES = 100;
 

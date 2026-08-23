@@ -4,9 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { normalizeWecomMessage } from '../../src/domain/wecom-message.js';
-import { SqliteStore } from '../../src/state/sqlite-store.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
+import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
+import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 test('[A05] revocation is global and resets authorization progress', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'auth-admin-'));

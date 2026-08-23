@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createConfig } from '../../src/config.js';
+import { createConfig } from '../../src/config.ts';
 
 const base: NodeJS.ProcessEnv = {
   WECOM_CALLBACK_TOKEN: 'CallbackToken123',

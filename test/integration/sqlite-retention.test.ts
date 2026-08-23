@@ -5,9 +5,9 @@ import path from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.js';
-import { inspectAttempt } from '../support/sqlite-inspect.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { inspectAttempt } from '../support/sqlite-inspect.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 async function createStore(t: TestContext) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlite-retention-'));

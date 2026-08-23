@@ -7,11 +7,11 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
-import { startTestChild } from '../support/child-process.js';
-import { createTempSqlite } from '../support/temp-sqlite.js';
+import { startTestChild } from '../support/child-process.ts';
+import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 const indexFile = fileURLToPath(new URL('../../index.ts', import.meta.url));
-const tsxExecArgv = ['--import', 'tsx'] as const;
+const typeStripExecArgv = ['--experimental-strip-types'] as const;
 const servicePort = 8888;
 
 async function waitForResponse(
@@ -56,7 +56,7 @@ test('[DEP01] outer service answers health and hello then SIGTERM releases port 
   });
   const lockFile = path.join(temporary.directory, 'wecom.lock');
   const child = startTestChild(t, indexFile, {
-    execArgv: tsxExecArgv,
+    execArgv: typeStripExecArgv,
     timeoutMs: 8_000,
     env: {
       PORT: String(servicePort),
@@ -92,10 +92,10 @@ test('[DEP01] outer service answers health and hello then SIGTERM releases port 
   assert.match(child.output().stdout, /Received SIGTERM; shutting down/u);
 });
 
-test('[DEP01] npm start builds and runs dist/index.js without Baota artifacts', async (t) => {
+test('[DEP01] pnpm start builds and runs dist/index.js without Baota artifacts', async (t) => {
   await assertPortReleased(servicePort);
   const temporary = await createTempSqlite(t, {
-    prefix: 'wechat-npm-start-',
+    prefix: 'wechat-pnpm-start-',
     filename: 'wecom.sqlite',
   });
   const environment: NodeJS.ProcessEnv = {
@@ -111,7 +111,7 @@ test('[DEP01] npm start builds and runs dist/index.js without Baota artifacts', 
     CODEX_ENABLED: 'false',
     SHUTDOWN_TIMEOUT_MS: '2000',
   };
-  const child = spawn('npm', ['start'], {
+  const child = spawn('pnpm', ['start'], {
     cwd: path.resolve('.'),
     env: environment,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -144,7 +144,7 @@ test('[DEP01] npm start builds and runs dist/index.js without Baota artifacts', 
     }
     return false;
   });
-  assert.ok(node, `npm start did not run dist/index.js:\n${output}`);
+  assert.ok(node, `pnpm start did not run dist/index.js:\n${output}`);
   process.kill(node.pid, 'SIGTERM');
   const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
     (resolve) => child.once('exit', (code, signal) => resolve({ code, signal })),

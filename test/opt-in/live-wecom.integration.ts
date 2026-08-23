@@ -4,16 +4,16 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createConfig } from '../../src/config.js';
-import { CodexAgent, createCodexAppServer } from '../../src/services/codex-agent.js';
-import { ConversationProcessor } from '../../src/services/conversation-processor.js';
-import { DeliveryService } from '../../src/services/delivery-service.js';
-import { WecomMediaGateway } from '../../src/services/media-gateway.js';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.js';
-import { WecomApiClient } from '../../src/services/wecom-api.js';
-import { WecomSync } from '../../src/services/wecom-sync.js';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
+import { createConfig } from '../../src/config.ts';
+import { CodexAgent, createCodexAppServer } from '../../src/services/codex-agent.ts';
+import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
+import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
+import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
+import { WecomApiClient } from '../../src/services/wecom-api.ts';
+import { WecomSync } from '../../src/services/wecom-sync.ts';
+import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 process.loadEnvFile?.('.env');
 const targetOpenKfId = process.env.LIVE_WECOM_OPEN_KFID || '';

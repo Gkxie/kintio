@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { WecomApiClient, WecomApiError } from '../../src/services/wecom-api.js';
+import { WecomApiClient, WecomApiError } from '../../src/services/wecom-api.ts';
 
 interface FetchCall {
   url: string;

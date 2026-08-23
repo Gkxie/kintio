@@ -8,7 +8,7 @@ import {
   type CodexInput,
   type CodexThreadOptions,
   type SpawnProcess,
-} from '../../src/services/codex-app-server.js';
+} from '../../src/services/codex-app-server.ts';
 
 type RpcMessage = Record<string, unknown>;
 

@@ -11,7 +11,7 @@ import {
   CodexAgent,
   createCodexAppServer,
   type AgentInput,
-} from '../../src/services/codex-agent.js';
+} from '../../src/services/codex-agent.ts';
 import type {
   CodexBoundary,
   CodexInput,
@@ -20,9 +20,9 @@ import type {
   CodexThreadOptions,
   CodexTurnResult,
   SpawnProcess,
-} from '../../src/services/codex-app-server.js';
-import { SqliteStore } from '../../src/state/sqlite-store.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/services/codex-app-server.ts';
+import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;

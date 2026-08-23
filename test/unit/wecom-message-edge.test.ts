@@ -6,7 +6,7 @@ import {
   isSupportedCustomerMessage,
   normalizeWecomMessage,
   renderMessageForCodex,
-} from '../../src/domain/wecom-message.js';
+} from '../../src/domain/wecom-message.ts';
 
 function customer(msgtype: string, section: unknown = undefined) {
   return normalizeWecomMessage({

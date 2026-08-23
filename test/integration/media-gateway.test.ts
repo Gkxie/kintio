@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { normalizeWecomMessage } from '../../src/domain/wecom-message.js';
-import { WecomMediaGateway } from '../../src/services/media-gateway.js';
+import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
+import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
 
 type MediaApi = ConstructorParameters<typeof WecomMediaGateway>[0]['apiClient'];
 type UploadInput = Parameters<MediaApi['uploadMedia']>[0];

@@ -5,10 +5,10 @@ import path from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
-import { normalizeWecomMessage } from '../../src/domain/wecom-message.js';
-import { ConversationProcessor } from '../../src/services/conversation-processor.js';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
+import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
+import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
+import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 async function createHarness(t: TestContext) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'conversation-events-'));

@@ -8,10 +8,10 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   SqliteStore,
   type InboundStatus,
-} from '../../src/state/sqlite-store.js';
-import type { ImageAttachment, NormalizedMessage } from '../../src/types.js';
-import { inspectAttempt } from '../support/sqlite-inspect.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/state/sqlite-store.ts';
+import type { ImageAttachment, NormalizedMessage } from '../../src/types.ts';
+import { inspectAttempt } from '../support/sqlite-inspect.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 function message(id: string, externalUserId = 'wm-one'): NormalizedMessage {
   return testWecomMessage({

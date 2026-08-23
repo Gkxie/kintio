@@ -10,15 +10,15 @@ import { fileURLToPath } from 'node:url';
 import {
   SqliteStore,
   stableMessageKey,
-} from '../../src/state/sqlite-store.js';
-import { startTestChild } from '../support/child-process.js';
-import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.js';
-import { createTempSqlite } from '../support/temp-sqlite.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/state/sqlite-store.ts';
+import { startTestChild } from '../support/child-process.ts';
+import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.ts';
+import { createTempSqlite } from '../support/temp-sqlite.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
 const workerMode = process.argv[2] || '';
-const tsxExecArgv = ['--import', 'tsx'] as const;
+const typeStripExecArgv = ['--experimental-strip-types'] as const;
 const openKfId = 'wk-authorization';
 const externalUserId = 'wm-authorization';
 const confirmationText = '暗号确认，请继续对话';
@@ -203,7 +203,7 @@ async function assertNoChildSend(
 ): Promise<void> {
   const child = startTestChild(t, currentFile, {
     args: ['--send-worker', databaseFile, 'none'],
-    execArgv: tsxExecArgv,
+    execArgv: typeStripExecArgv,
   });
   assert.deepEqual(await child.waitForMessage('no-send'), { type: 'no-send' });
   assert.deepEqual(await child.waitForExit(), { code: 0, signal: null });
@@ -231,7 +231,7 @@ if (workerMode === '--atomic-worker') {
           seeded.messageKey,
           barrierFile,
         ],
-        execArgv: tsxExecArgv,
+        execArgv: typeStripExecArgv,
       });
       await waitForFile(barrierFile);
       assert.deepEqual(await child.stop('SIGKILL'), {
@@ -264,7 +264,7 @@ if (workerMode === '--atomic-worker') {
       const seeded = await seedDatabase(subtest, 'pending');
       const authorizer = startTestChild(subtest, currentFile, {
         args: ['--authorization-worker', seeded.filePath, seeded.messageKey],
-        execArgv: tsxExecArgv,
+        execArgv: typeStripExecArgv,
       });
       const committed = await authorizer.waitForMessage(
         (message): message is WorkerMessage =>
@@ -287,7 +287,7 @@ if (workerMode === '--atomic-worker') {
 
       const sender = startTestChild(subtest, currentFile, {
         args: ['--send-worker', seeded.filePath, 'accept-exit'],
-        execArgv: tsxExecArgv,
+        execArgv: typeStripExecArgv,
       });
       const accepted = await sender.waitForMessage('send-accepted');
       assert.equal(
@@ -309,7 +309,7 @@ if (workerMode === '--atomic-worker') {
 
       const sender = startTestChild(subtest, currentFile, {
         args: ['--send-worker', seeded.filePath, 'hold'],
-        execArgv: tsxExecArgv,
+        execArgv: typeStripExecArgv,
       });
       const claimed = await sender.waitForMessage('send-claimed');
       assert.equal(
@@ -341,7 +341,7 @@ if (workerMode === '--atomic-worker') {
 
       const sender = startTestChild(subtest, currentFile, {
         args: ['--send-worker', seeded.filePath, 'accept-hold'],
-        execArgv: tsxExecArgv,
+        execArgv: typeStripExecArgv,
       });
       const accepted = await sender.waitForMessage('send-accepted');
       assert.equal(

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { splitUtf8, truncateUtf8 } from '../../src/lib/text.js';
+import { splitUtf8, truncateUtf8 } from '../../src/lib/text.ts';
 
 test('UTF-8 splitting does not break multibyte characters', () => {
   const chunks = splitUtf8('你好abc', 6);

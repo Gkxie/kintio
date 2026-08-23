@@ -5,23 +5,23 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { acquireSingleInstanceLock } from '../../src/runtime/single-instance-lock.js';
+import { acquireSingleInstanceLock } from '../../src/runtime/single-instance-lock.ts';
 import {
   SqliteStore,
   stableMessageKey,
-} from '../../src/state/sqlite-store.js';
-import { startTestChild } from '../support/child-process.js';
-import { createTempSqlite } from '../support/temp-sqlite.js';
+} from '../../src/state/sqlite-store.ts';
+import { startTestChild } from '../support/child-process.ts';
+import { createTempSqlite } from '../support/temp-sqlite.ts';
 import {
   inspectAttempt,
   inspectMeta,
   setTestMeta,
-} from '../support/sqlite-inspect.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../support/sqlite-inspect.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
 const workerMode = process.argv[2] || '';
-const tsxExecArgv = ['--import', 'tsx'] as const;
+const typeStripExecArgv = ['--experimental-strip-types'] as const;
 
 interface WorkerMessage extends Record<string, Serializable> {
   type: string;
@@ -107,7 +107,7 @@ test('[DEP04] two real processes reject a live owner and recover its stale lock 
 
     const first = startTestChild(t, currentFile, {
       args: ['--lock-worker', lockFile],
-      execArgv: tsxExecArgv,
+      execArgv: typeStripExecArgv,
     });
     const firstOwner = await first.waitForMessage(
       (message): message is WorkerMessage =>
@@ -117,7 +117,7 @@ test('[DEP04] two real processes reject a live owner and recover its stale lock 
 
     const second = startTestChild(t, currentFile, {
       args: ['--lock-worker', lockFile],
-      execArgv: tsxExecArgv,
+      execArgv: typeStripExecArgv,
     });
     const rejected = await second.waitForMessage(
       (message): message is WorkerMessage =>
@@ -136,7 +136,7 @@ test('[DEP04] two real processes reject a live owner and recover its stale lock 
 
     const recovered = startTestChild(t, currentFile, {
       args: ['--lock-worker', lockFile],
-      execArgv: tsxExecArgv,
+      execArgv: typeStripExecArgv,
     });
     const recoveredOwner = await recovered.waitForMessage(
       (message): message is WorkerMessage =>
@@ -195,7 +195,7 @@ test('[R01] SIGKILL after claiming a send changes sending to uncertain on startu
 
     const sender = startTestChild(t, currentFile, {
       args: ['--sending-worker', temporary.filePath],
-      execArgv: tsxExecArgv,
+      execArgv: typeStripExecArgv,
     });
     assert.deepEqual(await sender.waitForMessage('send-claimed'), {
       type: 'send-claimed',

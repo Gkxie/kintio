@@ -8,7 +8,7 @@ import {
   isSupportedCustomerMessage,
   normalizeWecomMessage,
   renderMessageForCodex,
-} from '../../src/domain/wecom-message.js';
+} from '../../src/domain/wecom-message.ts';
 
 type FixturePayload = Record<string, unknown>;
 type MessageFixture = readonly [msgtype: string, payload: FixturePayload];

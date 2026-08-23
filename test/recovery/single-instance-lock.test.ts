@@ -8,7 +8,7 @@ import {
   SingleInstanceLockError,
   acquireSingleInstanceLock,
   type LockOwner,
-} from '../../src/runtime/single-instance-lock.js';
+} from '../../src/runtime/single-instance-lock.ts';
 
 function lockPath(t: TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-lock-'));

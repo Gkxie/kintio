@@ -5,14 +5,14 @@ import path from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
-import { SendContractError } from '../../src/domain/send-contract.js';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.js';
+import { SendContractError } from '../../src/domain/send-contract.ts';
+import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
 import {
   SqliteStore,
   stableClientMessageId,
   stableMessageKey,
-} from '../../src/state/sqlite-store.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/state/sqlite-store.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 interface Call {
   readonly method: 'clone' | 'thumbnail' | 'upload';

@@ -7,7 +7,7 @@ import {
 } from 'node:fs';
 import path from 'node:path';
 
-import type { ResolvedImage } from '../types.js';
+import type { ResolvedImage } from '../types.ts';
 
 export const MAX_WECHAT_IMAGE_BYTES = 2 * 1024 * 1024;
 const STAGED_IMAGE_PREFIX = 'wechat-codex-image-';

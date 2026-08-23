@@ -2,9 +2,9 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import test from 'node:test';
 
-import { createApp } from '../../src/app.js';
-import { createConfig } from '../../src/config.js';
-import { WecomCrypto } from '../../src/lib/wecom-crypto.js';
+import { createApp } from '../../src/app.ts';
+import { createConfig } from '../../src/config.ts';
+import { WecomCrypto } from '../../src/lib/wecom-crypto.ts';
 
 const config = createConfig({
   WECOM_CALLBACK_TOKEN: 'NegativeToken123',

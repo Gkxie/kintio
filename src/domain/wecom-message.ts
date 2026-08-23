@@ -1,5 +1,5 @@
-import { truncateUtf8 } from '../lib/text.js';
-import type { NormalizedMessage } from '../types.js';
+import { truncateUtf8 } from '../lib/text.ts';
+import type { NormalizedMessage } from '../types.ts';
 
 export const MESSAGE_ORIGINS = {
   CUSTOMER: 'customer',

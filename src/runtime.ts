@@ -1,21 +1,21 @@
 import fs from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 
-import { acquireSingleInstanceLock } from './runtime/single-instance-lock.js';
-import { CodexAgent, createCodexAppServer } from './services/codex-agent.js';
-import { ConversationProcessor } from './services/conversation-processor.js';
-import { DeliveryService } from './services/delivery-service.js';
-import { cleanupStagedImageOrphans } from './services/image-stager.js';
-import { WecomMediaGateway } from './services/media-gateway.js';
-import { OutboundPreparer } from './services/outbound-preparer.js';
-import { WecomApiClient } from './services/wecom-api.js';
-import { WecomSync } from './services/wecom-sync.js';
+import { acquireSingleInstanceLock } from './runtime/single-instance-lock.ts';
+import { CodexAgent, createCodexAppServer } from './services/codex-agent.ts';
+import { ConversationProcessor } from './services/conversation-processor.ts';
+import { DeliveryService } from './services/delivery-service.ts';
+import { cleanupStagedImageOrphans } from './services/image-stager.ts';
+import { WecomMediaGateway } from './services/media-gateway.ts';
+import { OutboundPreparer } from './services/outbound-preparer.ts';
+import { WecomApiClient } from './services/wecom-api.ts';
+import { WecomSync } from './services/wecom-sync.ts';
 import {
   SqliteStore,
   assertLegacyMigrationReady,
-} from './state/sqlite-store.js';
-import type { AppConfig } from './config.js';
-import type { Logger } from './types.js';
+} from './state/sqlite-store.ts';
+import type { AppConfig } from './config.ts';
+import type { Logger } from './types.ts';
 
 interface RuntimeLifecycle {
   stopAccepting(): void;

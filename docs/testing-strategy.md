@@ -170,19 +170,19 @@ mock sync_msg
 - steering 前淘汰的 staged 候选不占最终五条额度；最终批次超限只允许一次模型缩减重试。
 - 单实例锁：第二进程失败、存活锁不可抢、SIGKILL 后 stale lock 可回收、恢复后 integrity_check 通过。
 
-## npm scripts
+## pnpm scripts
 
 ```json
 {
-  "test": "npm run test:deterministic",
-  "build": "npm run clean && tsc -p tsconfig.json",
+  "test": "pnpm run test:deterministic",
+  "build": "pnpm run clean && tsc -p tsconfig.json",
   "typecheck": "tsc -p tsconfig.test.json",
-  "test:unit": "node --import tsx --test test/unit/*.test.ts",
-  "test:integration": "node --import tsx --test test/integration/*.test.ts",
-  "test:recovery": "node --import tsx --test --test-concurrency=1 test/recovery/*.test.ts",
-  "test:security": "node --import tsx --test test/security/*.test.ts",
-  "test:agent": "node --import tsx --test --test-concurrency=1 test/opt-in/real-codex.integration.ts",
-  "test:live": "node --import tsx --test --test-concurrency=1 test/opt-in/live-wecom.integration.ts"
+  "test:unit": "node --experimental-strip-types --test test/unit/*.test.ts",
+  "test:integration": "node --experimental-strip-types --test test/integration/*.test.ts",
+  "test:recovery": "node --experimental-strip-types --test --test-concurrency=1 test/recovery/*.test.ts",
+  "test:security": "node --experimental-strip-types --test test/security/*.test.ts",
+  "test:agent": "node --experimental-strip-types --test --test-concurrency=1 test/opt-in/real-codex.integration.ts",
+  "test:live": "node --experimental-strip-types --test --test-concurrency=1 test/opt-in/live-wecom.integration.ts"
 }
 ```
 
@@ -190,17 +190,17 @@ mock sync_msg
 
 PR：
 
-1. `npm ci`
+1. `pnpm install --frozen-lockfile`
 2. Node 22 与 Node 24 矩阵
 3. deterministic：0 fail、0 skip；静态脚本拒绝 skip/todo/only
 4. 行 ≥90%、分支 ≥80%、函数 ≥90%
 5. migration、integrity_check、foreign_key_check
-6. `npm audit --omit=dev --audit-level=high`
+6. `pnpm audit --prod --audit-level=high`
 7. 确认 opt-in/live 未被默认发现
 8. 不允许 flaky retry
 
 仓库托管 CI 不持有用户 Codex 登录态，因此不伪装成 nightly model eval。需要定时评估时，
-由有独立登录态的自托管 runner 执行 `npm run test:release`。真实微信只在受保护的手动环境运行。
+由有独立登录态的自托管 runner 执行 `pnpm run test:release`。真实微信只在受保护的手动环境运行。
 
 ## 验收追踪
 

@@ -1,12 +1,12 @@
 import { Hono } from 'hono';
 import { secureHeaders } from 'hono/secure-headers';
 
-import { WecomCrypto } from './lib/wecom-crypto.js';
-import { registerWecomRoutes } from './routes/wecom.js';
-import { createRuntime } from './runtime.js';
-import type { AppConfig } from './config.js';
-import type { MessageSync } from './routes/wecom.js';
-import type { Logger } from './types.js';
+import { WecomCrypto } from './lib/wecom-crypto.ts';
+import { registerWecomRoutes } from './routes/wecom.ts';
+import { createRuntime } from './runtime.ts';
+import type { AppConfig } from './config.ts';
+import type { MessageSync } from './routes/wecom.ts';
+import type { Logger } from './types.ts';
 
 export type WechatApp = Hono & {
   stopAccepting(): void;

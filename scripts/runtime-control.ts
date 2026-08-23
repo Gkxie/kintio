@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { loadConfig } from '../src/config.js';
+import { loadConfig } from '../src/config.ts';
 import {
   SqliteStore,
   assertLegacyMigrationReady,
-} from '../src/state/sqlite-store.js';
+} from '../src/state/sqlite-store.ts';
 
 const COMMANDS = ['pause', 'resume', 'status'] as const;
 type RuntimeControlCommand = (typeof COMMANDS)[number];

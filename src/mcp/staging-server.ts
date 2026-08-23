@@ -11,7 +11,7 @@ import * as z from 'zod/v4';
 import {
   type SendIntent,
   normalizeSendIntent,
-} from '../domain/send-contract.js';
+} from '../domain/send-contract.ts';
 
 const STAGING_ANNOTATIONS = Object.freeze({
   readOnlyHint: true,

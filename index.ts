@@ -1,7 +1,7 @@
 import { serve } from '@hono/node-server';
 
-import { createApp } from './src/app.js';
-import { loadConfig } from './src/config.js';
+import { createApp } from './src/app.ts';
+import { loadConfig } from './src/config.ts';
 
 const config = loadConfig();
 const app = createApp({ config });

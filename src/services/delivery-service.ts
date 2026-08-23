@@ -1,7 +1,7 @@
-import { WecomApiError } from './wecom-api.js';
-import type { Logger } from '../types.js';
-import type { SqliteStore } from '../state/sqlite-store.js';
-import type { WecomApiClient } from './wecom-api.js';
+import { WecomApiError } from './wecom-api.ts';
+import type { Logger } from '../types.ts';
+import type { SqliteStore } from '../state/sqlite-store.ts';
+import type { WecomApiClient } from './wecom-api.ts';
 
 function isDefinitiveFailure(error: unknown): error is WecomApiError {
   return (

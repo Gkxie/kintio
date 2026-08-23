@@ -10,12 +10,12 @@ import type {
   AgentSubmission,
   HistoryInspection,
   StagedCandidate,
-} from '../../src/services/codex-agent.js';
-import { ConversationProcessor } from '../../src/services/conversation-processor.js';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.js';
-import type { PreparedAttempt } from '../../src/types.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/services/codex-agent.ts';
+import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
+import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import type { PreparedAttempt } from '../../src/types.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 function textCandidate(content: string): StagedCandidate {
   return { type: 'text', content };

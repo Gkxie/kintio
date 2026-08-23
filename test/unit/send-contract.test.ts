@@ -8,7 +8,7 @@ import {
   normalizeSendIntent,
   prepareSendBatch,
   prepareTextChunks,
-} from '../../src/domain/send-contract.js';
+} from '../../src/domain/send-contract.ts';
 
 const mediaCatalog = Object.freeze([{ ref: 'media:0', kind: 'image' }]);
 

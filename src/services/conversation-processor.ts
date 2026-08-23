@@ -3,23 +3,23 @@ import {
   MESSAGE_TYPES,
   isSupportedCustomerMessage,
   renderMessageForCodex,
-} from '../domain/wecom-message.js';
+} from '../domain/wecom-message.ts';
 import type {
   Logger,
   MediaCatalogEntry,
   NormalizedMessage,
   PreparedAttempt,
   ResolvedImage,
-} from '../types.js';
+} from '../types.ts';
 import type {
   AgentCompletion,
   AgentInput,
   AgentMessage,
   AgentSubmission,
   HistoryInspection,
-} from './codex-agent.js';
-import type { PreparedBatch } from './outbound-preparer.js';
-import type { InboundRecord, SqliteStore } from '../state/sqlite-store.js';
+} from './codex-agent.ts';
+import type { PreparedBatch } from './outbound-preparer.ts';
+import type { InboundRecord, SqliteStore } from '../state/sqlite-store.ts';
 
 const HUMAN_CHANGE_TYPES = new Set([1, 2, 4]);
 

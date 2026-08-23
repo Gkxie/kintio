@@ -1,9 +1,9 @@
 import { bodyLimit } from 'hono/body-limit';
 import type { Hono } from 'hono';
 
-import { extractXmlTag } from '../lib/xml.js';
-import type { WecomCrypto } from '../lib/wecom-crypto.js';
-import type { Logger } from '../types.js';
+import { extractXmlTag } from '../lib/xml.ts';
+import type { WecomCrypto } from '../lib/wecom-crypto.ts';
+import type { Logger } from '../types.ts';
 
 const MAX_BODY_BYTES = 1024 * 1024;
 

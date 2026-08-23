@@ -6,7 +6,7 @@ import test from 'node:test';
 import {
   CodexAppServer,
   type SpawnProcess,
-} from '../../src/services/codex-app-server.js';
+} from '../../src/services/codex-app-server.ts';
 
 type RpcMessage = Record<string, unknown>;
 

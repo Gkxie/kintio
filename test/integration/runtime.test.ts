@@ -4,9 +4,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
-import { createConfig } from '../../src/config.js';
-import { createRuntime } from '../../src/runtime.js';
-import { createTempSqlite } from '../support/temp-sqlite.js';
+import { createConfig } from '../../src/config.ts';
+import { createRuntime } from '../../src/runtime.ts';
+import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');

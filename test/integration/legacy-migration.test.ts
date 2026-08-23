@@ -5,13 +5,13 @@ import test, { type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { migrateLegacyState } from '../../scripts/migrate-legacy.js';
+import { migrateLegacyState } from '../../scripts/migrate-legacy.ts';
 import {
   SqliteStore,
   type LegacyStateSnapshot,
   stableMessageKey,
-} from '../../src/state/sqlite-store.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
+} from '../../src/state/sqlite-store.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 function tempDirectory(t: TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-migrate-'));

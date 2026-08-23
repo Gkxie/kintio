@@ -1,4 +1,4 @@
-import type { NormalizedMessage, ResolvedImage } from '../types.js';
+import type { NormalizedMessage, ResolvedImage } from '../types.ts';
 
 const DEFAULT_LINK_THUMBNAIL = Buffer.from(
   'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9ZlXcAAAAASUVORK5CYII=',

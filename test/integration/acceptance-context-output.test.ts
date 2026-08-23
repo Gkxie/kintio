@@ -8,24 +8,24 @@ import type { TestContext } from 'node:test';
 import {
   prepareSendBatch,
   normalizeSendIntent,
-} from '../../src/domain/send-contract.js';
+} from '../../src/domain/send-contract.ts';
 import {
   normalizeWecomMessage,
   renderMessageForCodex,
-} from '../../src/domain/wecom-message.js';
-import { CodexAgent, type AgentInput } from '../../src/services/codex-agent.js';
+} from '../../src/domain/wecom-message.ts';
+import { CodexAgent, type AgentInput } from '../../src/services/codex-agent.ts';
 import type {
   CodexBoundary,
   CodexInput,
   CodexRun,
   CodexThread,
   CodexThreadOptions,
-} from '../../src/services/codex-app-server.js';
-import { withStagedImages } from '../../src/services/image-stager.js';
-import { WecomMediaGateway } from '../../src/services/media-gateway.js';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.js';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/services/codex-app-server.ts';
+import { withStagedImages } from '../../src/services/image-stager.ts';
+import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
+import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
+import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 const base = {
   open_kfid: 'wk-acceptance',

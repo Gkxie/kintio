@@ -7,7 +7,7 @@ import {
   normalizeSendIntent,
   prepareSendBatch,
   prepareTextChunks,
-} from '../../src/domain/send-contract.js';
+} from '../../src/domain/send-contract.ts';
 
 function code(expected: string): (error: unknown) => boolean {
   return (error) => error instanceof SendContractError && error.code === expected;

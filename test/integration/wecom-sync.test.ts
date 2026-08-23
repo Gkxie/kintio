@@ -4,9 +4,9 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import type { WecomApiClient } from '../../src/services/wecom-api.js';
-import { WecomSync } from '../../src/services/wecom-sync.js';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.js';
+import type { WecomApiClient } from '../../src/services/wecom-api.ts';
+import { WecomSync } from '../../src/services/wecom-sync.ts';
+import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
 
 type SyncInput = Parameters<WecomApiClient['syncMessages']>[0];
 type SyncResult = Awaited<ReturnType<WecomApiClient['syncMessages']>>;

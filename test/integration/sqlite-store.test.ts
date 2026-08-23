@@ -9,15 +9,15 @@ import {
   SendInvariantError,
   SqliteStore,
   stableMessageKey,
-} from '../../src/state/sqlite-store.js';
-import type { NormalizedMessage } from '../../src/types.js';
+} from '../../src/state/sqlite-store.ts';
+import type { NormalizedMessage } from '../../src/types.ts';
 import {
   inspectAttempt,
   inspectAttempts,
   inspectPragmas,
   inspectSchemaVersion,
-} from '../support/sqlite-inspect.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../support/sqlite-inspect.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 function createStore(
   t: TestContext,

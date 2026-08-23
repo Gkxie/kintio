@@ -5,16 +5,16 @@ import path from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
-import { DeliveryService } from '../../src/services/delivery-service.js';
-import { WecomApiError, type WecomApiClient } from '../../src/services/wecom-api.js';
+import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { WecomApiError, type WecomApiClient } from '../../src/services/wecom-api.ts';
 import {
   SqliteStore,
   type AttemptRecord,
   stableMessageKey,
-} from '../../src/state/sqlite-store.js';
-import type { PreparedAttempt } from '../../src/types.js';
-import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/state/sqlite-store.ts';
+import type { PreparedAttempt } from '../../src/types.ts';
+import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 const silentLogger = Object.freeze({ info() {}, warn() {}, error() {} });
 

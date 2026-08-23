@@ -115,7 +115,7 @@
 | SEC03 | root 通配符 | root 下 `WECOM_ALLOWED_USER_IDS=*` 启动失败 | missing test |
 | SEC04 | 文件权限 | DB 0600、临时目录 0700、临时文件 0600；启动时清理孤儿文件 | partial |
 | SEC05 | staging MCP 最小权限 | MCP 无 CorpID、Secret、目标 ID、HTTP 客户端、DB 路径 | missing |
-| DEP01 | 不再由宝塔托管 Node | 外层 `index.ts` 经 strict TypeScript 构建，由 `npm start` 运行 `dist/index.js`；SIGTERM drain 后释放 8888；无宝塔文件 | missing |
+| DEP01 | 不再由宝塔托管 Node | 外层 `index.ts` 经 strict TypeScript 构建，由 `pnpm start` 运行 `dist/index.js`；SIGTERM drain 后释放 8888；无宝塔文件 | missing |
 | DEP02 | 项目配置不影响本机 CLI | turn 明确传项目 model/effort；用户级 Codex 配置测试前后哈希不变 | partial |
 | DEP03 | SSL/SNI/IPv6 历史问题 | 独立运维 smoke：`nginx -t`、双域名 SNI、IPv4/IPv6；不耦合进 Node 单测 | manual |
 | DEP04 | 误启动两个实例 | 第二进程拒绝启动；存活进程锁不可抢；SIGKILL 后 stale lock 可回收且 DB 完整 | missing |

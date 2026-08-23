@@ -8,7 +8,7 @@ import type {
   MediaCatalogEntry,
   NormalizedMessage,
   PreparedAttempt,
-} from '../types.js';
+} from '../types.ts';
 
 const SCHEMA_VERSION = 3;
 const INBOUND_STATUSES = [
@@ -545,7 +545,7 @@ export function assertLegacyMigrationReady({
   if (!fs.existsSync(legacyStateFile)) return;
   if (!fs.existsSync(databaseFile)) {
     throw new Error(
-      'Legacy state requires offline migration; run npm run migrate:legacy',
+      'Legacy state requires offline migration; run pnpm run migrate:legacy',
     );
   }
   const database = new DatabaseSync(databaseFile, { readOnly: true });
@@ -555,7 +555,7 @@ export function assertLegacyMigrationReady({
     `).get() as { value?: unknown } | undefined;
     if (!marker?.value) {
       throw new Error(
-        'Legacy state is present but the SQLite database has no migration marker; run npm run migrate:legacy after moving the unmarked database aside',
+        'Legacy state is present but the SQLite database has no migration marker; run pnpm run migrate:legacy after moving the unmarked database aside',
       );
     }
   } finally {

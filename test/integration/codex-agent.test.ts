@@ -8,7 +8,7 @@ import type { TestContext } from 'node:test';
 import {
   CodexAgent,
   stagedCandidates,
-} from '../../src/services/codex-agent.js';
+} from '../../src/services/codex-agent.ts';
 import type {
   CodexBoundary,
   CodexInput,
@@ -16,11 +16,11 @@ import type {
   CodexThread,
   CodexThreadOptions,
   CodexTurnResult,
-} from '../../src/services/codex-app-server.js';
+} from '../../src/services/codex-app-server.ts';
 import type {
   ConversationRecord,
   InboundRecord,
-} from '../../src/state/sqlite-store.js';
+} from '../../src/state/sqlite-store.ts';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;

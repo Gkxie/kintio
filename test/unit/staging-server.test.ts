@@ -7,8 +7,8 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import {
   createStagingMcpServer,
-} from '../../src/mcp/staging-server.js';
-import { prepareSendBatch } from '../../src/domain/send-contract.js';
+} from '../../src/mcp/staging-server.ts';
+import { prepareSendBatch } from '../../src/domain/send-contract.ts';
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

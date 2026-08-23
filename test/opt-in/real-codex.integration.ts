@@ -7,11 +7,11 @@ import path from 'node:path';
 import { deflateSync } from 'node:zlib';
 import test, { after } from 'node:test';
 
-import type { ReasoningEffort } from '../../src/config.js';
+import type { ReasoningEffort } from '../../src/config.ts';
 import {
   normalizeWecomMessage,
   renderMessageForCodex,
-} from '../../src/domain/wecom-message.js';
+} from '../../src/domain/wecom-message.ts';
 import {
   CodexAgent,
   createCodexAppServer,
@@ -19,15 +19,15 @@ import {
   type AgentCompletion,
   type AgentInput,
   type GeneratedCandidate,
-} from '../../src/services/codex-agent.js';
-import { DeliveryService } from '../../src/services/delivery-service.js';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.js';
-import type { CodexBoundary } from '../../src/services/codex-app-server.js';
-import { WecomApiClient } from '../../src/services/wecom-api.js';
-import { SqliteStore } from '../../src/state/sqlite-store.js';
-import type { NormalizedMessage, ResolvedImage } from '../../src/types.js';
-import { createFakeWecomServer } from '../support/fake-wecom-server.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
+} from '../../src/services/codex-agent.ts';
+import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
+import type { CodexBoundary } from '../../src/services/codex-app-server.ts';
+import { WecomApiClient } from '../../src/services/wecom-api.ts';
+import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import type { NormalizedMessage, ResolvedImage } from '../../src/types.ts';
+import { createFakeWecomServer } from '../support/fake-wecom-server.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 process.loadEnvFile?.('.env');
 if (process.env.RUN_REAL_CODEX !== '1') {

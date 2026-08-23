@@ -5,15 +5,15 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import { migrateLegacyState } from '../../scripts/migrate-legacy.js';
-import { createConfig } from '../../src/config.js';
-import { createRuntime } from '../../src/runtime.js';
+import { migrateLegacyState } from '../../scripts/migrate-legacy.ts';
+import { createConfig } from '../../src/config.ts';
+import { createRuntime } from '../../src/runtime.ts';
 import {
   SqliteStore,
   type LegacyStateSnapshot,
   stableMessageKey,
-} from '../../src/state/sqlite-store.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
+} from '../../src/state/sqlite-store.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 function directory(t: TestContext): string {
   const value = fs.mkdtempSync(path.join(os.tmpdir(), 'legacy-edge-'));
@@ -95,7 +95,7 @@ test('[D02] runtime fails closed until the explicit offline migration runs', (t)
       config,
       logger: { info() {}, warn() {}, error() {} },
     }),
-    /run npm run migrate/u,
+    /run pnpm run migrate/u,
   );
   assert.equal(fs.existsSync(database), false);
   assert.equal(fs.existsSync(config.state.lockFile), false);

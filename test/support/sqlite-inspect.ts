@@ -4,7 +4,7 @@ import type {
   AttemptRecord,
   JsonObject,
   SendStatus,
-} from '../../src/state/sqlite-store.js';
+} from '../../src/state/sqlite-store.ts';
 
 interface AttemptRow {
   attempt_key: string;

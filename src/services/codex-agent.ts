@@ -7,15 +7,15 @@ import type {
   MediaCatalogEntry,
   NormalizedMessage,
   ResolvedImage,
-} from '../types.js';
-import type { CodexConfig } from '../config.js';
-import { SEND_TOOL_NAMES } from '../domain/send-contract.js';
-import type { SqliteStore } from '../state/sqlite-store.js';
+} from '../types.ts';
+import type { CodexConfig } from '../config.ts';
+import { SEND_TOOL_NAMES } from '../domain/send-contract.ts';
+import type { SqliteStore } from '../state/sqlite-store.ts';
 import {
   MAX_WECHAT_IMAGE_BYTES,
   detectImageFormat,
   withStagedImages,
-} from './image-stager.js';
+} from './image-stager.ts';
 import {
   CodexAppServer,
   type CodexBoundary,
@@ -24,7 +24,7 @@ import {
   type CodexThreadOptions,
   type CodexTurnResult,
   type SpawnProcess,
-} from './codex-app-server.js';
+} from './codex-app-server.ts';
 
 const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 const ROOT_CANDIDATE = path.resolve(MODULE_DIRECTORY, '../..');
@@ -266,7 +266,7 @@ export function createCodexAppServer(
   const resolvedConfig = resolveServerConfig(config);
   const stagingArguments = existsSync(BUILT_STAGING_SERVER)
     ? [BUILT_STAGING_SERVER]
-    : ['--import', 'tsx', SOURCE_STAGING_SERVER];
+    : ['--experimental-strip-types', SOURCE_STAGING_SERVER];
   const nodeRoot = path.dirname(path.dirname(process.execPath));
   const stagingSandboxArguments = [
     '--die-with-parent',

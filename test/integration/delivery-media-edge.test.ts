@@ -5,15 +5,15 @@ import path from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
-import { DeliveryService } from '../../src/services/delivery-service.js';
-import { WecomMediaGateway } from '../../src/services/media-gateway.js';
+import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
 import {
   SqliteStore,
   stableMessageKey,
   type AttemptRecord,
-} from '../../src/state/sqlite-store.js';
-import { inspectAttempt } from '../support/sqlite-inspect.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/state/sqlite-store.ts';
+import { inspectAttempt } from '../support/sqlite-inspect.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 async function storeWithAttempt(t: TestContext) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'delivery-edge-'));

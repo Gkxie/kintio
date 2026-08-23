@@ -8,22 +8,22 @@ import type { TestContext } from 'node:test';
 import {
   CUSTOMER_MESSAGE_TYPES,
   normalizeWecomMessage,
-} from '../../src/domain/wecom-message.js';
+} from '../../src/domain/wecom-message.ts';
 import {
   type AgentCompletion,
   type AgentInput,
   type AgentSubmission,
-} from '../../src/services/codex-agent.js';
-import { ConversationProcessor } from '../../src/services/conversation-processor.js';
-import { DeliveryService } from '../../src/services/delivery-service.js';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.js';
-import type { WecomApiClient } from '../../src/services/wecom-api.js';
+} from '../../src/services/codex-agent.ts';
+import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
+import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
+import type { WecomApiClient } from '../../src/services/wecom-api.ts';
 import {
   SqliteStore,
   stableMessageKey,
-} from '../../src/state/sqlite-store.js';
-import type { ResolvedImage } from '../../src/types.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
+} from '../../src/state/sqlite-store.ts';
+import type { ResolvedImage } from '../../src/types.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 type ProcessorAgent = ConstructorParameters<
   typeof ConversationProcessor

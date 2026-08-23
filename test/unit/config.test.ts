@@ -4,7 +4,7 @@ import test from 'node:test';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { createConfig, resolveProjectRoot } from '../../src/config.js';
+import { createConfig, resolveProjectRoot } from '../../src/config.ts';
 
 const callbackEnvironment = {
   WECOM_CALLBACK_TOKEN: 'CallbackToken123',

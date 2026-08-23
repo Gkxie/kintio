@@ -1,7 +1,7 @@
 import type {
   ImageAttachment,
   NormalizedMessage,
-} from '../../src/types.js';
+} from '../../src/types.ts';
 
 export interface TestWecomMessageOptions {
   id?: string;

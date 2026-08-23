@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 
-import { loadConfig } from '../src/config.js';
+import { loadConfig } from '../src/config.ts';
 import {
   SqliteStore,
   assertLegacyMigrationReady,
-} from '../src/state/sqlite-store.js';
+} from '../src/state/sqlite-store.ts';
 
 const [command = 'status', externalUserId = ''] = process.argv.slice(2);
 if (!['status', 'revoke'].includes(command) || !externalUserId) {
   throw new Error(
-    'Usage: npm run auth -- <status|revoke> <external_userid>',
+    'Usage: pnpm run auth -- <status|revoke> <external_userid>',
   );
 }
 

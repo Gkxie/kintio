@@ -4,10 +4,10 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
 
-import { createConfig } from '../../src/config.js';
-import { createRuntime } from '../../src/runtime.js';
-import { createCodexAppServer } from '../../src/services/codex-agent.js';
-import type { SpawnProcess } from '../../src/services/codex-app-server.js';
+import { createConfig } from '../../src/config.ts';
+import { createRuntime } from '../../src/runtime.ts';
+import { createCodexAppServer } from '../../src/services/codex-agent.ts';
+import type { SpawnProcess } from '../../src/services/codex-app-server.ts';
 
 type RpcMessage = Record<string, unknown>;
 

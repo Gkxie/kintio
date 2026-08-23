@@ -86,8 +86,9 @@ export function startTestChild(
     timeoutMs = 5_000,
   }: StartTestChildOptions = {},
 ): TestChild {
-  const childExecArgv =
-    execArgv ?? (/\.(?:cts|mts|ts)$/u.test(modulePath) ? ['--import', 'tsx'] : []);
+  const childExecArgv = execArgv ?? (/\.(?:cts|mts|ts)$/u.test(modulePath)
+    ? ['--experimental-strip-types']
+    : []);
   const child = fork(path.resolve(modulePath), [...args], {
     cwd,
     env: { ...process.env, ...env },

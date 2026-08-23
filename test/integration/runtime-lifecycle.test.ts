@@ -5,9 +5,9 @@ import path from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
-import { createApp } from '../../src/app.js';
-import { createConfig, type AppConfig } from '../../src/config.js';
-import { createRuntime } from '../../src/runtime.js';
+import { createApp } from '../../src/app.ts';
+import { createConfig, type AppConfig } from '../../src/config.ts';
+import { createRuntime } from '../../src/runtime.ts';
 
 async function workspace(t: TestContext): Promise<string> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'runtime-lifecycle-'));
@@ -84,7 +84,7 @@ test('[D02] active startup rejects legacy JSON until offline migration and relea
 
   assert.throws(
     () => createRuntime({ config, logger }),
-    /run npm run migrate/u,
+    /run pnpm run migrate/u,
   );
   await fs.access(config.state.legacyStateFile);
   await assert.rejects(fs.access(config.state.databaseFile), { code: 'ENOENT' });

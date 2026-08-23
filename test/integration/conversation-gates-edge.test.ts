@@ -5,11 +5,11 @@ import path from 'node:path';
 import test from 'node:test';
 import type { TestContext } from 'node:test';
 
-import { normalizeWecomMessage } from '../../src/domain/wecom-message.js';
-import type { AgentCompletion, AgentInput, AgentSubmission } from '../../src/services/codex-agent.js';
-import { ConversationProcessor } from '../../src/services/conversation-processor.js';
-import { SqliteStore } from '../../src/state/sqlite-store.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
+import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
+import type { AgentCompletion, AgentInput, AgentSubmission } from '../../src/services/codex-agent.ts';
+import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
+import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;

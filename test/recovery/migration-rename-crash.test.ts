@@ -5,14 +5,14 @@ import path from 'node:path';
 import test, { type TestContext } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { migrateLegacyState } from '../../scripts/migrate-legacy.js';
+import { migrateLegacyState } from '../../scripts/migrate-legacy.ts';
 import {
   SqliteStore,
   type LegacyMessageRecord,
   type LegacyStateSnapshot,
-} from '../../src/state/sqlite-store.js';
-import { startTestChild } from '../support/child-process.js';
-import { inspectMeta } from '../support/sqlite-inspect.js';
+} from '../../src/state/sqlite-store.ts';
+import { startTestChild } from '../support/child-process.ts';
+import { inspectMeta } from '../support/sqlite-inspect.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
 const mode = process.argv[2] || '';
@@ -81,7 +81,7 @@ if (mode === '--migrate-worker') {
 
     const worker = startTestChild(t, currentFile, {
       args: ['--migrate-worker', legacyFile, targetFile],
-      execArgv: ['--import', 'tsx'],
+      execArgv: ['--experimental-strip-types'],
       timeoutMs: 15_000,
     });
     const temporary = await waitForTemporaryDatabase(

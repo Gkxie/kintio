@@ -11,18 +11,18 @@ import type {
   AgentInput,
   AgentSubmission,
   HistoryInspection,
-} from '../../src/services/codex-agent.js';
-import { ConversationProcessor } from '../../src/services/conversation-processor.js';
-import { DeliveryService } from '../../src/services/delivery-service.js';
-import { SqliteStore } from '../../src/state/sqlite-store.js';
-import type { NormalizedMessage, PreparedAttempt } from '../../src/types.js';
-import { startTestChild, type TestChild } from '../support/child-process.js';
-import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/services/codex-agent.ts';
+import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
+import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import type { NormalizedMessage, PreparedAttempt } from '../../src/types.ts';
+import { startTestChild, type TestChild } from '../support/child-process.ts';
+import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
 const mode = process.argv[2] || '';
-const tsxExecArgv = ['--import', 'tsx'] as const;
+const typeStripExecArgv = ['--experimental-strip-types'] as const;
 
 interface SeedMessage extends Record<string, Serializable> {
   type: 'seeded';
@@ -172,7 +172,7 @@ if (mode === '--seed') {
   ): Promise<SeedMessage> {
     const child: TestChild = startTestChild(t, currentFile, {
       args: ['--seed', databaseFile, scenario],
-      execArgv: tsxExecArgv,
+      execArgv: typeStripExecArgv,
     });
     const seeded = await child.waitForMessage(isSeeded);
     assert.deepEqual(await child.stop('SIGKILL'), {

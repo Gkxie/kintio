@@ -10,14 +10,14 @@ import type {
   AgentInput,
   AgentSubmission,
   HistoryInspection,
-} from '../../src/services/codex-agent.js';
-import { ConversationProcessor } from '../../src/services/conversation-processor.js';
-import { DeliveryService } from '../../src/services/delivery-service.js';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.js';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.js';
-import { startTestChild } from '../support/child-process.js';
-import { inspectAttempts } from '../support/sqlite-inspect.js';
-import { testWecomMessage } from '../support/wecom-message.js';
+} from '../../src/services/codex-agent.ts';
+import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
+import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
+import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { startTestChild } from '../support/child-process.ts';
+import { inspectAttempts } from '../support/sqlite-inspect.ts';
+import { testWecomMessage } from '../support/wecom-message.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
 const mode = process.argv[2] || '';
@@ -80,7 +80,7 @@ if (mode === '--seed') {
     const spoolDirectory = path.join(directory, 'spool');
     const child = startTestChild(t, currentFile, {
       args: ['--seed', databaseFile, spoolDirectory],
-      execArgv: ['--import', 'tsx'],
+      execArgv: ['--experimental-strip-types'],
     });
     const ready = await child.waitForMessage(
       (message): message is SpoolReady =>
