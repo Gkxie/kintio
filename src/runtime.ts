@@ -17,28 +17,11 @@ import {
 import type { AppConfig } from './config.ts';
 import type { Logger } from './types.ts';
 
-interface RuntimeLifecycle {
+interface Runtime {
+  readonly messageProcessor: WecomSync | null;
   stopAccepting(): void;
   close(): Promise<void>;
   abort(): Promise<void>;
-}
-
-export interface DisabledRuntime extends RuntimeLifecycle {
-  readonly enabled: false;
-  readonly messageProcessor: null;
-}
-
-export interface ActiveRuntime extends RuntimeLifecycle {
-  readonly enabled: true;
-  readonly messageProcessor: WecomSync;
-}
-
-export type Runtime = DisabledRuntime | ActiveRuntime;
-
-function errorCode(error: unknown): string {
-  return error instanceof Error && 'code' in error
-    ? String(error.code)
-    : '';
 }
 
 function databaseHasActiveWriter(filePath: string): boolean {
@@ -52,23 +35,14 @@ function databaseHasActiveWriter(filePath: string): boolean {
     return false;
   } catch (error: unknown) {
     return (
-      errorCode(error) === 'ERR_SQLITE_ERROR' &&
-      /busy|locked/iu.test(error instanceof Error ? error.message : '')
+      error instanceof Error &&
+      'code' in error &&
+      String(error.code) === 'ERR_SQLITE_ERROR' &&
+      /busy|locked/iu.test(error.message)
     );
   } finally {
     database?.close();
   }
-}
-
-function disabledRuntime(logger: Logger): Runtime {
-  logger.info('[wecom] message processing is disabled');
-  return {
-    enabled: false,
-    messageProcessor: null,
-    stopAccepting() {},
-    async close() {},
-    async abort() {},
-  };
 }
 
 export function createRuntime({
@@ -78,16 +52,18 @@ export function createRuntime({
   config: AppConfig;
   logger?: Logger;
 }): Runtime {
-  if (!config.wecom.api?.enabled || !config.codex?.enabled) {
-    return disabledRuntime(logger);
+  if (!config.wecom.api.enabled || !config.codex.enabled) {
+    logger.info('[wecom] message processing is disabled');
+    return {
+      messageProcessor: null,
+      stopAccepting() {},
+      async close() {},
+      async abort() {},
+    };
   }
 
-  const allowsEveryCustomer = config.wecom.allowedUserIds.includes('*');
-  if (allowsEveryCustomer && config.codex.sandboxMode !== 'read-only') {
-    throw new Error('WECOM_ALLOWED_USER_IDS=* requires a read-only Codex sandbox');
-  }
   if (
-    allowsEveryCustomer &&
+    config.wecom.allowedUserIds.includes('*') &&
     typeof process.getuid === 'function' &&
     process.getuid() === 0
   ) {
@@ -169,7 +145,6 @@ export function createRuntime({
 
     let closing: Promise<void> | undefined;
     const runtime = {
-      enabled: true as const,
       messageProcessor: sync,
       stopAccepting() {
         sync.stopAccepting();

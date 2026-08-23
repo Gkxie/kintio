@@ -127,25 +127,16 @@ type AgentConfig = Pick<
   CodexConfig,
   | 'model'
   | 'reasoningEffort'
-  | 'sandboxMode'
   | 'workingDirectory'
   | 'imageTempDirectory'
   | 'generatedImageDirectory'
 >;
 type ServerConfig = Pick<
   CodexConfig,
-  | 'apiKey'
-  | 'baseUrl'
   | 'pathOverride'
   | 'webSearchMode'
-> & Partial<Pick<
-  CodexConfig,
   | 'workingDirectory'
->>;
-type ResolvedServerConfig = ServerConfig & Required<Pick<
-  CodexConfig,
-  | 'workingDirectory'
->>;
+>;
 type AgentStore = Pick<
   SqliteStore,
   | 'getConversation'
@@ -200,15 +191,7 @@ function asRecord(value: unknown): JsonRecord | undefined {
     : undefined;
 }
 
-function resolveServerConfig(config: ServerConfig): ResolvedServerConfig {
-  return {
-    ...config,
-    workingDirectory:
-      config.workingDirectory || path.join(PROJECT_ROOT, 'codex-workspace'),
-  };
-}
-
-function sanitizedEnvironment(config: ResolvedServerConfig): NodeJS.ProcessEnv {
+function codexEnvironment(): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = {
     PATH: process.env.PATH || `${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
   };
@@ -220,8 +203,6 @@ function sanitizedEnvironment(config: ResolvedServerConfig): NodeJS.ProcessEnv {
   ]) {
     if (process.env[name]) environment[name] = process.env[name];
   }
-  if (config.apiKey) environment.OPENAI_API_KEY = config.apiKey;
-  if (config.baseUrl) environment.OPENAI_BASE_URL = config.baseUrl;
   return environment;
 }
 
@@ -232,7 +213,7 @@ export function createCodexAppServer(
     readonly spawnProcess?: SpawnProcess;
   } = {},
 ): CodexAppServer {
-  const resolvedConfig = resolveServerConfig(config);
+  const workingDirectory = config.workingDirectory;
   const stagingArguments = existsSync(BUILT_STAGING_SERVER)
     ? [BUILT_STAGING_SERVER]
     : ['--experimental-strip-types', SOURCE_STAGING_SERVER];
@@ -240,7 +221,7 @@ export function createCodexAppServer(
     'mcp_servers={}',
     `mcp_servers.wechat_kf.command=${JSON.stringify(process.execPath)}`,
     `mcp_servers.wechat_kf.args=${JSON.stringify(stagingArguments)}`,
-    `mcp_servers.wechat_kf.cwd=${JSON.stringify(resolvedConfig.workingDirectory)}`,
+    `mcp_servers.wechat_kf.cwd=${JSON.stringify(workingDirectory)}`,
     'mcp_servers.wechat_kf.env_vars=[]',
     `mcp_servers.wechat_kf.enabled_tools=${JSON.stringify(SEND_TOOL_NAMES)}`,
     'mcp_servers.wechat_kf.required=true',
@@ -257,7 +238,7 @@ export function createCodexAppServer(
   ];
   return new CodexAppServer({
     ...(config.pathOverride ? { codexPathOverride: config.pathOverride } : {}),
-    env: sanitizedEnvironment(resolvedConfig),
+    env: codexEnvironment(),
     configOverrides: overrides,
     ...(options.spawnProcess ? { spawnProcess: options.spawnProcess } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
@@ -471,7 +452,6 @@ export class CodexAgent {
   }> {
     const key = `${openKfId}\0${externalUserId}`;
     const options: CodexThreadOptions = {
-      sandboxMode: this.#config.sandboxMode,
       workingDirectory: this.#config.workingDirectory,
       approvalPolicy: 'never',
       developerInstructions: CUSTOMER_SERVICE_INSTRUCTIONS,

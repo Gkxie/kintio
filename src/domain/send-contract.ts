@@ -18,7 +18,6 @@ export const SEND_TOOL_NAMES = [
   'send_miniprogram',
   'send_location',
 ] as const;
-export type SendToolName = (typeof SEND_TOOL_NAMES)[number];
 
 export interface MediaCapability {
   readonly ref: string;

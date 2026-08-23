@@ -85,7 +85,6 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
     modelReasoningEffort: 'low',
     developerInstructions: 'fixed customer-service policy',
     workingDirectory: '/workspace',
-    sandboxMode: 'read-only',
     approvalPolicy: 'never',
   });
   const run = await thread.startRun('first customer message');

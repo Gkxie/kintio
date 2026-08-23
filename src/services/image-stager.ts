@@ -21,7 +21,7 @@ export function cleanupStagedImageOrphans(temporaryRoot: string): void {
   }
 }
 
-export interface ImageFormat {
+interface ImageFormat {
   readonly extension: '.png' | '.jpg' | '.gif' | '.webp' | '.bmp';
   readonly mimeType:
     | 'image/png'
@@ -66,7 +66,7 @@ export async function withStagedImages<T>(
   { temporaryRoot = '/dev/shm' }: { temporaryRoot?: string } = {},
   operation: (paths: string[]) => T | Promise<T>,
 ): Promise<T> {
-  if (!Array.isArray(images) || images.length === 0) {
+  if (images.length === 0) {
     return operation([]);
   }
 

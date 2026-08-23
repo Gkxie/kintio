@@ -60,7 +60,6 @@ test('[G03][A02][DEP01] positive integer settings reject zero fractions and non-
 test('[DEP02] project-only enum settings fail closed on unsupported values', () => {
   for (const [name, value, pattern] of [
     ['CODEX_REASONING_EFFORT', 'tiny', /CODEX_REASONING_EFFORT/u],
-    ['CODEX_SANDBOX_MODE', 'root', /CODEX_SANDBOX_MODE/u],
     ['CODEX_WEB_SEARCH_MODE', 'sometimes', /CODEX_WEB_SEARCH_MODE/u],
   ] as const) {
     assert.throws(() => createConfig({ ...base, [name]: value }), pattern);
@@ -68,11 +67,9 @@ test('[DEP02] project-only enum settings fail closed on unsupported values', () 
   const config = createConfig({
     ...base,
     CODEX_REASONING_EFFORT: 'ultra',
-    CODEX_SANDBOX_MODE: 'workspace-write',
     CODEX_WEB_SEARCH_MODE: 'cached',
   });
   assert.equal(config.codex.reasoningEffort, 'ultra');
-  assert.equal(config.codex.sandboxMode, 'workspace-write');
   assert.equal(config.codex.webSearchMode, 'cached');
 });
 

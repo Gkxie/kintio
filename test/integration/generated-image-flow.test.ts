@@ -95,7 +95,7 @@ test('[I01][I04][I05][I07] generated image flows through spool and a same-thread
     codex: boundary,
     store,
     config: {
-      model: 'gpt-image-test', reasoningEffort: 'none', sandboxMode: 'read-only',
+      model: 'gpt-image-test', reasoningEffort: 'none',
       workingDirectory: directory, imageTempDirectory: directory,
       generatedImageDirectory: generatedDirectory,
     },

@@ -8,7 +8,7 @@ import type { AppConfig } from './config.ts';
 import type { MessageSync } from './routes/wecom.ts';
 import type { Logger } from './types.ts';
 
-export type WechatApp = Hono & {
+type WechatApp = Hono & {
   stopAccepting(): void;
   shutdown(): Promise<void>;
   abort(): Promise<void>;
@@ -25,12 +25,11 @@ export function createApp({
 }): WechatApp {
   const app = new Hono() as WechatApp;
   const wecomCrypto = new WecomCrypto(config.wecom);
-  const runtime =
-    messageProcessor === undefined ? createRuntime({ config, logger }) : null;
+  const runtime = messageProcessor === undefined
+    ? createRuntime({ config, logger })
+    : undefined;
   const activeMessageProcessor =
-    messageProcessor === undefined
-      ? runtime!.messageProcessor
-      : messageProcessor;
+    runtime?.messageProcessor ?? messageProcessor ?? null;
 
   app.use('*', secureHeaders());
   app.use('*', async (context, next) => {
@@ -51,9 +50,9 @@ export function createApp({
     return context.text('internal server error', 500);
   });
 
-  app.stopAccepting = () => runtime?.stopAccepting?.();
-  app.shutdown = () => Promise.resolve(runtime?.close());
-  app.abort = () => Promise.resolve(runtime?.abort());
+  app.stopAccepting = () => runtime?.stopAccepting();
+  app.shutdown = () => runtime ? runtime.close() : Promise.resolve();
+  app.abort = () => runtime ? runtime.abort() : Promise.resolve();
 
   return app;
 }

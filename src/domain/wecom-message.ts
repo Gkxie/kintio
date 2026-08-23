@@ -7,8 +7,6 @@ export const MESSAGE_ORIGINS = {
   HUMAN: 'human',
   UNKNOWN: 'unknown',
 } as const;
-export type MessageOrigin =
-  (typeof MESSAGE_ORIGINS)[keyof typeof MESSAGE_ORIGINS];
 
 export const MESSAGE_TYPES = {
   TEXT: 'text',

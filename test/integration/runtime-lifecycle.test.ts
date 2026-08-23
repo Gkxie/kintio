@@ -28,7 +28,6 @@ function activeConfig(directory: string): AppConfig {
     WECOM_BOT_PAUSE_FILE: path.join(directory, 'legacy-paused'),
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
-    CODEX_GENERATED_IMAGE_DIR: path.join(directory, 'generated'),
   });
 }
 
@@ -40,7 +39,6 @@ test('[G03][DEP01] disabled runtime exposes complete no-op lifecycle', async () 
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
   });
   const runtime = createRuntime({ config, logger });
-  assert.equal(runtime.enabled, false);
   assert.equal(runtime.messageProcessor, null);
   runtime.stopAccepting();
   await runtime.abort();
@@ -51,8 +49,7 @@ test('[DEP01] active runtime stop/abort/close are safe and close releases the in
   const directory = await workspace(t);
   const config = activeConfig(directory);
   const runtime = createRuntime({ config, logger });
-  assert.equal(runtime.enabled, true);
-  if (!runtime.enabled) return;
+  assert.ok(runtime.messageProcessor);
   assert.equal(await fs.stat(config.state.lockFile).then(() => true), true);
 
   runtime.stopAccepting();

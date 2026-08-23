@@ -290,16 +290,6 @@ export interface LegacyJournalEntry {
   metadata?: Readonly<Record<string, unknown>>;
 }
 
-export interface LegacyImportSummary {
-  imported: boolean;
-  reason?: string;
-  cursors?: number;
-  messages?: number;
-  authorizations?: number;
-  media?: number;
-  journalEntries?: number;
-}
-
 type SqlInputValue = null | number | bigint | string | Uint8Array;
 type SqlRow = Record<string, unknown>;
 type Clock = () => number;

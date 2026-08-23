@@ -57,7 +57,6 @@ class FakeProcess extends EventEmitter {
 const threadOptions: CodexThreadOptions = {
   workingDirectory: '/workspace',
   approvalPolicy: 'never',
-  sandboxMode: 'read-only',
 };
 
 function fakeSpawn(

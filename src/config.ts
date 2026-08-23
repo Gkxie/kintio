@@ -11,11 +11,6 @@ export function resolveProjectRoot(moduleUrl: string): string {
 
 const projectRoot = resolveProjectRoot(import.meta.url);
 
-const SANDBOX_MODES = new Set([
-  'read-only',
-  'workspace-write',
-  'danger-full-access',
-]);
 const REASONING_EFFORTS = new Set([
   'none',
   'minimal',
@@ -27,7 +22,6 @@ const REASONING_EFFORTS = new Set([
   'ultra',
 ]);
 const WEB_SEARCH_MODES = new Set(['disabled', 'cached', 'live']);
-export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
 export type ReasoningEffort =
   | 'none'
   | 'minimal'
@@ -41,12 +35,9 @@ export type WebSearchMode = 'disabled' | 'cached' | 'live';
 
 export interface CodexConfig {
   readonly enabled: boolean;
-  readonly apiKey: string;
-  readonly baseUrl: string;
   readonly pathOverride: string;
   readonly model: string;
   readonly reasoningEffort: ReasoningEffort | undefined;
-  readonly sandboxMode: SandboxMode;
   readonly webSearchMode: WebSearchMode;
   readonly imageTempDirectory: string;
   readonly workingDirectory: string;
@@ -214,6 +205,10 @@ export function createConfig(
   const pauseFile = path.resolve(
     environment.WECOM_BOT_PAUSE_FILE || path.join(projectRoot, 'data/bot-paused'),
   );
+  const codexWorkingDirectory = path.resolve(
+    environment.CODEX_WORKING_DIRECTORY ||
+      path.join(projectRoot, 'codex-workspace'),
+  );
 
   return Object.freeze({
     port: parsePort(environment.PORT),
@@ -267,8 +262,6 @@ export function createConfig(
     }),
     codex: Object.freeze({
       enabled: codexEnabled,
-      apiKey: environment.CODEX_API_KEY || '',
-      baseUrl: environment.CODEX_BASE_URL || '',
       pathOverride: environment.CODEX_PATH || 'codex',
       model: environment.CODEX_MODEL || '',
       reasoningEffort: parseOptionalEnum<ReasoningEffort>(
@@ -277,25 +270,13 @@ export function createConfig(
         'CODEX_REASONING_EFFORT',
         undefined,
       ),
-      sandboxMode: parseOptionalEnum<SandboxMode>(
-        environment.CODEX_SANDBOX_MODE,
-        SANDBOX_MODES,
-        'CODEX_SANDBOX_MODE',
-        'read-only',
-      ) ?? 'read-only',
       webSearchMode: webSearchMode ?? 'live',
       imageTempDirectory: path.resolve(
         environment.CODEX_IMAGE_TMP_DIR ||
           path.join(projectRoot, 'data/codex-input'),
       ),
-      workingDirectory: path.resolve(
-        environment.CODEX_WORKING_DIRECTORY ||
-          path.join(projectRoot, 'codex-workspace'),
-      ),
-      generatedImageDirectory: path.resolve(
-        environment.CODEX_GENERATED_IMAGE_DIR ||
-          path.join(projectRoot, 'codex-workspace/generated_images'),
-      ),
+      workingDirectory: codexWorkingDirectory,
+      generatedImageDirectory: path.join(codexWorkingDirectory, 'generated_images'),
     }),
   });
 }

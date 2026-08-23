@@ -26,9 +26,12 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function optionalClientMessageId(messageId: unknown): string {
+function withClientMessageId(
+  body: JsonRecord,
+  messageId: unknown,
+): JsonRecord {
   const value = String(messageId || '');
-  if (!value) return '';
+  if (!value) return body;
 
   if (value.length > 32 || !/^[0-9A-Za-z_-]+$/.test(value)) {
     throw new Error(
@@ -36,15 +39,7 @@ function optionalClientMessageId(messageId: unknown): string {
     );
   }
 
-  return value;
-}
-
-function withClientMessageId(
-  body: JsonRecord,
-  messageId: unknown,
-): JsonRecord {
-  const value = optionalClientMessageId(messageId);
-  return value ? { ...body, msgid: value } : body;
+  return { ...body, msgid: value };
 }
 
 function safeFilename(filename: unknown): string {

@@ -50,10 +50,6 @@ test('[DEP02] runtime keeps project Codex configuration isolated from the user c
     CODEX_REASONING_EFFORT: 'low',
     CODEX_WORKING_DIRECTORY: path.join(temporary.directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(temporary.directory, 'image-inputs'),
-    CODEX_GENERATED_IMAGE_DIR: path.join(
-      temporary.directory,
-      'generated-images',
-    ),
     CODEX_WEB_SEARCH_MODE: 'disabled',
   });
   const runtime = createRuntime({
@@ -65,7 +61,7 @@ test('[DEP02] runtime keeps project Codex configuration isolated from the user c
     if (!closed) await runtime.close();
   });
 
-  assert.equal(runtime.enabled, true);
+  assert.ok(runtime.messageProcessor);
   assert.equal((await fs.stat(temporary.filePath)).mode & 0o777, 0o600);
   await fs.access(config.state.lockFile);
 

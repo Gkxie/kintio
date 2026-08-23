@@ -54,10 +54,9 @@ test('[I08][I09] mock upstream sends one accepted text through real Codex and re
   });
   const mediaGateway = new WecomMediaGateway({ apiClient });
   const codex = createCodexAppServer({
-    apiKey: config.codex.apiKey,
-    baseUrl: config.codex.baseUrl,
     pathOverride: config.codex.pathOverride,
     webSearchMode: config.codex.webSearchMode,
+    workingDirectory: config.codex.workingDirectory,
   });
   const agent = new CodexAgent({
     codex,
@@ -65,7 +64,6 @@ test('[I08][I09] mock upstream sends one accepted text through real Codex and re
     config: {
       model: config.codex.model,
       reasoningEffort: config.codex.reasoningEffort,
-      sandboxMode: config.codex.sandboxMode,
       workingDirectory: config.codex.workingDirectory,
       imageTempDirectory: config.codex.imageTempDirectory,
       generatedImageDirectory: config.codex.generatedImageDirectory,

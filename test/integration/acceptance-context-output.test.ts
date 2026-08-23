@@ -176,7 +176,7 @@ test('[C07] accepted, failed, and uncertain remain independent channel facts in 
     codex: boundary,
     store,
     config: {
-      model: 'gpt-channel', reasoningEffort: 'none', sandboxMode: 'read-only',
+      model: 'gpt-channel', reasoningEffort: 'none',
       workingDirectory: directory, imageTempDirectory: directory,
       generatedImageDirectory: path.join(directory, 'generated'),
     },

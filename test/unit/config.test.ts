@@ -28,9 +28,12 @@ test('message processing remains disabled until CorpID and Secret are present', 
 
   assert.equal(config.wecom.api.enabled, false);
   assert.equal(config.codex.enabled, false);
-  assert.equal(config.codex.sandboxMode, 'read-only');
   assert.equal(config.codex.webSearchMode, 'live');
   assert.match(config.codex.imageTempDirectory, /data\/codex-input$/u);
+  assert.equal(
+    config.codex.generatedImageDirectory,
+    path.join(config.codex.workingDirectory, 'generated_images'),
+  );
   assert.equal(config.wecom.authorization.trigger, '');
   assert.equal(config.wecom.authorization.requiredConsecutive, 3);
   assert.equal(

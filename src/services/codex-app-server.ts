@@ -33,7 +33,6 @@ export interface CodexRun {
 export interface CodexThreadOptions {
   readonly workingDirectory: string;
   readonly approvalPolicy: 'never';
-  readonly sandboxMode: string;
   readonly developerInstructions?: string;
   readonly model?: string;
   readonly modelReasoningEffort?: string;
@@ -418,7 +417,7 @@ class CodexAppServerThread implements CodexThread {
     return {
       cwd: this.#options.workingDirectory,
       approvalPolicy: this.#options.approvalPolicy,
-      sandbox: this.#options.sandboxMode,
+      sandbox: 'read-only',
       ...(this.#options.model ? { model: this.#options.model } : {}),
       ...(this.#options.developerInstructions
         ? { developerInstructions: this.#options.developerInstructions }

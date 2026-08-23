@@ -89,10 +89,9 @@ test('[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive 
   };
   const server = createCodexAppServer(
     {
-      apiKey: 'openai-test-key',
-      baseUrl: 'https://api.example.test',
       pathOverride: '/mock/codex',
       webSearchMode: 'live',
+      workingDirectory: '/mock/workspace',
     },
     { spawnProcess, logger: { warn() {} } },
   );

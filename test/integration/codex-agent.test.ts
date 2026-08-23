@@ -196,7 +196,6 @@ function createAgent(
     config: {
       model: 'gpt-project',
       reasoningEffort: 'low',
-      sandboxMode: 'read-only',
       workingDirectory: '/isolated-codex-workspace',
       imageTempDirectory: config.imageTempDirectory || '/dev/shm',
       generatedImageDirectory: config.generatedImageDirectory || '',
@@ -221,7 +220,6 @@ test('[DEP02] passes project model/effort and treats customer observation indepe
   const completed = await submission.completion;
 
   assert.deepEqual(boundary.startOptions, [{
-    sandboxMode: 'read-only',
     workingDirectory: '/isolated-codex-workspace',
     approvalPolicy: 'never',
     developerInstructions: boundary.startOptions[0]?.developerInstructions,

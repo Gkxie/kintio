@@ -154,7 +154,7 @@ async function harness(t: TestContext, boundary: Boundary) {
     codex: boundary,
     store,
     config: {
-      model: 'gpt-edge', reasoningEffort: 'none', sandboxMode: 'read-only',
+      model: 'gpt-edge', reasoningEffort: 'none',
       workingDirectory: directory, imageTempDirectory: directory,
       generatedImageDirectory: path.join(directory, 'generated'),
     },
@@ -197,7 +197,7 @@ test('[C07][SEC01] prompt includes media, channel, observation, handoff, and cus
   assert.doesNotMatch(prompt, /secret/u);
 });
 
-test('[SEC01][DEP02] app-server environment handles API/base/path present and absent', async (t) => {
+test('[SEC01][DEP02] app-server uses host login with path and web-search overrides', async (t) => {
   const captures: Array<{
     command: string;
     args: readonly string[];
@@ -209,13 +209,16 @@ test('[SEC01][DEP02] app-server environment handles API/base/path present and ab
   }) as SpawnProcess;
   const configured = createCodexAppServer(
     {
-      apiKey: 'api-key', baseUrl: 'https://api.example.test',
       pathOverride: '/custom/codex', webSearchMode: 'live',
+      workingDirectory: '/custom/workspace',
     },
     { spawnProcess },
   );
   const defaults = createCodexAppServer(
-    { apiKey: '', baseUrl: '', pathOverride: '', webSearchMode: 'disabled' },
+    {
+      pathOverride: '', webSearchMode: 'disabled',
+      workingDirectory: '/default/workspace',
+    },
     { spawnProcess },
   );
   t.after(async () => Promise.all([configured.close(), defaults.close()]));
@@ -223,10 +226,8 @@ test('[SEC01][DEP02] app-server environment handles API/base/path present and ab
   await defaults.initialize();
   assert.equal(captures[0]?.command, '/custom/codex');
   assert.deepEqual(captures[0]?.args.slice(0, 2), ['app-server', '--stdio']);
-  assert.equal(captures[0]?.env.OPENAI_API_KEY, 'api-key');
-  assert.equal(captures[0]?.env.OPENAI_BASE_URL, 'https://api.example.test');
-  assert.equal('OPENAI_API_KEY' in (captures[1]?.env || {}), false);
-  assert.equal('OPENAI_BASE_URL' in (captures[1]?.env || {}), false);
+  assert.equal('OPENAI_API_KEY' in (captures[0]?.env || {}), false);
+  assert.equal('OPENAI_BASE_URL' in (captures[0]?.env || {}), false);
   assert.ok(captures[0]?.args.includes('web_search="live"'));
   assert.ok(captures[1]?.args.includes('web_search="disabled"'));
 });

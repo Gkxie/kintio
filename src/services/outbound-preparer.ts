@@ -13,7 +13,6 @@ import { MAX_WECHAT_IMAGE_BYTES, detectImageFormat } from './image-stager.ts';
 import type { WecomMediaGateway } from './media-gateway.ts';
 
 type Payload = Readonly<Record<string, unknown>>;
-type SendCandidate = SendIntent;
 
 type MediaGateway = Pick<
   WecomMediaGateway,
@@ -34,7 +33,7 @@ export interface PreparedBatch {
   readonly spoolPaths: readonly string[];
 }
 
-function exactPayload(message: SendCandidate, mediaId = ''): Payload {
+function exactPayload(message: SendIntent, mediaId = ''): Payload {
   switch (message.type) {
     case 'text':
       return { msgtype: 'text', text: { content: message.content } };
@@ -69,7 +68,7 @@ function exactPayload(message: SendCandidate, mediaId = ''): Payload {
   }
 }
 
-function fallbackText(message: SendCandidate): string {
+function fallbackText(message: SendIntent): string {
   switch (message.type) {
     case 'link':
       return [message.title, message.description, message.url].filter(Boolean).join('\n');

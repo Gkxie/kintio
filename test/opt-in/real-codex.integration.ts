@@ -79,17 +79,15 @@ async function createRealHarness(): Promise<RealHarness> {
     pathOverride: process.env.CODEX_PATH || 'codex',
     model: process.env.CODEX_MODEL || 'gpt-5.6-luna',
     reasoningEffort: reasoningEffort(process.env.CODEX_REASONING_EFFORT),
-    sandboxMode: 'read-only' as const,
     webSearchMode: 'live' as const,
     workingDirectory: path.resolve('codex-workspace'),
     imageTempDirectory,
     generatedImageDirectory,
   };
   const codex = createCodexAppServer({
-    apiKey: process.env.CODEX_API_KEY || '',
-    baseUrl: process.env.CODEX_BASE_URL || '',
     pathOverride: config.pathOverride,
     webSearchMode: config.webSearchMode,
+    workingDirectory: config.workingDirectory,
   });
   const agent = new CodexAgent({ codex, store, config });
   const cursors = new Map<string, string>();
