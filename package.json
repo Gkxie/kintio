@@ -1,0 +1,22 @@
+{
+  "name": "wechat-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "WeCom customer-service callback built with Hono",
+  "scripts": {
+    "dev": "node --watch index.js",
+    "start": "node index.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.12",
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@openai/codex": "^0.149.0",
+    "hono": "^4.12.8",
+    "zod": "^4.4.3"
+  }
+}
