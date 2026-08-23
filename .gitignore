@@ -7,7 +7,6 @@ pnpm-debug.log*
 coverage/
 data/
 codex-workspace/*
-!codex-workspace/AGENTS.md
 !codex-workspace/.agents/
 !codex-workspace/.agents/skills/
 !codex-workspace/.agents/skills/wechat-kf-reply-sop/
