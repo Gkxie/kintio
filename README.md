@@ -84,13 +84,7 @@ Start Kintio:
 pnpm start
 ```
 
-Check that the HTTP listener is alive from another terminal:
-
-```bash
-curl http://127.0.0.1:8888/healthz
-```
-
-An `ok` response confirms process liveness, not adapter readiness. Complete the callback
+Successful startup prints `Hono server is listening on port 8888`. Complete the callback
 or binding checks described in the setup guide before sending production traffic.
 
 ## Security boundaries

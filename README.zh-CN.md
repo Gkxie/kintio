@@ -51,13 +51,8 @@ codex login status
 pnpm start
 ```
 
-在另一个终端检查 HTTP Listener：
-
-```bash
-curl http://127.0.0.1:8888/healthz
-```
-
-返回 `ok` 只代表进程存活；投入使用前仍需按部署指南完成回调或绑定验证。
+启动成功后会输出 `Hono server is listening on port 8888`；投入使用前仍需按部署
+指南完成回调或绑定验证。
 
 ## 英文文档
 

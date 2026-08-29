@@ -4,6 +4,9 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Removed the unused `/healthz` endpoint; process state and the Hono startup log
+  remain the supported local liveness signals.
+
 ## 0.4.0 - 2026-08-29
 
 - Authorized channel users can assign work to a Codex Agent and receive results

@@ -66,16 +66,13 @@ function createTestApp(
   return createApp({ config: testConfig, logger: silentLogger, ...options });
 }
 
-test('GET / and /healthz expose the expected responses', async () => {
+test('GET / exposes the expected response', async () => {
   const app = createTestApp();
   const rootResponse = await app.request('/');
-  const healthResponse = await app.request('/healthz');
 
   assert.equal(rootResponse.status, 200);
   assert.equal(await rootResponse.text(), 'hello world');
   assert.equal(rootResponse.headers.get('cache-control'), 'no-store');
-  assert.equal(healthResponse.status, 200);
-  assert.equal(await healthResponse.text(), 'ok');
 });
 
 test('GET / verifies and decrypts a valid WeCom callback challenge', async () => {

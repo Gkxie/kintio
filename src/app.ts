@@ -37,7 +37,6 @@ export function createApp({
     context.header('Cache-Control', 'no-store');
   });
 
-  app.get('/healthz', (context) => context.text('ok'));
   app.all('/mcp', async (context) => runtime
     ? await runtime.handleMcp(context.req.raw)
     : context.json({ error: 'not found' }, 404));

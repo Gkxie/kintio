@@ -118,7 +118,7 @@ test('app with an injected processor has no-op lifecycle hooks', async () => {
   app.stopAccepting();
   await app.abort();
   await app.shutdown();
-  assert.equal((await app.request('/healthz')).status, 200);
+  assert.equal((await app.request('/mcp', { method: 'POST' })).status, 404);
 });
 
 test('active runtime stop/abort/close are safe and close releases the instance lock', async (t) => {
@@ -148,7 +148,6 @@ test('app stopAccepting, abort, and shutdown hooks delegate active lifecycle', a
   const config = activeConfig(directory);
   const app = createApp({ config, logger });
   await app.start();
-  assert.equal((await app.request('/healthz')).status, 200);
   assert.equal((await app.request('/mcp', { method: 'POST' })).status, 401);
   assert.equal((await app.request('/mcp/ilink', { method: 'POST' })).status, 401);
   app.stopAccepting();

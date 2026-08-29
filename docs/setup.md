@@ -142,19 +142,8 @@ pnpm start
 pnpm run dev
 ```
 
-Keep Kintio running and check the HTTP listener from another terminal:
-
-```bash
-curl http://127.0.0.1:8888/healthz
-```
-
-Expected output:
-
-```text
-ok
-```
-
-`/healthz` is a liveness check. It does not wait for shutdown backfill, Codex recovery, or all iLink long polls to become ready. Also confirm that startup logs contain no `runtime startup failed` entry.
+Successful startup prints `Hono server is listening on port 8888`. Also confirm
+that the logs contain no later `runtime startup failed` entry.
 
 For a WeChat KF deployment, save the callback configuration and complete the authorization flow in section 3.2. For an iLink deployment, send a normal message from the bound account and confirm that the agent replies. If it does not, check for `[ilink-listener] poll cycle failed` in the logs.
 
@@ -182,15 +171,15 @@ running both names concurrently:
 ```bash
 pm2 stop talkferry
 pm2 start ecosystem.config.cjs
-curl --fail http://127.0.0.1:8888/healthz
+pm2 status kintio
 pm2 logs kintio --lines 50 --nostream
 ```
 
 Deployments older than `0.2.0` used the still older process name `wechat-bot`;
 use that name in both the stop and delete commands when upgrading directly.
-`/healthz` proves only that the listener is alive. Keep the stopped old PM2
-entry until `kintio` remains online and its logs show startup catch-up without a
-later `runtime startup failed`. After that verification, finalize the migration:
+Keep the stopped old PM2 entry until `kintio` remains online and its logs show
+the Hono listener and startup catch-up without a later `runtime startup failed`.
+After that verification, finalize the migration:
 
 ```bash
 pm2 delete talkferry
@@ -235,4 +224,6 @@ items together:
 - `data/ilink-storage.key`, when using the file-based key;
 - the Codex login state and thread history for the operating-system user. Codex CLI manages these separately; they are not included in the SQLite backup.
 
-When troubleshooting, check the service logs, `/healthz`, the relevant provider console, and `codex login status` for the operating-system user that starts Kintio.
+When troubleshooting, check the process state, service logs, the relevant
+provider console, and `codex login status` for the operating-system user that
+starts Kintio.

@@ -90,7 +90,7 @@ function signalProcessTree(
   }
 }
 
-test('outer service answers health and hello then SIGTERM releases its port and lock', async (t) => {
+test('outer service answers hello then SIGTERM releases its port and lock', async (t) => {
   const servicePort = await availablePort();
   await waitForPortReleased(servicePort);
   const temporary = await createTempSqlite(t, {
@@ -113,9 +113,6 @@ test('outer service answers health and hello then SIGTERM releases its port and 
     },
   });
 
-  const health = await waitForResponse(servicePort, '/healthz');
-  assert.equal(health.status, 200);
-  assert.equal(await health.text(), 'ok');
   const root = await waitForResponse(servicePort, '/');
   assert.equal(root.status, 200);
   assert.equal(await root.text(), 'hello world');
@@ -161,7 +158,7 @@ test('pnpm start builds and runs dist/index.js', async (t) => {
     signalProcessTree(child, 'SIGKILL');
   });
 
-  assert.equal((await waitForResponse(servicePort, '/healthz')).status, 200);
+  assert.equal((await waitForResponse(servicePort, '/')).status, 200);
   assert.match(output, /node dist\/index\.js/u);
   signalProcessTree(child, 'SIGTERM');
   const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
