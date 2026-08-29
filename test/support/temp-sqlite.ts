@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync, type DatabaseSyncOptions } from 'node:sqlite';
-import type { TestContext } from 'node:test';
+import type { TestContext } from 'vitest';
 
 export interface TempSqliteOptions {
   prefix?: string;
@@ -28,7 +28,7 @@ function errorCode(error: unknown): string | undefined {
 export async function createTempSqlite(
   testContext: TestContext,
   {
-    prefix = 'wechat-bot-sqlite-',
+    prefix = 'kintio-sqlite-',
     filename = 'wecom.sqlite',
   }: TempSqliteOptions = {},
 ): Promise<TempSqlite> {
@@ -61,6 +61,6 @@ export async function createTempSqlite(
     await fs.rm(directory, { recursive: true, force: true });
   }
 
-  testContext.after(() => cleanup());
+  testContext.onTestFinished(() => cleanup());
   return { directory, filePath, open, cleanup };
 }

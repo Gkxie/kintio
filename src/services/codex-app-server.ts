@@ -2,7 +2,15 @@ import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 
+import { KINTIO_VERSION } from '../version.ts';
+
 const REQUEST_TIMEOUT_MS = 30_000;
+const THREAD_LIST_PAGE_SIZE = 100;
+const MAX_THREAD_LIST_PAGES = 100;
+const THREAD_SOURCE_KINDS = [
+  'cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
+  'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown',
+] as const;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -13,7 +21,7 @@ export type CodexInput =
       | { readonly type: 'local_image'; readonly path: string }
     )[];
 
-export interface CodexItem extends JsonRecord {
+interface CodexItem extends JsonRecord {
   readonly id?: string;
   readonly type: string;
   readonly startedSequence?: number;
@@ -40,6 +48,7 @@ export interface CodexThreadOptions {
 
 export interface CodexThread {
   readonly id: string | null;
+  ensure?(): Promise<string>;
   startRun(
     input: CodexInput,
     options?: { readonly clientUserMessageId?: string },
@@ -48,15 +57,18 @@ export interface CodexThread {
     input: CodexInput,
     options?: { readonly clientUserMessageId?: string },
   ): Promise<string>;
+  interrupt?(): Promise<boolean>;
 }
 
 export interface CodexBoundary {
   startThread(options: CodexThreadOptions): CodexThread;
   resumeThread(threadId: string, options: CodexThreadOptions): CodexThread;
+  getThreadState?(threadId: string): Promise<'active' | 'archived' | 'missing'>;
   readThread(
     threadId: string,
     options?: { readonly includeTurns?: boolean },
   ): Promise<unknown>;
+  deleteThread?(threadId: string): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -170,12 +182,46 @@ export class CodexAppServer implements CodexBoundary {
     return new CodexAppServerThread(this, threadId, options);
   }
 
+  async getThreadState(
+    threadId: string,
+  ): Promise<'active' | 'archived' | 'missing'> {
+    await this.initialize();
+    const listed = async (archived: boolean): Promise<boolean> => {
+      let cursor: string | null = null;
+      for (let page = 0; page < MAX_THREAD_LIST_PAGES; page += 1) {
+        const result: {
+          readonly data?: readonly { readonly id?: string }[];
+          readonly nextCursor?: string | null;
+        } = await this.request('thread/list', {
+          archived,
+          useStateDbOnly: true,
+          limit: THREAD_LIST_PAGE_SIZE,
+          sourceKinds: THREAD_SOURCE_KINDS,
+          ...(cursor ? { cursor } : {}),
+        });
+        if ((result.data || []).some((thread) => thread.id === threadId)) {
+          return true;
+        }
+        cursor = result.nextCursor || null;
+        if (!cursor) return false;
+      }
+      throw new Error('Codex thread listing exceeded the pagination limit');
+    };
+    if (await listed(false)) return 'active';
+    return await listed(true) ? 'archived' : 'missing';
+  }
+
   async readThread(
     threadId: string,
     { includeTurns = true }: { readonly includeTurns?: boolean } = {},
   ): Promise<unknown> {
     await this.initialize();
     return this.request('thread/read', { threadId, includeTurns });
+  }
+
+  async deleteThread(threadId: string): Promise<void> {
+    await this.initialize();
+    await this.request('thread/delete', { threadId });
   }
 
   initialize(): Promise<void> {
@@ -191,13 +237,18 @@ export class CodexAppServer implements CodexBoundary {
     const childEnvironment: NodeJS.ProcessEnv = this.#options.env
       ? { ...this.#options.env }
       : { ...process.env };
-    childEnvironment.CODEX_INTERNAL_ORIGINATOR_OVERRIDE ||= 'wechat_kf_app_server';
+    childEnvironment.CODEX_INTERNAL_ORIGINATOR_OVERRIDE ||= 'kintio_app_server';
     const child = this.#options.spawnProcess(command, argumentsList, {
       env: childEnvironment,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.#process = child;
-    child.once('error', () => this.#fail(new Error('Codex app-server process error')));
+    child.once('error', (error) => {
+      this.#fail(new Error(
+        `Codex app-server process error: ${error.message}`,
+        { cause: error },
+      ));
+    });
     child.once('exit', (code, signal) => {
       if (this.#closed) return;
       const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
@@ -208,9 +259,9 @@ export class CodexAppServer implements CodexBoundary {
     this.#reader.on('line', (line) => this.#handleLine(line));
     await this.request('initialize', {
       clientInfo: {
-        name: 'wechat_kf_codex',
-        title: 'WeChat Customer Service Codex Bridge',
-        version: '1.0.0',
+        name: 'kintio_codex',
+        title: 'Kintio Codex Adapter',
+        version: KINTIO_VERSION,
       },
       capabilities: null,
     });
@@ -439,6 +490,12 @@ class CodexAppServerThread implements CodexThread {
     return this.#ready;
   }
 
+  async ensure(): Promise<string> {
+    await this.#ensureThread();
+    if (!this.id) throw new Error('Codex thread has no ID');
+    return this.id;
+  }
+
   async startRun(
     input: CodexInput,
     { clientUserMessageId }: { readonly clientUserMessageId?: string } = {},
@@ -488,5 +545,14 @@ class CodexAppServerThread implements CodexThread {
     this.#lastSteerSequence = this.#server.eventSequence;
     this.#lastSteerClientId = clientUserMessageId || '';
     return result.turnId;
+  }
+
+  async interrupt(): Promise<boolean> {
+    if (!this.id || !this.#activeTurnId) return false;
+    await this.#server.request('turn/interrupt', {
+      threadId: this.id,
+      turnId: this.#activeTurnId,
+    });
+    return true;
   }
 }

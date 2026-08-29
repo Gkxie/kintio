@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import test, { type TestContext } from 'node:test';
+import { test, type TestContext } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
@@ -11,6 +11,7 @@ import {
 } from '../../src/state/sqlite-store.ts';
 import type { ImageAttachment, NormalizedMessage } from '../../src/types.ts';
 import { inspectAttempt } from '../support/sqlite-inspect.ts';
+import { seedPendingAttempts } from '../support/pending-attempt.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 function message(id: string, externalUserId = 'wm-one'): NormalizedMessage {
@@ -25,7 +26,7 @@ function harness(t: TestContext): { store: SqliteStore; filePath: string } {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlite-invariant-'));
   const filePath = path.join(directory, 'state.sqlite');
   const store = new SqliteStore({ filePath });
-  t.after(() => {
+  t.onTestFinished(() => {
     store.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
@@ -44,23 +45,18 @@ function ingest(store: SqliteStore, values: readonly NormalizedMessage[]): strin
 function reserveText(store: SqliteStore, id: string): string {
   const [messageKey] = ingest(store, [message(id)]);
   assert.ok(messageKey);
-  const claimed = store.claimInbound({ messageKey }).message;
-  store.finalizeInboundBatch({
-    messageKey,
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: [{
+  store.claimInbound({ messageKey });
+  seedPendingAttempts(store, messageKey, [{
       sendIndex: 0,
       sentType: 'text',
       payload: { msgtype: 'text', text: { content: id } },
-    }],
-  });
+    }]);
   return messageKey;
 }
 
-test('[D01] invalid journal mode and newer schema fail before runtime use', (t) => {
+test('invalid journal mode and newer schema fail before runtime use', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlite-schema-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.onTestFinished(() => fs.rmSync(directory, { recursive: true, force: true }));
   assert.throws(
     () => new SqliteStore({
       filePath: path.join(directory, 'bad-mode.sqlite'),
@@ -76,9 +72,351 @@ test('[D01] invalid journal mode and newer schema fail before runtime use', (t) 
     () => new SqliteStore({ filePath: futurePath }),
     /newer than supported/u,
   );
+  const retiredPath = path.join(directory, 'retired.sqlite');
+  const retired = new DatabaseSync(retiredPath);
+  retired.exec('PRAGMA user_version = 10');
+  retired.close();
+  assert.throws(
+    () => new SqliteStore({ filePath: retiredPath }),
+    /no longer supported/u,
+  );
 });
 
-test('[R05][SEC02] status CHECK rejects invalid rows and filters remain parameterized', (t) => {
+test('schema v11 removes retired state without losing durable facts', (t) => {
+  const { store, filePath } = harness(t);
+  const messageKey = reserveText(store, 'v11-preserved');
+  const attempt = store.beginNextSend();
+  assert.ok(attempt);
+  store.completeSend(attempt.attemptId, { wecomMsgId: 'wx-v11-preserved' });
+  const [activeMessageKey] = ingest(store, [message('v11-active-session')]);
+  assert.ok(activeMessageKey);
+  store.claimInbound({ messageKey: activeMessageKey });
+  const session = store.createAgentSession({ messageKey: activeMessageKey });
+  const [staleAttempt] = seedPendingAttempts(store, activeMessageKey, [{
+    sendIndex: 0,
+    sentType: 'text',
+    payload: { msgtype: 'text', text: { content: 'must not send' } },
+  }]);
+  assert.ok(staleAttempt);
+  const [absorbedMessageKey] = ingest(store, [message('v11-absorbed-context')]);
+  assert.ok(absorbedMessageKey);
+  store.database.prepare(`
+    UPDATE inbound_messages SET status = 'absorbed' WHERE message_key = ?
+  `).run(absorbedMessageKey);
+  store.close();
+
+  const v11 = new DatabaseSync(filePath);
+  v11.exec(`
+    DROP TRIGGER ilink_session_window_insert_guard;
+    DROP TRIGGER ilink_session_window_update_guard;
+    DROP TRIGGER ilink_attempt_window_insert_guard;
+    DROP TRIGGER ilink_attempt_window_update_guard;
+    DROP TRIGGER ilink_window_source_insert_guard;
+    DROP TRIGGER ilink_window_source_update_guard;
+    DROP TRIGGER ilink_window_delete_guard;
+    DROP TABLE ilink_login_offers;
+    DROP TABLE ilink_inbound_images;
+    DROP TABLE ilink_reply_window_secrets;
+    DROP TABLE ilink_reply_windows;
+    DROP TABLE ilink_account_secrets;
+    DROP TABLE ilink_accounts;
+    ALTER TABLE inbound_messages
+      ADD COLUMN context_status TEXT NOT NULL DEFAULT 'none'
+        CHECK (context_status IN ('none', 'pending', 'consumed'));
+    ALTER TABLE inbound_messages
+      ADD COLUMN claimed_conversation_epoch INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE agent_sessions
+      ADD COLUMN conversation_epoch INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE conversations
+      ADD COLUMN mode TEXT NOT NULL DEFAULT 'bot'
+        CHECK (mode IN ('bot', 'human', 'ended'));
+    ALTER TABLE conversations
+      ADD COLUMN automation_epoch INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE conversations
+      ADD COLUMN servicer_userid TEXT NOT NULL DEFAULT '';
+    ALTER TABLE conversations
+      ADD COLUMN session_source TEXT NOT NULL DEFAULT '';
+    ALTER TABLE conversations
+      ADD COLUMN change_type INTEGER NOT NULL DEFAULT 0;
+    UPDATE conversations
+    SET mode = 'human', automation_epoch = 1
+    WHERE open_kfid = 'wk-one' AND external_userid = 'wm-one';
+    PRAGMA user_version = 11;
+  `);
+  v11.close();
+
+  const upgraded = new SqliteStore({ filePath });
+  t.onTestFinished(() => upgraded.close());
+  assert.equal(
+    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    21,
+  );
+  assert.throws(() => upgraded.getAgentSession(session.token), /closed/u);
+  const inboundSql = String((upgraded.database.prepare(`
+    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inbound_messages'
+  `).get() as { sql: string }).sql);
+  assert.equal(inboundSql.includes("'held'"), false);
+  assert.equal(upgraded.getInbound(absorbedMessageKey)?.payload, undefined);
+  assert.equal(upgraded.getInbound(activeMessageKey)?.status, 'suppressed');
+  assert.deepEqual(
+    upgraded.listMessageAttempts(activeMessageKey).map((item) => ({
+      status: item.status,
+      errorCode: item.errorCode,
+    })),
+    [{ status: 'failed', errorCode: 'suppressed' }],
+  );
+  assert.equal(upgraded.listMessageAttempts(messageKey)[0]?.status, 'accepted');
+  assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
+  assert.deepEqual(upgraded.foreignKeyCheck(), []);
+});
+
+test('schema v12 adds durable deferred priority without losing inbox rows', (t) => {
+  const { store, filePath } = harness(t);
+  const [messageKey] = ingest(store, [message('v12-priority')]);
+  assert.ok(messageKey);
+  store.close();
+  const v12 = new DatabaseSync(filePath);
+  v12.exec(`
+    DROP TRIGGER ilink_session_window_insert_guard;
+    DROP TRIGGER ilink_session_window_update_guard;
+    DROP TRIGGER ilink_attempt_window_insert_guard;
+    DROP TRIGGER ilink_attempt_window_update_guard;
+    DROP TRIGGER ilink_window_source_insert_guard;
+    DROP TRIGGER ilink_window_source_update_guard;
+    DROP TRIGGER ilink_window_delete_guard;
+    DROP TABLE ilink_login_offers;
+    DROP TABLE ilink_inbound_images;
+    DROP TABLE ilink_reply_window_secrets;
+    DROP TABLE ilink_reply_windows;
+    DROP TABLE ilink_account_secrets;
+    DROP TABLE ilink_accounts;
+    DROP INDEX inbound_deferred_idx;
+    ALTER TABLE inbound_messages DROP COLUMN deferred;
+    ALTER TABLE inbound_messages DROP COLUMN channel;
+    ALTER TABLE conversations DROP COLUMN memory_thread_id;
+    ALTER TABLE agent_sessions DROP COLUMN memory_thread_id;
+    ALTER TABLE agent_sessions DROP COLUMN channel;
+    ALTER TABLE agent_sessions DROP COLUMN reply_window_id;
+    PRAGMA user_version = 12;
+  `);
+  v12.close();
+
+  const upgraded = new SqliteStore({ filePath });
+  t.onTestFinished(() => upgraded.close());
+  assert.equal(
+    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    21,
+  );
+  assert.equal(upgraded.getInbound(messageKey)?.deferred, false);
+  assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
+});
+
+test('schema v13 adds durable archived-memory bindings', (t) => {
+  const { store, filePath } = harness(t);
+  const [messageKey] = ingest(store, [message('v13-memory')]);
+  assert.ok(messageKey);
+  store.setConversationThread({
+    openKfId: 'wk-one',
+    externalUserId: 'wm-one',
+    threadId: '01900000-0000-7000-8000-000000000002',
+  });
+  store.close();
+  const v13 = new DatabaseSync(filePath);
+  v13.exec(`
+    DROP TRIGGER ilink_session_window_insert_guard;
+    DROP TRIGGER ilink_session_window_update_guard;
+    DROP TRIGGER ilink_attempt_window_insert_guard;
+    DROP TRIGGER ilink_attempt_window_update_guard;
+    DROP TRIGGER ilink_window_source_insert_guard;
+    DROP TRIGGER ilink_window_source_update_guard;
+    DROP TRIGGER ilink_window_delete_guard;
+    DROP TABLE ilink_login_offers;
+    DROP TABLE ilink_inbound_images;
+    DROP TABLE ilink_reply_window_secrets;
+    DROP TABLE ilink_reply_windows;
+    DROP TABLE ilink_account_secrets;
+    DROP TABLE ilink_accounts;
+    ALTER TABLE inbound_messages DROP COLUMN channel;
+    ALTER TABLE conversations DROP COLUMN memory_thread_id;
+    ALTER TABLE agent_sessions DROP COLUMN memory_thread_id;
+    ALTER TABLE agent_sessions DROP COLUMN channel;
+    ALTER TABLE agent_sessions DROP COLUMN reply_window_id;
+    PRAGMA user_version = 13;
+  `);
+  v13.close();
+
+  const upgraded = new SqliteStore({ filePath });
+  t.onTestFinished(() => upgraded.close());
+  assert.equal(
+    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    21,
+  );
+  assert.equal(upgraded.getConversation('wk-one', 'wm-one')?.memoryThreadId, '');
+  assert.ok(upgraded.getInbound(messageKey));
+  assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
+  assert.deepEqual(upgraded.foreignKeyCheck(), []);
+});
+
+test('schema v17 adds iLink invariant triggers and enrollment audit without rewriting facts', (t) => {
+  const { store, filePath } = harness(t);
+  const [messageKey] = ingest(store, [message('v17-ilink-invariants')]);
+  assert.ok(messageKey);
+  store.close();
+  const v17 = new DatabaseSync(filePath);
+  v17.exec(`
+    DROP TRIGGER ilink_session_window_insert_guard;
+    DROP TRIGGER ilink_session_window_update_guard;
+    DROP TRIGGER ilink_attempt_window_insert_guard;
+    DROP TRIGGER ilink_attempt_window_update_guard;
+    DROP TRIGGER ilink_window_source_insert_guard;
+    DROP TRIGGER ilink_window_source_update_guard;
+    DROP TRIGGER ilink_window_delete_guard;
+    DROP TABLE ilink_enrollment_audit;
+    DROP TABLE ilink_inbound_images;
+    PRAGMA user_version = 17;
+  `);
+  v17.close();
+
+  const upgraded = new SqliteStore({ filePath });
+  t.onTestFinished(() => upgraded.close());
+  assert.equal(
+    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    21,
+  );
+  assert.ok(upgraded.getInbound(messageKey));
+  assert.equal(Number((upgraded.database.prepare(`
+    SELECT COUNT(*) AS count FROM sqlite_master
+    WHERE type = 'trigger' AND name LIKE 'ilink_%_guard'
+  `).get() as { count: number }).count), 7);
+  assert.throws(() => upgraded.database.prepare(`
+    INSERT INTO agent_sessions (
+      token_hash, source_message_key, open_kfid, external_userid,
+      channel, reply_window_id, boundary_inbox_seq, memory_thread_id,
+      media_json, expires_at, closed_at, created_at, updated_at
+    )
+    SELECT 'bad-ilink-session', message_key, open_kfid, external_userid,
+           'weixin_ilink', NULL, inbox_seq, '', '[]', 9999999999999, 0, 1, 1
+    FROM inbound_messages WHERE message_key = ?
+  `).run(messageKey), /channel\/window mismatch/u);
+  assert.deepEqual(upgraded.foreignKeyCheck(), []);
+});
+
+test('schema v19 adds cleanup indexes without rewriting iLink tables', (t) => {
+  const { store, filePath } = harness(t);
+  store.close();
+  const v19 = new DatabaseSync(filePath);
+  v19.exec(`
+    DROP INDEX ilink_reply_windows_expiry_idx;
+    DROP INDEX ilink_reply_windows_updated_idx;
+    PRAGMA user_version = 19;
+  `);
+  v19.close();
+  const upgraded = new SqliteStore({ filePath });
+  t.onTestFinished(() => upgraded.close());
+  assert.equal(
+    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    21,
+  );
+  assert.equal(Number((upgraded.database.prepare(`
+    SELECT COUNT(*) AS count FROM sqlite_master
+    WHERE type = 'index' AND name IN (
+      'ilink_reply_windows_expiry_idx', 'ilink_reply_windows_updated_idx'
+    )
+  `).get() as { count: number }).count), 2);
+  assert.deepEqual(upgraded.foreignKeyCheck(), []);
+});
+
+test('schema v21 drops retired binding without rewriting historical sends', (t) => {
+  const { store, filePath } = harness(t);
+  const [messageKey] = ingest(store, [message('v20-maintainer-removal')]);
+  assert.ok(messageKey);
+  seedPendingAttempts(store, messageKey, [
+    {
+      sendIndex: 0,
+      source: 'maintainer_binding',
+      sentType: 'text',
+      payload: { msgtype: 'text', text: { content: 'bound' } },
+    },
+    {
+      sendIndex: 1,
+      source: 'maintainer_notify',
+      sentType: 'text',
+      payload: { msgtype: 'text', text: { content: 'notify' } },
+    },
+    {
+      sendIndex: 2,
+      source: 'test_fixture',
+      sentType: 'text',
+      payload: { msgtype: 'text', text: { content: 'preserved' } },
+    },
+  ]);
+  const retiredAttempt = store.listMessageAttempts(messageKey)[0]!;
+  const sending = store.beginNextSend();
+  assert.equal(sending?.attemptId, retiredAttempt.attemptId);
+  store.completeSend(retiredAttempt.attemptId, { wecomMsgId: 'retired-accepted' });
+  store.database.prepare(`
+    INSERT INTO delivery_failures (
+      wecom_msgid, fail_type, observed_at, matched_attempt_key, matched_at
+    ) VALUES ('retired-notification-failure', 13, 1, ?, 1)
+  `).run(retiredAttempt.attemptId);
+  store.close();
+
+  const v20 = new DatabaseSync(filePath);
+  v20.exec(`
+    CREATE TABLE maintainer_binding (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      open_kfid TEXT NOT NULL,
+      external_userid TEXT NOT NULL,
+      bound_message_key TEXT NOT NULL,
+      bound_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+  `);
+  v20.prepare(`
+    INSERT INTO maintainer_binding (
+      singleton, open_kfid, external_userid, bound_message_key,
+      bound_at, updated_at
+    ) VALUES (1, 'wk-one', 'wm-one', ?, 1, 1)
+  `).run(messageKey);
+  v20.exec('PRAGMA user_version = 20');
+  v20.close();
+
+  const upgraded = new SqliteStore({ filePath });
+  t.onTestFinished(() => upgraded.close());
+  assert.equal(
+    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+    21,
+  );
+  assert.equal(Number((upgraded.database.prepare(`
+    SELECT COUNT(*) AS count FROM sqlite_master
+    WHERE type = 'table' AND name = 'maintainer_binding'
+  `).get() as { count: number }).count), 0);
+  assert.deepEqual(upgraded.listMessageAttempts(messageKey).map((attempt) => ({
+    source: attempt.source,
+    status: attempt.status,
+    errorCode: attempt.errorCode,
+  })), [
+    { source: 'maintainer_binding', status: 'accepted', errorCode: '' },
+    { source: 'maintainer_notify', status: 'failed', errorCode: 'feature_removed' },
+    { source: 'test_fixture', status: 'pending', errorCode: '' },
+  ]);
+  assert.deepEqual({ ...(upgraded.database.prepare(`
+    SELECT matched_attempt_key, matched_at FROM delivery_failures
+    WHERE wecom_msgid = 'retired-notification-failure'
+  `).get() as { matched_attempt_key: string; matched_at: number }) }, {
+    matched_attempt_key: retiredAttempt.attemptId, matched_at: 1,
+  });
+  assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
+  assert.deepEqual(upgraded.foreignKeyCheck(), []);
+});
+
+test('status CHECK rejects invalid rows and filters remain parameterized', (t) => {
   const { store } = harness(t);
   assert.throws(() =>
     store.database.prepare(`
@@ -96,7 +434,7 @@ test('[R05][SEC02] status CHECK rejects invalid rows and filters remain paramete
   );
 });
 
-test('[S07] steering rejects cross-conversation and non-steerable primaries', (t) => {
+test('steering rejects cross-conversation and non-steerable primaries', (t) => {
   const { store } = harness(t);
   const [primary, other] = ingest(store, [message('primary'), message('other', 'wm-two')]);
   assert.ok(primary && other);
@@ -114,7 +452,30 @@ test('[S07] steering rejects cross-conversation and non-steerable primaries', (t
   }), /not steerable/u);
 });
 
-test('[R04] illegal inbound transitions and unknown records fail closed', (t) => {
+test('every later actionable customer state invalidates an older session', (t) => {
+  const { store } = harness(t);
+  const [primary, later] = ingest(store, [message('primary'), message('later')]);
+  assert.ok(primary && later);
+  store.claimInbound({ messageKey: primary });
+  const statuses: InboundStatus[] = [
+    'received', 'failed', 'processing', 'preparing', 'ready',
+    'completed', 'steering', 'steered', 'absorbed', 'suppressed',
+  ];
+  for (const status of statuses) {
+    store.database.prepare(`
+      UPDATE inbound_messages SET status = ? WHERE message_key = ?
+    `).run(status, later);
+    const session = store.createAgentSession({ messageKey: primary });
+    assert.throws(() => store.reserveAgentSend({
+      sessionToken: session.token,
+      sentType: 'text',
+      payload: { msgtype: 'text', text: { content: status } },
+    }), /active conversation direction/u, status);
+  }
+  assert.deepEqual(store.listMessageAttempts(primary), []);
+});
+
+test('illegal inbound transitions and unknown records fail closed', (t) => {
   const { store } = harness(t);
   const [primary, steer] = ingest(store, [message('primary'), message('steer')]);
   assert.ok(primary && steer);
@@ -126,17 +487,16 @@ test('[R04] illegal inbound transitions and unknown records fail closed', (t) =>
     () => store.requeueInboundSteering(steer, 'wrong-primary'),
     /Cannot requeue/u,
   );
-  assert.throws(() => store.markInboundHeld(primary), /Cannot hold/u);
   assert.throws(() => store.claimInbound({ messageKey: 'missing' }), /Unknown/u);
 });
 
-test('[R04][A05][H03] late failures cannot overwrite held suppressed ready or completed states', (t) => {
+test('late failures cannot overwrite suppressed ready or completed states', (t) => {
   const { store } = harness(t);
-  const [suppressed, held, ready, completed] = ingest(store, [
-    message('terminal-suppressed'), message('terminal-held'),
-    message('terminal-ready'), message('terminal-completed'),
+  const [suppressed, ready, completed] = ingest(store, [
+    message('terminal-suppressed'), message('terminal-ready'),
+    message('terminal-completed'),
   ]);
-  assert.ok(suppressed && held && ready && completed);
+  assert.ok(suppressed && ready && completed);
 
   store.claimInbound({ messageKey: suppressed });
   store.suppressInbound(suppressed, 'authorization_revoked');
@@ -144,21 +504,11 @@ test('[R04][A05][H03] late failures cannot overwrite held suppressed ready or co
   assert.equal(store.getInbound(suppressed)?.status, 'suppressed');
   assert.match(store.getInbound(suppressed)?.errorMessage || '', /authorization_revoked/u);
 
-  store.markInboundHeld(held);
-  store.failInbound(held, new Error('late turn failure'));
-  assert.equal(store.getInbound(held)?.status, 'held');
-  assert.throws(() => store.markInboundIgnored(held), /Cannot ignore/u);
-
-  const claim = store.claimInbound({ messageKey: ready }).message;
-  store.finalizeInboundBatch({
-    messageKey: ready,
-    expectedConversationEpoch: claim.claimedConversationEpoch,
-    expectedRuntimeEpoch: claim.claimedRuntimeEpoch,
-    attempts: [{
+  store.claimInbound({ messageKey: ready });
+  seedPendingAttempts(store, ready, [{
       sendIndex: 0, sentType: 'text',
       payload: { msgtype: 'text', text: { content: 'ready' } },
-    }],
-  });
+    }]);
   store.failInbound(ready, new Error('late turn failure'));
   assert.equal(store.getInbound(ready)?.status, 'ready');
 
@@ -167,64 +517,41 @@ test('[R04][A05][H03] late failures cannot overwrite held suppressed ready or co
   assert.equal(store.getInbound(completed)?.status, 'completed');
 });
 
-test('[O07][R06] final batch rejects empty oversized duplicate indexes and changed payload', (t) => {
+test('MCP finalization rejects duplicate and cross-message receipts atomically', (t) => {
   const { store } = harness(t);
-  const [messageKey] = ingest(store, [message('batch')]);
-  assert.ok(messageKey);
-  const claimed = store.claimInbound({ messageKey }).message;
-  const base = {
-    messageKey,
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-  };
-  assert.throws(
-    () => store.finalizeInboundBatch({ ...base, attempts: [] }),
-    /1 to 5/u,
-  );
-  assert.throws(
-    () => store.finalizeInboundBatch({
-      ...base,
-      attempts: Array.from({ length: 6 }, (_, sendIndex) => ({
-        sendIndex,
-        sentType: 'text',
-        payload: { msgtype: 'text', text: { content: String(sendIndex) } },
-      })),
-    }),
-    /1 to 5/u,
-  );
-  assert.throws(
-    () => store.finalizeInboundBatch({
-      ...base,
-      attempts: [0, 0].map((sendIndex) => ({
-        sendIndex,
-        sentType: 'text',
-        payload: { msgtype: 'text', text: { content: 'duplicate' } },
-      })),
-    }),
-    /duplicate send indexes/u,
-  );
-  store.finalizeInboundBatch({
-    ...base,
-    attempts: [{
-      sendIndex: 0,
+  const createAttempt = (id: string, externalUserId: string) => {
+    const [messageKey] = ingest(store, [message(id, externalUserId)]);
+    assert.ok(messageKey);
+    store.claimInbound({ messageKey });
+    const session = store.createAgentSession({ messageKey });
+    const attempt = store.reserveAgentSend({
+      sessionToken: session.token,
       sentType: 'text',
-      payload: { msgtype: 'text', text: { content: 'original' } },
-    }],
+      payload: { msgtype: 'text', text: { content: id } },
+    });
+    store.completeSend(attempt.attemptId, { wecomMsgId: `wx-${id}` });
+    store.closeAgentSession(session.token);
+    return { messageKey, attempt };
+  };
+  const first = createAttempt('first-receipt', 'wm-one');
+  const second = createAttempt('second-receipt', 'wm-two');
+  assert.throws(() => store.finalizeAgentExecution({
+    messageKey: first.messageKey,
+    attemptIds: [second.attempt.attemptId],
+  }), /does not match every terminal MCP attempt/u);
+  assert.throws(() => store.finalizeAgentExecution({
+    messageKey: first.messageKey,
+    attemptIds: [first.attempt.attemptId, first.attempt.attemptId],
+  }), /duplicate/u);
+  assert.equal(store.getInbound(first.messageKey)?.status, 'processing');
+  store.finalizeAgentExecution({
+    messageKey: first.messageKey,
+    attemptIds: [first.attempt.attemptId],
   });
-  assert.throws(
-    () => store.finalizeInboundBatch({
-      ...base,
-      attempts: [{
-        sendIndex: 0,
-        sentType: 'text',
-        payload: { msgtype: 'text', text: { content: 'changed' } },
-      }],
-    }),
-    /invariant conflict/u,
-  );
+  assert.equal(store.getInbound(first.messageKey)?.status, 'completed');
 });
 
-test('[R01][R07] send terminal states cannot reverse and unknown attempts reject', (t) => {
+test('send terminal states cannot reverse and unknown attempts reject', (t) => {
   const { store } = harness(t);
   assert.throws(() => store.completeSend('missing', { wecomMsgId: 'wx' }), /Unknown/u);
   assert.throws(() => store.failSend('missing', new Error('x')), /Unknown/u);
@@ -245,7 +572,7 @@ test('[R01][R07] send terminal states cannot reverse and unknown attempts reject
   assert.equal(store.getInbound(messageKey)?.status, 'completed');
 });
 
-test('[C06][O06] media writes validate owner attachment and expiry inputs', (t) => {
+test('media writes validate owner attachment and expiry inputs', (t) => {
   const { store } = harness(t);
   const [messageKey] = ingest(store, [message('media')]);
   assert.ok(messageKey);
@@ -271,7 +598,7 @@ test('[C06][O06] media writes validate owner attachment and expiry inputs', (t) 
   }), []);
 });
 
-test('[C01][SEC02] one nonempty Codex thread belongs to exactly one conversation', (t) => {
+test('one nonempty Codex thread belongs to exactly one conversation', (t) => {
   const { store } = harness(t);
   store.setConversationThread({
     openKfId: 'wk-one', externalUserId: 'wm-one', threadId: 'thread-shared',

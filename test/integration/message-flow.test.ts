@@ -2,20 +2,22 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
-import type { TestContext } from 'node:test';
+import { test } from 'vitest';
+import type { TestContext } from 'vitest';
 
 import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
 import type {
-  AgentCompletion,
   AgentInput,
-  AgentSubmission,
   HistoryInspection,
-} from '../../src/services/codex-agent.ts';
+} from '../../src/agent/runtime.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { DeliveryService } from '../../src/services/delivery-service.ts';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
+import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import {
+  SimulatedToolAgent,
+  type SimulatedAgentCompletion,
+  type SimulatedAgentSubmission,
+} from '../support/executing-agent.ts';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -28,10 +30,12 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve };
 }
 
-type SubmitHandler = (input: AgentInput) => Promise<AgentSubmission> | AgentSubmission;
+type SubmitHandler = (
+  input: AgentInput,
+) => Promise<SimulatedAgentSubmission> | SimulatedAgentSubmission;
 
 function statefulFakeAgent(
-  store: SqliteStore,
+  _store: SqliteStore,
   submitHandler: SubmitHandler,
   inspect?: (
     threadId: string,
@@ -40,33 +44,8 @@ function statefulFakeAgent(
   ) => Promise<HistoryInspection>,
 ) {
   return {
-    async submit(input: AgentInput): Promise<AgentSubmission> {
-      const submission = await submitHandler(input);
-      if (submission.kind === 'steered') {
-        store.beginInboundSteering({
-          messageKey: input.message.messageKey,
-          primaryMessageKey: submission.primaryMessageKey,
-          clientInputId: input.message.messageKey,
-        });
-        store.confirmInboundSteered(input.message.messageKey, {
-          codexTurnId: submission.turnId,
-          steeringBoundary: 1,
-        });
-        return submission;
-      }
-      const claimed = store.claimInbound({
-        messageKey: input.message.messageKey,
-        clientInputId: input.clientInputId || input.message.messageKey,
-        consumeHeldContext: Boolean(input.consumeHeldContext),
-      });
-      return {
-        ...submission,
-        completion: submission.completion.then((result) => ({
-          ...result,
-          expectedConversationEpoch: claimed.message.claimedConversationEpoch,
-          expectedRuntimeEpoch: claimed.message.claimedRuntimeEpoch,
-        })),
-      };
+    async submit(input: AgentInput): Promise<SimulatedAgentSubmission> {
+      return submitHandler(input);
     },
     ...(inspect ? { inspectHistory: inspect } : {}),
     async close(): Promise<void> {},
@@ -104,16 +83,6 @@ async function createHarness(
   const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
   const sent: Harness['sent'] = [];
   const mediaDownloads: string[] = [];
-  const delivery = new DeliveryService({
-    store,
-    logger: { info() {}, error() {} },
-    apiClient: {
-      async sendPreparedMessage(input) {
-        sent.push(input);
-        return { msgid: `wecom-${sent.length}` };
-      },
-    },
-  });
   const mediaGateway = {
     async resolveForCodex(message: AgentInput['message']) {
       mediaDownloads.push(message.messageKey);
@@ -123,16 +92,27 @@ async function createHarness(
     async getCardThumbnailMediaId(): Promise<string> { return 'thumbnail'; },
     async upload(): Promise<{ media_id: string }> { return { media_id: 'uploaded' }; },
   };
-  const preparer = new OutboundPreparer({
+  const channel = new WechatKfToolExecutor({
+    store,
+    logger: { info() {}, error() {} },
+    apiClient: {
+      async sendPreparedMessage(input) {
+        sent.push(input);
+        return { msgid: `wecom-${sent.length}` };
+      },
+    },
     mediaGateway,
-    spoolDirectory: path.join(directory, 'spool'),
+    observeMs: 0,
+  });
+  const agent = new SimulatedToolAgent({
+    inner: options.createAgent(store),
+    tools: channel,
   });
   const processor = new ConversationProcessor({
     store,
-    codexAgent: options.createAgent(store),
+    agent,
     mediaGateway,
-    outboundPreparer: preparer,
-    delivery,
+    channel,
     allowedUserIds: options.allowedUserIds || [],
     authorization: options.authorization || {},
     logger: { info() {}, error() {} },
@@ -156,11 +136,11 @@ async function createHarness(
 
   async function idle(): Promise<void> {
     await processor.waitForIdle();
-    await delivery.waitForIdle();
+    await channel.waitForIdle();
   }
 
-  t.after(async () => {
-    await delivery.close();
+  t.onTestFinished(async () => {
+    await channel.close();
     store.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
@@ -180,21 +160,19 @@ function customer(msgid: string, content: string, overrides: Record<string, unkn
   };
 }
 
-function immediateText(input: AgentInput, content: string): AgentSubmission {
+function immediateText(input: AgentInput, content: string): SimulatedAgentSubmission {
   return {
     kind: 'started',
     primaryMessageKey: input.message.messageKey,
     turnId: 'turn-one',
+    threadId: input.threadId,
     completion: Promise.resolve({
-      candidates: [{ type: 'text', content }],
-      mediaCatalog: input.mediaCatalog || [],
-      expectedConversationEpoch: 0,
-      expectedRuntimeEpoch: 0,
+      replies: [{ type: 'text', content }],
     }),
   };
 }
 
-test('[A03] unauthorized image does zero work; third trigger confirms and authorization is global', async (t) => {
+test('unauthorized image does zero work; third trigger confirms and authorization is global', async (t) => {
   const codexInputs: AgentInput[] = [];
   const harness = await createHarness(t, {
     createAgent: (store) => statefulFakeAgent(store, (input) => {
@@ -225,20 +203,25 @@ test('[A03] unauthorized image does zero work; third trigger confirms and author
     open_kfid: 'wk-two',
   }), 'wk-two'));
   await harness.idle();
-  assert.equal(codexInputs[0]?.message.conversation.openKfId, 'wk-two');
+  assert.equal(
+    codexInputs[0]?.threadId,
+    harness.store.getConversation('wk-two', 'wm-one')?.threadId,
+  );
+  assert.ok(codexInputs[0]?.threadId);
   assert.equal(harness.sent[1]?.payload.text instanceof Object, true);
 });
 
-test('[S01] start plus steer emits one final batch', async (t) => {
-  const completion = deferred<AgentCompletion>();
+test('start plus steer executes one latest-direction reply', async (t) => {
+  const completion = deferred<SimulatedAgentCompletion>();
   let primary = '';
   const harness = await createHarness(t, {
     allowedUserIds: ['wm-one'],
     createAgent: (store) => statefulFakeAgent(store, (input) => {
-      if (!primary) {
+      if (input.mode === 'start') {
         primary = input.message.messageKey;
         return {
           kind: 'started', primaryMessageKey: primary, turnId: 'turn-steer',
+          threadId: input.threadId,
           completion: completion.promise,
         };
       }
@@ -250,10 +233,7 @@ test('[S01] start plus steer emits one final batch', async (t) => {
   await harness.processor.enqueue(primaryKey);
   await harness.processor.enqueue(steerKey);
   completion.resolve({
-    candidates: [{ type: 'text', content: '故宫、长城、云冈石窟。' }],
-    mediaCatalog: [],
-    expectedConversationEpoch: 0,
-    expectedRuntimeEpoch: 0,
+    replies: [{ type: 'text', content: '故宫、长城、云冈石窟。' }],
   });
   await harness.idle();
   assert.equal(harness.sent.length, 1);
@@ -261,63 +241,10 @@ test('[S01] start plus steer emits one final batch', async (t) => {
   assert.equal(harness.store.getInbound(steerKey)?.status, 'absorbed');
 });
 
-async function activeSuppression(t: TestContext, action: (harness: Harness) => Promise<void> | void) {
-  const completion = deferred<AgentCompletion>();
-  const harness = await createHarness(t, {
-    allowedUserIds: ['wm-one'],
-    createAgent: (store) => statefulFakeAgent(store, (input) => ({
-      kind: 'started', primaryMessageKey: input.message.messageKey,
-      turnId: 'turn-active', completion: completion.promise,
-    })),
-  });
-  const key = harness.ingest(customer('active', '准备回答'));
-  await harness.processor.enqueue(key);
-  await action(harness);
-  completion.resolve({
-    candidates: [{ type: 'text', content: '不应发送' }],
-    mediaCatalog: [], expectedConversationEpoch: 0, expectedRuntimeEpoch: 0,
-  });
-  await harness.idle();
-  assert.equal(harness.sent.length, 0);
-  assert.equal(harness.store.getInbound(key)?.status, 'suppressed');
-}
-
-test('[H03] human takeover suppresses an active turn', async (t) => {
-  await activeSuppression(t, async (harness) => {
-    const key = harness.ingest({ ...customer('human', '人工'), origin: 5 });
-    await harness.processor.enqueue(key);
-  });
-});
-
-test('[H05] runtime pause suppresses an active turn', async (t) => {
-  await activeSuppression(t, (harness) => { harness.store.setRuntimePaused(true); });
-});
-
-test('messages held during pause enter the next turn exactly once', async (t) => {
-  const inputs: AgentInput[] = [];
-  const harness = await createHarness(t, {
-    allowedUserIds: ['wm-one'],
-    createAgent: (store) => statefulFakeAgent(store, (input) => {
-      inputs.push(input);
-      return immediateText(input, '恢复回复');
-    }),
-  });
-  harness.store.setRuntimePaused(true);
-  const heldKey = harness.ingest(customer('held', '暂停期间消息'));
-  await harness.processor.enqueue(heldKey);
-  harness.store.setRuntimePaused(false);
-  const nextKey = harness.ingest(customer('next', '继续'));
-  await harness.processor.enqueue(nextKey);
-  await harness.idle();
-  assert.match(inputs[0]?.handoffContext || '', /暂停期间消息/u);
-  assert.equal(harness.store.getInbound(heldKey)?.status, 'absorbed');
-  assert.equal(harness.store.getInbound(heldKey)?.contextStatus, 'consumed');
-});
-
-test('recovery handles an old primary before a newer unlinked received message', async (t) => {
+test('recovery keeps an old primary and newer unlinked message independent', async (t) => {
   const inputs: AgentInput[] = [];
   const missing: HistoryInspection = {
-    state: 'missing', turnId: '', foundClientInputIds: new Set(), candidates: [],
+    state: 'missing', turnId: '', foundClientInputIds: new Set(), artifacts: [],
   };
   const harness = await createHarness(t, {
     allowedUserIds: ['wm-one'],
@@ -325,7 +252,7 @@ test('recovery handles an old primary before a newer unlinked received message',
       store,
       (input) => {
         inputs.push(input);
-        return immediateText(input, '恢复后的合并回复');
+        return immediateText(input, '独立回复');
       },
       async () => missing,
     ),
@@ -339,10 +266,13 @@ test('recovery handles an old primary before a newer unlinked received message',
   harness.store.markInboundPreparing(primaryKey, 'turn-old');
   await harness.processor.recover(harness.store.recoverStartup().inbound);
   await harness.idle();
-  assert.equal(inputs.length, 1);
+  assert.equal(inputs.length, 2);
   assert.match(inputs[0]?.contextText || '', /原始问题/u);
-  assert.match(inputs[0]?.contextText || '', /最新调整/u);
-  assert.equal(harness.store.getInbound(followKey)?.status, 'absorbed');
-  assert.equal(harness.sent.length, 1);
+  assert.doesNotMatch(inputs[0]?.contextText || '', /最新调整/u);
+  assert.match(inputs[1]?.contextText || '', /最新调整/u);
+  assert.doesNotMatch(inputs[1]?.contextText || '', /原始问题/u);
+  assert.equal(harness.store.getInbound(primaryKey)?.status, 'completed');
+  assert.equal(harness.store.getInbound(followKey)?.status, 'completed');
+  assert.equal(harness.sent.length, 2);
   assert.equal(stableMessageKey('wk-one', 'recover-primary'), primaryKey);
 });

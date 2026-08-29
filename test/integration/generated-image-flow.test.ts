@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
 import { CodexAgent } from '../../src/services/codex-agent.ts';
@@ -15,8 +15,7 @@ import type {
   CodexTurnResult,
 } from '../../src/services/codex-app-server.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { DeliveryService } from '../../src/services/delivery-service.ts';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
+import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { SqliteStore } from '../../src/state/sqlite-store.ts';
 
 interface Deferred<T> {
@@ -38,6 +37,10 @@ class ImageBoundary implements CodexBoundary {
   steers = 0;
   startThreadCalls = 0;
   resumeThreadCalls = 0;
+  executeArtifact?: (
+    session: string,
+    mediaRef: string,
+  ) => Promise<{ readonly attemptId: string; readonly msgid: string }>;
 
   constructor(png: Buffer) {
     this.thread = {
@@ -45,19 +48,43 @@ class ImageBoundary implements CodexBoundary {
       startRun: async (input): Promise<CodexRun> => {
         this.prompts.push(input);
         this.starts += 1;
-        return this.starts === 1
-          ? { turnId: 'turn-image', completion: this.first.promise }
-          : {
-              turnId: 'turn-feedback',
-              completion: Promise.resolve({
-                items: [{
-                  id: 'generation-two', type: 'imageGeneration', status: 'completed',
-                  result: png.toString('base64'),
-                  revisedPrompt: 'adjust only the requested background detail',
-                  startedSequence: 1, completedSequence: 2,
-                }],
-              }),
-            };
+        if (this.starts === 1) {
+          return { turnId: 'turn-image', completion: this.first.promise };
+        }
+        if (this.starts === 3) {
+          return {
+            turnId: 'turn-feedback',
+            completion: Promise.resolve({
+              items: [{
+                id: 'generation-two', type: 'imageGeneration', status: 'completed',
+                result: png.toString('base64'),
+                revisedPrompt: 'adjust only the requested background detail',
+                startedSequence: 1, completedSequence: 2,
+              }],
+            }),
+          };
+        }
+        const prompt = String(input);
+        const session = prompt.match(/session (ws_[A-Za-z0-9_-]{32})/u)?.[1];
+        const mediaRef = prompt.match(/(artifact:\d+)/u)?.[1];
+        if (!session || !mediaRef || !this.executeArtifact) {
+          throw new Error('Missing generated-image MCP execution fixture');
+        }
+        const receipt = await this.executeArtifact(session, mediaRef);
+        return {
+          turnId: `turn-send-${this.starts}`,
+          completion: Promise.resolve({
+            items: [{
+              id: `send-${this.starts}`,
+              type: 'mcpToolCall',
+              server: 'wechat_kf',
+              tool: 'send_image',
+              status: 'completed',
+              startedSequence: 3,
+              result: { structuredContent: receipt },
+            }],
+          }),
+        };
       },
       steer: async (input): Promise<string> => {
         this.prompts.push(input);
@@ -79,11 +106,10 @@ class ImageBoundary implements CodexBoundary {
   async close(): Promise<void> {}
 }
 
-test('[I01][I04][I05][I07] generated image flows through spool and a same-thread delta sends the final image', async (t) => {
+test('generated image flows through the channel runtime and a same-thread delta sends the final image', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'generated-image-flow-'));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  t.onTestFinished(() => fs.rm(directory, { recursive: true, force: true }));
   const generatedDirectory = path.join(directory, 'generated');
-  const spoolDirectory = path.join(directory, 'spool');
   await fs.mkdir(generatedDirectory);
   const savedPath = path.join(generatedDirectory, 'result.png');
   const png = Buffer.from('89504e470d0a1a0a04040404', 'hex');
@@ -93,7 +119,6 @@ test('[I01][I04][I05][I07] generated image flows through spool and a same-thread
   const boundary = new ImageBoundary(png);
   const agent = new CodexAgent({
     codex: boundary,
-    store,
     config: {
       model: 'gpt-image-test', reasoningEffort: 'none',
       workingDirectory: directory, imageTempDirectory: directory,
@@ -114,12 +139,11 @@ test('[I01][I04][I05][I07] generated image flows through spool and a same-thread
     async cloneForSend(): Promise<string> { return 'unused-clone'; },
     async getCardThumbnailMediaId(): Promise<string> { return 'unused-thumb'; },
   };
-  const preparer = new OutboundPreparer({ mediaGateway, spoolDirectory });
   const sent: Array<{
     readonly payload: Readonly<Record<string, unknown>>;
     readonly messageId?: string;
   }> = [];
-  const delivery = new DeliveryService({
+  const channel = new WechatKfToolExecutor({
     store,
     logger: { info() {}, error() {} },
     apiClient: {
@@ -128,13 +152,16 @@ test('[I01][I04][I05][I07] generated image flows through spool and a same-thread
         return { msgid: `wecom-${sent.length}` };
       },
     },
+    mediaGateway,
+    observeMs: 0,
   });
+  boundary.executeArtifact = async (session, mediaRef) =>
+    channel.execute('send_image', { session, mediaRef });
   const processor = new ConversationProcessor({
     store,
-    codexAgent: agent,
+    agent,
     mediaGateway,
-    outboundPreparer: preparer,
-    delivery,
+    channel,
     allowedUserIds: ['wm-image'],
     logger: { info() {}, error() {} },
   });
@@ -151,9 +178,9 @@ test('[I01][I04][I05][I07] generated image flows through spool and a same-thread
     return key;
   }
 
-  t.after(async () => {
+  t.onTestFinished(async () => {
     await processor.close();
-    await delivery.close();
+    await channel.close();
     store.close();
   });
 
@@ -178,7 +205,7 @@ test('[I01][I04][I05][I07] generated image flows through spool and a same-thread
     }],
   });
   await processor.waitForIdle();
-  await delivery.waitForIdle();
+  await channel.waitForIdle();
 
   assert.equal(uploads.length, 1);
   assert.deepEqual(uploads[0], png);
@@ -191,12 +218,11 @@ test('[I01][I04][I05][I07] generated image flows through spool and a same-thread
     externalUserId: 'wm-image',
   }).find((attempt) => attempt.messageKey === primaryKey);
   assert.equal(imageAttempt?.status, 'accepted');
-  assert.equal(imageAttempt?.source, 'codex_image');
+  assert.equal(imageAttempt?.source, 'mcp_tool');
   assert.equal(imageAttempt?.metadata?.revisedPrompt, 'change only background color');
   assert.equal(store.getInbound(primaryKey)?.status, 'completed');
   assert.equal(store.getInbound(imageKey)?.status, 'absorbed');
   await assert.rejects(fs.access(savedPath), { code: 'ENOENT' });
-  assert.deepEqual(await fs.readdir(spoolDirectory), []);
 
   const feedbackKey = ingest({
     msgid: 'quality-feedback', open_kfid: 'wk-image', external_userid: 'wm-image',
@@ -204,11 +230,11 @@ test('[I01][I04][I05][I07] generated image flows through spool and a same-thread
   });
   await processor.enqueue(feedbackKey);
   await processor.waitForIdle();
-  await delivery.waitForIdle();
+  await channel.waitForIdle();
 
-  const feedbackPrompt = String(boundary.prompts.at(-1));
-  assert.match(feedbackPrompt, /已被微信 API 接受/u);
-  assert.match(feedbackPrompt, /客户已明确评价/u);
+  const feedbackPrompt = String(boundary.prompts.at(-2));
+  assert.match(feedbackPrompt, /channel API accepted/u);
+  assert.match(feedbackPrompt, /participant explicitly commented/u);
   assert.match(feedbackPrompt, /change only background color/u);
   assert.doesNotMatch(feedbackPrompt, /生成失败|没有成品/u);
   assert.deepEqual(sent[1]?.payload, {
@@ -217,6 +243,6 @@ test('[I01][I04][I05][I07] generated image flows through spool and a same-thread
   assert.doesNotMatch(JSON.stringify(sent[1]?.payload), /生成失败|没有成品/u);
   assert.equal(boundary.startThreadCalls, 1);
   assert.equal(boundary.resumeThreadCalls, 1);
-  assert.equal(boundary.starts, 2);
+  assert.equal(boundary.starts, 4);
   assert.equal(uploads.length, 2);
 });

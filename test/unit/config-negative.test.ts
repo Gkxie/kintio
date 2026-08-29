@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import { createConfig } from '../../src/config.ts';
 
@@ -8,7 +8,7 @@ const base: NodeJS.ProcessEnv = {
   WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
 };
 
-test('[DEP01] PORT rejects non-integers and values outside 1..65535', () => {
+test('PORT rejects non-integers and values outside 1..65535', () => {
   for (const value of ['0', '65536', '1.5', '-1', 'abc', 'Infinity']) {
     assert.throws(
       () => createConfig({ ...base, PORT: value }),
@@ -19,7 +19,7 @@ test('[DEP01] PORT rejects non-integers and values outside 1..65535', () => {
   assert.equal(createConfig({ ...base, PORT: '65535' }).port, 65535);
 });
 
-test('[G03] boolean parsing accepts documented spellings and rejects ambiguity', () => {
+test('boolean parsing accepts documented spellings and rejects ambiguity', () => {
   for (const value of ['1', 'true', 'YES', 'on']) {
     assert.equal(createConfig({ ...base, CODEX_ENABLED: value }).codex.enabled, true);
   }
@@ -34,9 +34,10 @@ test('[G03] boolean parsing accepts documented spellings and rejects ambiguity',
   }
 });
 
-test('[G03][A02][DEP01] positive integer settings reject zero fractions and non-numbers', () => {
+test('positive integer settings reject zero fractions and non-numbers', () => {
   for (const [name, value] of [
     ['WECOM_API_TIMEOUT_MS', '0'],
+    ['WECOM_MCP_OBSERVE_MS', '0'],
     ['WECOM_AUTH_TRIGGER_COUNT', '-1'],
     ['SHUTDOWN_TIMEOUT_MS', '1.5'],
     ['WECOM_API_TIMEOUT_MS', 'NaN'],
@@ -49,15 +50,21 @@ test('[G03][A02][DEP01] positive integer settings reject zero fractions and non-
   const config = createConfig({
     ...base,
     WECOM_API_TIMEOUT_MS: '1',
+    WECOM_MCP_OBSERVE_MS: '1',
     WECOM_AUTH_TRIGGER_COUNT: '1',
     SHUTDOWN_TIMEOUT_MS: '1',
   });
   assert.equal(config.wecom.api.timeoutMs, 1);
+  assert.equal(config.wecom.api.observeMs, 1);
   assert.equal(config.wecom.authorization.requiredConsecutive, 1);
   assert.equal(config.state.shutdownTimeoutMs, 1);
+  assert.throws(
+    () => createConfig({ ...base, WECOM_MCP_OBSERVE_MS: '20001' }),
+    /WECOM_MCP_OBSERVE_MS must not exceed 20000/u,
+  );
 });
 
-test('[DEP02] project-only enum settings fail closed on unsupported values', () => {
+test('project-only enum settings fail closed on unsupported values', () => {
   for (const [name, value, pattern] of [
     ['CODEX_REASONING_EFFORT', 'tiny', /CODEX_REASONING_EFFORT/u],
     ['CODEX_WEB_SEARCH_MODE', 'sometimes', /CODEX_WEB_SEARCH_MODE/u],
@@ -73,8 +80,66 @@ test('[DEP02] project-only enum settings fail closed on unsupported values', () 
   assert.equal(config.codex.webSearchMode, 'cached');
 });
 
-test('[G01] callback token and EncodingAESKey enforce alphabet and exact lengths', () => {
-  for (const token of ['', 'a'.repeat(33), 'bad_token', '含中文']) {
+test('HTTP MCP URL and bearer token fail closed', () => {
+  const active = {
+    ...base,
+    WECOM_CORP_ID: 'ww-test',
+    WECOM_KF_SECRET: 'secret',
+  };
+  for (const token of ['', 'short', 'a'.repeat(129), `${'a'.repeat(31)}!`]) {
+    assert.throws(
+      () => createConfig({ ...active, KINTIO_MCP_BEARER_TOKEN: token }),
+      /MCP_BEARER_TOKEN/u,
+    );
+  }
+  for (const url of [
+    'not-a-url',
+    'ftp://example.com/mcp',
+    'https://user:pass@example.com/mcp',
+    'https://example.com/mcp#fragment',
+    'http://example.com/mcp',
+    'http://192.168.1.20/mcp',
+  ]) {
+    assert.throws(
+      () => createConfig({
+        ...active,
+        KINTIO_MCP_BEARER_TOKEN: 'a'.repeat(32),
+        KINTIO_MCP_URL: url,
+      }),
+      /MCP_URL/u,
+    );
+  }
+  assert.equal(createConfig({
+    ...active,
+    KINTIO_MCP_BEARER_TOKEN: 'a'.repeat(32),
+    KINTIO_MCP_URL: 'http://localhost:8888/mcp',
+  }).wecom.mcp.url, 'http://localhost:8888/mcp');
+  assert.equal(createConfig({
+    ...active,
+    KINTIO_MCP_BEARER_TOKEN: 'a'.repeat(32),
+    KINTIO_MCP_URL: 'https://chat.example.com/mcp',
+  }).wecom.mcp.url, 'https://chat.example.com/mcp');
+});
+
+test('iLink validates an explicit storage key and otherwise uses its private key file', () => {
+  for (const key of ['short', 'a'.repeat(42), 'a'.repeat(44), `${'a'.repeat(42)}=`]) {
+    assert.throws(
+      () => createConfig({ ...base, ILINK_ENABLED: 'true', ILINK_STORAGE_KEY: key }),
+      /ILINK_STORAGE_KEY/u,
+    );
+  }
+  const config = createConfig({
+    ...base,
+    ILINK_ENABLED: 'true',
+    ILINK_STORAGE_KEY: 'a'.repeat(43),
+    KINTIO_MCP_BEARER_TOKEN: 'b'.repeat(32),
+  });
+  assert.equal(config.ilink.enabled, true);
+  assert.match(config.ilink.storageKeyFile, /ilink-storage\.key$/u);
+});
+
+test('callback token and EncodingAESKey enforce alphabet and exact lengths', () => {
+  for (const token of ['a'.repeat(33), 'bad_token', '含中文']) {
     assert.throws(
       () => createConfig({ ...base, WECOM_CALLBACK_TOKEN: token }),
       /WECOM_CALLBACK_TOKEN/u,
@@ -92,7 +157,7 @@ test('[G01] callback token and EncodingAESKey enforce alphabet and exact lengths
     .wecom.encodingAesKey.length, 43);
 });
 
-test('[A02][A03] authorization text limits count UTF-8 bytes at the exact boundary', () => {
+test('authorization text limits count UTF-8 bytes at the exact boundary', () => {
   const trigger128 = `${'你'.repeat(42)}aa`;
   const confirmation2048 = `${'你'.repeat(682)}aa`;
   assert.equal(Buffer.byteLength(trigger128), 128);

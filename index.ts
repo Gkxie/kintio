@@ -13,6 +13,11 @@ const server = serve(
   },
   ({ port }) => {
     console.log(`Hono server is listening on port ${port}`);
+    void app.start().catch(async (error: unknown) => {
+      console.error('[server] runtime startup failed', error);
+      await app.shutdown().catch(() => undefined);
+      server.close(() => process.exit(1));
+    });
   },
 );
 

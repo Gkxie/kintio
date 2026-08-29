@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import {
   CodexAppServer,
@@ -85,10 +85,12 @@ function standardHandler(message: RpcMessage, child: FakeProcess): void {
     child.send({ id: message.id, result: { thread: { id: 'thread-resumed', turns: [] } } });
   } else if (message.method === 'turn/start') {
     child.send({ id: message.id, result: { turn: { id: `turn-${String(message.id)}` } } });
+  } else if (message.method === 'turn/interrupt') {
+    child.send({ id: message.id, result: {} });
   }
 }
 
-test('[R04][SEC02] JSON-RPC errors retain the code but suppress the server message', async () => {
+test('JSON-RPC errors retain the code but suppress the server message', async () => {
   const fake = fakeSpawn((message, child) => {
     if (message.method === 'initialize') {
       child.send({
@@ -105,7 +107,7 @@ test('[R04][SEC02] JSON-RPC errors retain the code but suppress the server messa
   await server.close();
 });
 
-test('[R04] request timeout rejects and close terminates the unresponsive child', async () => {
+test('request timeout rejects and close terminates the unresponsive child', async () => {
   const fake = fakeSpawn(() => {});
   const server = new CodexAppServer({
     spawnProcess: fake.spawn,
@@ -116,7 +118,16 @@ test('[R04] request timeout rejects and close terminates the unresponsive child'
   assert.equal(fake.child().killedWith, 'SIGTERM');
 });
 
-test('[R04][SEC02] unexpected exit discards raw stderr in every pending rejection', async () => {
+test('spawn errors retain the operating-system diagnostic', async () => {
+  const fake = fakeSpawn(() => {});
+  const server = new CodexAppServer({ spawnProcess: fake.spawn });
+  const initializing = server.initialize();
+  queueMicrotask(() => fake.child().emit('error', new Error('spawn codex ENOENT')));
+  await assert.rejects(initializing, /process error: spawn codex ENOENT/u);
+  await server.close();
+});
+
+test('unexpected exit discards raw stderr in every pending rejection', async () => {
   const fake = fakeSpawn(() => {});
   const warnings: string[] = [];
   const server = new CodexAppServer({
@@ -134,7 +145,7 @@ test('[R04][SEC02] unexpected exit discards raw stderr in every pending rejectio
   await server.close();
 });
 
-test('[C01][R04] resume and read use persisted IDs and include full turn history', async () => {
+test('resume and read use persisted IDs and include full turn history', async () => {
   const fake = fakeSpawn(standardHandler);
   const server = new CodexAppServer({ spawnProcess: fake.spawn });
   const thread = server.resumeThread('thread-persisted', threadOptions);
@@ -153,7 +164,41 @@ test('[C01][R04] resume and read use persisted IDs and include full turn history
   await server.close();
 });
 
-test('[R04] failed and interrupted turn notifications reject completion and release active state', async () => {
+test('thread catalog distinguishes active, archived, and deleted IDs', async () => {
+  const fake = fakeSpawn((message, child) => {
+    if (message.method === 'initialize') {
+      child.send({ id: message.id, result: { userAgent: 'mock' } });
+    } else if (message.method === 'thread/list') {
+      const params = message.params as RpcMessage;
+      child.send({
+        id: message.id,
+        result: {
+          data: params.archived
+            ? [{ id: 'thread-archived' }]
+            : [{ id: 'thread-active' }],
+          nextCursor: null,
+        },
+      });
+    }
+  });
+  const server = new CodexAppServer({ spawnProcess: fake.spawn });
+  assert.equal(await server.getThreadState('thread-active'), 'active');
+  assert.equal(await server.getThreadState('thread-archived'), 'archived');
+  assert.equal(await server.getThreadState('thread-deleted'), 'missing');
+  const list = fake.requests.find((request) => request.method === 'thread/list');
+  assert.deepEqual(list?.params, {
+    archived: false,
+    useStateDbOnly: true,
+    limit: 100,
+    sourceKinds: [
+      'cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
+      'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown',
+    ],
+  });
+  await server.close();
+});
+
+test('failed and interrupted turn notifications reject completion and release active state', async () => {
   const fake = fakeSpawn(standardHandler);
   const server = new CodexAppServer({ spawnProcess: fake.spawn });
   const thread = server.startThread(threadOptions);
@@ -171,6 +216,12 @@ test('[R04] failed and interrupted turn notifications reject completion and rele
   await assert.rejects(failed.completion, /status failed/u);
 
   const interrupted = await thread.startRun('second');
+  assert.equal(await thread.interrupt?.(), true);
+  const interrupt = fake.requests.find((request) => request.method === 'turn/interrupt');
+  assert.deepEqual(interrupt?.params, {
+    threadId: 'thread-one',
+    turnId: interrupted.turnId,
+  });
   fake.child().send({
     method: 'turn/completed',
     params: { turn: { id: interrupted.turnId, status: 'interrupted' } },
@@ -179,7 +230,7 @@ test('[R04] failed and interrupted turn notifications reject completion and rele
   await server.close();
 });
 
-test('[SEC01][R04] illegal input rejects before turn/start is written', async () => {
+test('illegal input rejects before turn/start is written', async () => {
   const fake = fakeSpawn(standardHandler);
   const server = new CodexAppServer({ spawnProcess: fake.spawn });
   const thread = server.startThread(threadOptions);

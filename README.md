@@ -1,187 +1,143 @@
-# WeChat Customer Service Codex Bridge
+<div align="center">
 
-把企业微信“微信客服”消息接入 Codex app-server 的 Hono 服务。项目只监听
-`8888`，不管理 Nginx、证书或宝塔配置。
+# Kintio
 
-## 运行链路
+**Connect chat channels to an Agent you control.**
+
+English | [简体中文](README.zh-CN.md)
+
+[![CI](https://github.com/Gkxie/kintio/actions/workflows/ci.yml/badge.svg)](https://github.com/Gkxie/kintio/actions/workflows/ci.yml)
+[![CodeQL](https://github.com/Gkxie/kintio/actions/workflows/codeql.yml/badge.svg)](https://github.com/Gkxie/kintio/actions/workflows/codeql.yml)
+[![Latest release](https://img.shields.io/github/v/release/Gkxie/kintio?display_name=tag)](https://github.com/Gkxie/kintio/releases/latest)
+[![License](https://img.shields.io/github/license/Gkxie/kintio)](LICENSE)
+
+</div>
+
+Deploy Kintio next to an Agent runtime and authorized people can assign work,
+steer an active task, and receive results without leaving their chat app. Kintio
+connects each
+conversation to the Agent while keeping identities, state, and reply capabilities scoped to
+the originating channel. The current runtime uses the Codex CLI session on the deployment
+host.
 
 ```text
-加密回调 → 立即 success → kf/sync_msg → SQLite inbox
-→ 授权/人工/暂停门禁 → Codex turn/start 或 turn/steer
-→ 无副作用 staging MCP → SQLite outbox
-→ 宿主 kf/send_msg → accepted/failed/uncertain 回执
+Chat: "Investigate this"  -> Kintio starts a task in the Agent on your machine
+Chat: "Focus on the logs" -> Kintio steers that running task
+Agent result              -> Kintio delivers it back to the same chat
 ```
 
-- 一页消息和 cursor 在同一个 SQLite 事务提交。
-- 每个 `(open_kfid, external_userid)` 使用独立 Codex thread。
-- active turn 收到追问时调用 `turn/steer`，不排队生成旧答案。
-- 工具只暂存候选；模型完成后，宿主才选择最后 steering 边界之后的批次。
-- 微信真实发送最多五条，批次在发送前整体预检。
-- 微信网络请求期间不持有 SQLite 事务。
+## What it provides
 
-## 授权与人工接管
+- A separate Agent thread for every adapter identity, with no implicit identity or history
+  merging across channels.
+- Steering for active work: a user's follow-up can redirect the current Agent turn instead
+  of waiting behind stale instructions.
+- A durable SQLite inbox, restart recovery, and live-message priority over backlog recovery.
+- Session-scoped MCP actions that cannot choose another recipient or expose provider
+  credentials, raw user identifiers, or database paths to the Agent.
+- Explicit delivery outcomes: accepted, failed, or uncertain. Uncertain sends are not
+  blindly retried.
 
-静态授权由 `WECOM_ALLOWED_USER_IDS` 配置。动态授权开启后，未授权客户必须在
-同一个 `open_kfid` 连续发送三次精确暗号；第三次由宿主直接回复
-“暗号确认，请继续对话”，不唤醒 Codex。
+One deployment currently shares one Agent runtime login. Conversation state is isolated,
+but Kintio is not yet a multi-tenant platform where each chat user supplies independent
+Agent credentials, quotas, or working directories.
 
-授权身份按企业内 `external_userid` 全局生效，因此同一客户进入另一个
-`open_kfid` 不需要重复授权；会话和 thread 仍按两者组合隔离。项目当前服务一个
-CorpID；多企业部署时应把 CorpID 加入授权主键。
+## Current adapters
 
-未授权客户的所有消息均为：零回复、零 Codex、零媒体下载。`origin=5` 或人工接待
-状态会立即提高会话 epoch，active turn 即使随后完成也无法写入 outbox。人工期间
-微信 API 实际返回的消息会保存为一次只读交接上下文；平台没有返回的历史无法补齐。
+| Adapter | Inbound | Outbound | Transport | Conversation identity |
+| --- | --- | --- | --- | --- |
+| WeChat KF API | Text and images; other message types become explicit summaries | Text, images, links, Mini Programs, and locations | Public HTTPS callback | `open_kfid + external_userid` |
+| Weixin iLink | Text and images; other message types become explicit summaries | Text and images | Long polling after QR-code binding | `bot_id + user_id` |
 
-## 消息能力
+Adapter capabilities are enforced per conversation. For example, an image received in one
+conversation can only be referenced by the short-lived MCP session bound to that same
+conversation.
 
-Codex 原生输入只接受：
+## Quick start
 
-- 文本；
-- 图片（授权和门禁通过后才下载，临时文件用后删除）。
+Prerequisites:
 
-语音、视频、文件、位置、链接、小程序、视频号、笔记、菜单和聊天记录只生成明确的
-文本摘要。语音/视频/文件不会下载、转写或伪称已理解。聊天记录递归解析并限制深度与
-条数，不把 `media_id` 暴露给模型。
-
-允许发送的微信原生格式只有：
-
-- `text`
-- `image`
-- `link`
-- `miniprogram`
-- `location`
-
-地址必须有可靠经纬度才发送位置卡片；地图链接不是位置。小程序必须精确核实
-`appId`、`pagePath` 和公开来源。客户图片只能用当前会话、未过期的 `media:N`
-引用。原生格式确定失败时可使用预留的一条文字 fallback；发送结果为 `uncertain`
-时绝不自动重试或触发 fallback。
-
-## 安全边界
-
-staging MCP 不拥有 CorpID、Secret、客户 ID、`open_kfid`、原始 `media_id`、数据库
-路径或微信 HTTP 客户端。它只校验工具字段与 `media:N` 语法；宿主在 outbox 事务前用
-当前会话目录再次验证媒体所有权。真实目标由宿主从 inbox 绑定，模型无法选择收件人。
-MCP 是项目内可信的纯校验 Node 子进程，不包含微信凭据、数据库或 HTTP 客户端。
-
-Codex 直接复用当前运行用户已经登录的本机 Codex CLI，并使用项目级配置：
-
-- read-only sandbox；
-- 禁用 shell、登录 shell、本机图片查看和子代理；
-- command network 关闭；
-- 托管 web search 可独立设为 live；
-- apps、browser、computer、plugins、unified exec 等额外能力显式关闭；
-- `codex-workspace/AGENTS.md` 与每轮提示禁止读取本机内容、访问私网或跨客户取数；
-- 不复制、不改写本机 Codex 凭据或用户级配置。
-
-这是按用户选择采用的提示词、能力开关和可信项目代码边界，不是 OS 级文件或网络隔离：
-本机登录态会使 app-server 使用同一个 `CODEX_HOME`；staging MCP 也直接由宿主 Codex CLI
-启动。两者都依赖项目固定 instructions 与可信实现，MCP 不接收微信凭据、客户目标或数据库路径。
-
-当进程以 root 运行时，`WECOM_ALLOWED_USER_IDS=*` 会拒绝启动。
-
-## 持久化与恢复
-
-桥接服务的业务状态统一保存在 `data/wecom.sqlite`，启用 WAL、`synchronous=FULL`、外键和
-5 秒 busy timeout。数据库与临时文件权限分别为 `0600`，临时目录为 `0700`。
-
-Codex thread 和客户提示历史由本机 CLI 另行持久化在共享的 `CODEX_HOME`，不在业务 SQLite
-保留期内；撤销客户授权也不会自动删除这部分 CLI 历史。需要统一删除/到期策略时，应改用
-专属系统用户或独立 `CODEX_HOME` 并配置对应的 Codex 历史治理，而不是依赖本项目的 SQLite
-cleanup。
-
-内部消息键是 `SHA256(open_kfid + NUL + msgid)`；无 msgid 事件按 cursor、页内位置
-和 payload 生成稳定键。outbox 保存微信 API 可直接发送的 exact payload，稳定 client
-msgid 独立保存。
-
-正式语义：
-
-- Codex 输入至少一次；
-- 微信自动发送至多一次；
-- `accepted` 只表示微信 API 接受，不表示客户端已展示；
-- 进程在 `sending` 中退出时，重启后变为 `uncertain`，可能实际发送零次或一次，绝不盲重试。
-
-旧版 `wecom-state.json` 和独立发送 journal 使用显式离线命令迁移，校验完整性后原子安装
-SQLite，并把旧文件改名为带时间戳的备份：
-
-```bash
-pnpm run migrate:legacy
-```
-
-若旧状态仍存在而新 DB 不存在，主服务会 fail closed 并提示先迁移，不会悄悄创建空库。
-第二实例由 O_EXCL PID 锁拒绝。
-
-## 配置
-
-复制 `.env.example` 为 `.env`，至少填写：
-
-```dotenv
-PORT=8888
-WECOM_CALLBACK_TOKEN=...
-WECOM_ENCODING_AES_KEY=...
-WECOM_CORP_ID=...
-WECOM_KF_SECRET=...
-CODEX_MODEL=gpt-5.6-luna
-CODEX_REASONING_EFFORT=none
-```
-
-回调 Token、EncodingAESKey 和微信客服 Secret 是三个不同值。`.env`、`data/` 和
-`node_modules/` 已被 Git 忽略。
-
-## 启动与运维
-
-要求 Node.js `>=22.13.0`，包管理器固定为 pnpm 10.34.5，项目使用当前最新版
-TypeScript（lockfile 当前锁定 TypeScript 7）。生产代码只由 `tsc` 编译；测试、开发和
-运维脚本使用 Node 原生 `--experimental-strip-types`，不依赖 `tsx` 或 esbuild。
+- Node.js 24 or later;
+- pnpm 10 (pinned in `package.json`);
+- an installed and authenticated Codex CLI;
+- credentials for at least one supported adapter.
 
 ```bash
 corepack enable pnpm
 pnpm install --frozen-lockfile
+cp .env.example .env
+codex login status
+```
+
+No adapter is enabled by default. Follow the [setup guide](docs/setup.md) to generate a
+strong MCP token and configure one adapter:
+
+- For WeChat KF API, set its callback token, EncodingAESKey, CorpID, and secret. A temporary
+  `WECOM_AUTH_TRIGGER` can authorize the first user without knowing their
+  `external_userid` in advance.
+- For an existing Weixin iLink binding, set `ILINK_ENABLED=true`. Creating a new binding
+  currently starts from an authorized WeChat KF conversation.
+
+Start Kintio:
+
+```bash
 pnpm start
 ```
 
-先确保启动服务的同一系统用户执行 `codex login status` 能看到有效登录态。项目不会复制
-或改写该登录态。`pnpm start` 会先执行 strict TypeScript 构建，再运行 `dist/index.js`；本地开发可使用
-`pnpm run dev`。暂停状态进入 SQLite：
+Check that the HTTP listener is alive from another terminal:
 
 ```bash
-pnpm run pause
-pnpm run status
-pnpm run resume
+curl http://127.0.0.1:8888/healthz
 ```
 
-动态授权可由运维显式查询或全局撤销：
+An `ok` response confirms process liveness, not adapter readiness. Complete the callback
+or binding checks described in the setup guide before sending production traffic.
 
-```bash
-pnpm run auth -- status wm_external_userid
-pnpm run auth -- revoke wm_external_userid
-```
+## Security boundaries
 
-SIGTERM/SIGINT 会先关闭 8888 listener，再限时等待同步、Codex 和投递任务。
+- `.env`, SQLite databases, downloaded media, and local key files are ignored by Git and
+  must never be force-added.
+- The Agent does not receive provider secrets, stable user identifiers, raw media IDs, or
+  database paths.
+- MCP endpoints require strong bearer tokens; non-loopback access must use HTTPS.
+- Project-level Agent capability restrictions are not an operating-system sandbox. Use a
+  dedicated system account and additional isolation appropriate to the Agent's real powers.
+- A provider accepting an outbound request does not prove that a client displayed it;
+  uncertain outcomes remain explicit to avoid duplicate delivery.
 
-## 测试
+See the [security policy](SECURITY.md) for the complete trust boundary and private
+vulnerability-reporting process.
+
+## Documentation and contributing
+
+- [Setup guide](docs/setup.md) — configuration through the first Agent reply.
+- [Architecture](docs/architecture.md) — message flow, module boundaries, identity
+  isolation, and source entry points.
+- [Roadmap](ROADMAP.md) — long-term direction and `0.x` priorities.
+- [Contributing guide](CONTRIBUTING.md) — where to start and how to validate changes.
+- [Maintainer guide](MAINTAINING.md) — issue, pull request, and release operations.
+- [Code of Conduct](CODE_OF_CONDUCT.md), [Changelog](CHANGELOG.md), and
+  [Apache License 2.0](LICENSE).
+
+The default verification entry point is:
 
 ```bash
 pnpm test
-pnpm run test:coverage
 ```
 
-默认测试使用真实临时 SQLite 和 fake 外部边界，必须 0 fail / 0 skip。真实 Codex 与
-真实微信测试不参与默认发现：
+Tests use temporary SQLite databases and simulated provider and Agent boundaries by
+default. They contact real services only when explicit live-test flags, targets, and
+allowlists are supplied.
 
-```bash
-RUN_REAL_CODEX=1 pnpm run test:agent
+## Project status
 
-LIVE_WECOM_OPEN_KFID=... \
-LIVE_WECOM_EXTERNAL_USER_ID=... \
-LIVE_WECOM_ALLOWLIST=... \
-LIVE_SCENARIO=text \
-LIVE_WECOM_ACK=SEND_REAL_MESSAGE \
-pnpm run test:live
-```
+Kintio is in the `0.x` stage. It currently ships the two adapters listed above while the
+channel, identity, recovery, and Agent-runtime contracts are stabilized for future
+adapters.
 
-live 测试只 mock 上游输入，目标必须显式提供并同时存在于独立 allowlist。自动结果只证明
-API `accepted`；客户端显示和异步 `msg_send_fail` 属于部署 smoke/人工证据。
+The Weixin iLink protocol implementation incorporates work described in
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
 
-历史问题与验收标准见 `docs/acceptance.md`，架构决策和测试工程分别见
-`docs/refactor-plan.md`、`docs/testing-strategy.md`。
+Kintio is an independent open-source project. It is not affiliated with, authorized by,
+endorsed by, or an official product of Tencent, WeChat, Weixin, or any other channel
+provider.

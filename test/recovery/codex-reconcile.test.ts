@@ -1,331 +1,309 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
+import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test, { type TestContext } from 'node:test';
+import { describe, test } from 'vitest';
+import type { TestContext } from 'vitest';
 
 import type {
-  AgentCompletion,
   AgentInput,
-  AgentSubmission,
   HistoryInspection,
-  StagedCandidate,
-} from '../../src/services/codex-agent.ts';
+} from '../../src/agent/runtime.ts';
+import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
 import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
-import type { PreparedAttempt } from '../../src/types.ts';
-import { inspectAttempts } from '../support/sqlite-inspect.ts';
+import {
+  SimulatedToolAgent,
+  type SimulatedAgentCompletion,
+  type SimulatedAgentRuntime,
+  type SimulatedAgentSubmission,
+} from '../support/executing-agent.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
-function textCandidate(content: string): StagedCandidate {
-  return { type: 'text', content };
-}
+class RecoveryAgent implements SimulatedAgentRuntime {
+  readonly inputs: AgentInput[] = [];
+  noAction = false;
+  replacementThreadId = '';
+  pendingMemoryThreadId = '';
+  inspection: HistoryInspection = {
+    state: 'missing', turnId: '', foundClientInputIds: new Set(), artifacts: [],
+  };
 
-interface InspectionOptions {
-  readonly state?: HistoryInspection['state'];
-  readonly foundIds?: readonly string[];
-  readonly historicalText?: string;
-  readonly turnId?: string;
-}
-
-class FakeCodexAgent {
-  readonly submitCalls: AgentInput[] = [];
-  readonly inspectCalls: Array<{
-    threadId: string;
-    clientInputIds: readonly string[];
-    latestClientInputId: string;
-  }> = [];
-  readonly #store: SqliteStore;
-  readonly #inspection: InspectionOptions;
-  readonly #continuationText: string;
-
-  constructor(
-    store: SqliteStore,
-    inspection: InspectionOptions = {},
-    continuationText = '恢复后的最终回答',
-  ) {
-    this.#store = store;
-    this.#inspection = inspection;
-    this.#continuationText = continuationText;
+  async ensureThread(_conversationId: string, threadId: string): Promise<string> {
+    return this.replacementThreadId || threadId || 'thread-recovery';
   }
 
-  async inspectHistory(
-    threadId: string,
-    clientInputIds: readonly string[],
-    latestClientInputId: string,
-  ): Promise<HistoryInspection> {
-    this.inspectCalls.push({ threadId, clientInputIds, latestClientInputId });
-    return {
-      state: this.#inspection.state || 'missing',
-      turnId: this.#inspection.turnId || 'historical-turn',
-      foundClientInputIds: new Set(this.#inspection.foundIds || []),
-      candidates: this.#inspection.historicalText
-        ? [textCandidate(this.#inspection.historicalText)]
-        : [],
-    };
+  takePendingMemoryThread(): string {
+    const threadId = this.pendingMemoryThreadId;
+    this.pendingMemoryThreadId = '';
+    return threadId;
   }
 
-  async submit(input: AgentInput): Promise<AgentSubmission> {
-    this.submitCalls.push(input);
-    const claimed = this.#store.claimInbound({
-      messageKey: input.message.messageKey,
-      clientInputId: input.clientInputId || input.message.messageKey,
-      consumeHeldContext: Boolean(input.consumeHeldContext),
-    });
-    const completion: AgentCompletion = {
-      candidates: [textCandidate(this.#continuationText)],
-      mediaCatalog: input.mediaCatalog || [],
-      expectedConversationEpoch: claimed.message.claimedConversationEpoch,
-      expectedRuntimeEpoch: claimed.message.claimedRuntimeEpoch,
-    };
+  activePrimary(): undefined { return undefined; }
+
+  async inspectHistory(): Promise<HistoryInspection> { return this.inspection; }
+
+  async submit(input: AgentInput): Promise<SimulatedAgentSubmission> {
+    this.inputs.push(input);
+    const completion: SimulatedAgentCompletion = this.noAction
+      ? { decision: 'no_action' }
+      : { replies: [{ type: 'text', content: '恢复后的最终回答' }] };
     return {
       kind: 'started',
       primaryMessageKey: input.message.messageKey,
-      turnId: `continuation-${this.submitCalls.length}`,
+      turnId: 'recovery-turn',
+      threadId: input.threadId,
       completion: Promise.resolve(completion),
     };
   }
 
-  async close(): Promise<void> {}
-  async abort(): Promise<void> {}
+  async close() {}
+  async abort() {}
 }
 
-interface PreparedObservation {
-  readonly messageKey: string;
-  readonly candidates: AgentCompletion['candidates'];
-}
-
-interface Harness {
-  readonly store: SqliteStore;
-  readonly codex: FakeCodexAgent;
-  readonly processor: ConversationProcessor;
-  readonly prepared: PreparedObservation[];
-}
-
-function candidateContent(candidate: AgentCompletion['candidates'][number]): string {
-  return 'content' in candidate ? String(candidate.content || '') : '';
-}
-
-function createHarness(
-  t: TestContext,
-  inspection: InspectionOptions = {},
-  continuationText = '恢复后的最终回答',
-): Harness {
-  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-reconcile-'));
+async function harness(t: TestContext, sendMode: 'accepted' | 'uncertain' = 'accepted') {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-reconcile-'));
   const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
-  const codex = new FakeCodexAgent(store, inspection, continuationText);
-  const prepared: PreparedObservation[] = [];
+  const rawAgent = new RecoveryAgent();
+  const sends: Record<string, unknown>[] = [];
+  const errors: string[] = [];
+  const channel = new WechatKfToolExecutor({
+    store,
+    apiClient: {
+      async sendPreparedMessage(input) {
+        sends.push(structuredClone(input.payload));
+        return sendMode === 'accepted' ? { msgid: `wx-${sends.length}` } : {};
+      },
+    },
+    mediaGateway: {
+      async upload() { return { media_id: 'unused' }; },
+      async cloneForSend() { throw new Error('not expected'); },
+      async getCardThumbnailMediaId() { throw new Error('not expected'); },
+    },
+    observeMs: 0,
+    logger: { info() {}, error(message) { errors.push(message); } },
+  });
   const processor = new ConversationProcessor({
     store,
-    codexAgent: codex,
-    mediaGateway: { resolveForCodex: async () => [] },
-    outboundPreparer: {
-      async prepare({ messageKey, candidates }) {
-        prepared.push({ messageKey, candidates: [...candidates] });
-        const attempts: PreparedAttempt[] = candidates.map(
-          (candidate, sendIndex) => ({
-            sendIndex,
-            source: 'codex_tool',
-            sentType: 'text',
-            payload: {
-              msgtype: 'text',
-              text: { content: candidateContent(candidate) },
-            },
-          }),
-        );
-        return { attempts, spoolPaths: [] };
-      },
-      async cleanup() {},
-    },
-    delivery: { kick: async () => {} },
+    agent: new SimulatedToolAgent({ inner: rawAgent, tools: channel }),
+    mediaGateway: { async resolveForCodex() { return []; } },
+    channel,
     allowedUserIds: ['wm-recovery'],
-    logger: { info() {}, warn() {}, error() {} },
+    logger: { info() {}, error() {} },
   });
-  t.after(async () => {
+  t.onTestFinished(async () => {
     await processor.close();
+    await channel.close();
     store.close();
-    fs.rmSync(directory, { recursive: true, force: true });
+    await fs.rm(directory, { recursive: true, force: true });
   });
-  return { store, codex, processor, prepared };
+  return { store, rawAgent, channel, processor, sends, errors };
 }
 
-function inbound(msgid: string, summary = msgid) {
-  return testWecomMessage({
-    id: msgid,
-    sentAt: 100,
-    openKfId: 'wk-recovery',
-    externalUserId: 'wm-recovery',
-    text: summary,
-  });
-}
-
-interface SeedOptions {
-  readonly primaryId?: string;
-  readonly primaryStatus?: 'processing' | 'preparing';
-  readonly steerId?: string;
-  readonly steerStatus?: 'steering' | 'steered';
-}
-
-function seedGroup(
+function seed(
   store: SqliteStore,
-  {
-    primaryId = 'primary',
-    primaryStatus = 'processing',
-    steerId,
-    steerStatus,
-  }: SeedOptions = {},
-): { primaryKey: string; steerKey: string } {
-  const messages = [inbound(primaryId, '原始问题')];
-  if (steerId) messages.push(inbound(steerId, '最新调整'));
-  store.ingestSyncPage({
+  id: string,
+  status: 'processing' | 'preparing' = 'preparing',
+): string {
+  const page = store.ingestSyncPage({
     openKfId: 'wk-recovery',
-    nextCursor: 'cursor-1',
-    messages,
+    nextCursor: `cursor-${id}`,
+    messages: [testWecomMessage({
+      id,
+      openKfId: 'wk-recovery',
+      externalUserId: 'wm-recovery',
+      text: '原始问题',
+    })],
   });
-  const primaryKey = stableMessageKey('wk-recovery', primaryId);
+  const messageKey = page.insertedMessageKeys[0] ||
+    stableMessageKey('wk-recovery', id);
+  store.claimInbound({ messageKey });
+  if (status === 'preparing') store.markInboundPreparing(messageKey, 'old-turn');
   store.setConversationThread({
     openKfId: 'wk-recovery',
     externalUserId: 'wm-recovery',
-    threadId: 'thread-recovery',
+    threadId: `thread-${id}`,
   });
-  store.claimInbound({ messageKey: primaryKey, clientInputId: primaryKey });
-  if (primaryStatus === 'preparing') store.markInboundPreparing(primaryKey, 'old-turn');
-  const steerKey = steerId ? stableMessageKey('wk-recovery', steerId) : '';
-  if (steerKey) {
-    store.beginInboundSteering({
-      messageKey: steerKey,
-      primaryMessageKey: primaryKey,
-      clientInputId: steerKey,
-    });
-    if (steerStatus === 'steered') {
-      store.confirmInboundSteered(steerKey, { codexTurnId: 'old-turn' });
-    }
-  }
-  return { primaryKey, steerKey };
+  return messageKey;
 }
 
-async function recoverAll(harness: Harness): Promise<void> {
-  await harness.processor.recover(harness.store.recoverStartup().inbound);
-  await harness.processor.waitForIdle();
-}
-
-function onlyAttempt(store: SqliteStore, messageKey: string) {
-  const attempt = inspectAttempts(store.database, messageKey)[0];
-  assert.ok(attempt?.payload);
-  return attempt;
-}
-
-function attemptText(store: SqliteStore, messageKey: string): string {
-  const payload = onlyAttempt(store, messageKey).payload;
-  const text = payload?.text;
-  return text && typeof text === 'object' && !Array.isArray(text)
-    ? String(text.content || '')
-    : '';
-}
-
-test('processing input absent from history starts one recovery continuation and one outbox batch', async (t) => {
-  const harness = createHarness(t);
-  const { primaryKey } = seedGroup(harness.store);
-  await recoverAll(harness);
-  assert.equal(harness.codex.submitCalls.length, 1);
-  assert.equal(harness.codex.submitCalls[0]?.clientInputId, `${primaryKey}-recovery`);
-  assert.equal(harness.prepared.length, 1);
-  assert.equal(candidateContent(harness.prepared[0]!.candidates[0]!), '恢复后的最终回答');
-  assert.equal(attemptText(harness.store, primaryKey), '恢复后的最终回答');
+test('processing input absent from history runs one Agent continuation and one MCP send', async (t) => {
+  const active = await harness(t);
+  const messageKey = seed(active.store, 'missing-history', 'processing');
+  await active.processor.recover(active.store.recoverStartup().inbound);
+  await active.processor.waitForIdle();
+  assert.equal(active.rawAgent.inputs.length, 1);
+  assert.equal(active.rawAgent.inputs[0]?.clientInputId, `${messageKey}-recovery`);
+  assert.deepEqual(active.sends, [{
+    msgtype: 'text', text: { content: '恢复后的最终回答' },
+  }]);
+  assert.equal(active.store.getInbound(messageKey)?.status, 'completed');
 });
 
-test('completed history finalizes only the latest-steer candidate without submit', async (t) => {
-  const primaryId = 'primary-history';
-  const steerId = 'steer-history';
-  const primaryKey = stableMessageKey('wk-recovery', primaryId);
-  const steerKey = stableMessageKey('wk-recovery', steerId);
-  const harness = createHarness(t, {
+test('unlinked startup messages stay independent even across one conversation', async (t) => {
+  const active = await harness(t);
+  const primary = seed(active.store, 'day-one-primary', 'processing');
+  const page = active.store.ingestSyncPage({
+    openKfId: 'wk-recovery',
+    expectedCursor: active.store.getCursor('wk-recovery'),
+    nextCursor: 'later-page',
+    messages: [
+      testWecomMessage({
+        id: 'day-two-one', openKfId: 'wk-recovery',
+        externalUserId: 'wm-recovery', text: '独立问题一',
+      }),
+      testWecomMessage({
+        id: 'day-two-two', openKfId: 'wk-recovery',
+        externalUserId: 'wm-recovery', text: '独立问题二',
+      }),
+      testWecomMessage({
+        id: 'day-two-three', openKfId: 'wk-recovery',
+        externalUserId: 'wm-recovery', text: '独立问题三',
+      }),
+    ],
+  });
+  const later = page.insertedMessageKeys;
+
+  await active.processor.recover(active.store.recoverStartup().inbound);
+  await active.processor.waitForIdle();
+
+  assert.equal(active.rawAgent.inputs.length, 4);
+  assert.equal(active.sends.length, 4);
+  assert.deepEqual({
+    errors: active.errors,
+    messages: [primary, ...later].map((messageKey) => ({
+    status: active.store.getInbound(messageKey)?.status,
+    error: active.store.getInbound(messageKey)?.errorMessage,
+    primary: active.store.getInbound(messageKey)?.primaryMessageKey,
+    attempts: active.store.listMessageAttempts(messageKey).length,
+    })),
+  }, {
+    errors: [],
+    messages: Array.from({ length: 4 }, () => ({
+      status: 'completed', error: '', primary: '', attempts: 1,
+    })),
+  });
+});
+
+test('archived recovery exposes old ID to the new turn and clears it after completion', async (t) => {
+  const active = await harness(t);
+  const messageKey = seed(active.store, 'archived-memory', 'processing');
+  const archived = '01900000-0000-7000-8000-000000000001';
+  const replacement = '01900000-0000-7000-8000-000000000002';
+  active.store.setConversationThread({
+    openKfId: 'wk-recovery',
+    externalUserId: 'wm-recovery',
+    threadId: archived,
+  });
+  active.rawAgent.replacementThreadId = replacement;
+  active.rawAgent.pendingMemoryThreadId = archived;
+
+  await active.processor.recover(active.store.recoverStartup().inbound);
+  await active.processor.waitForIdle();
+
+  assert.equal(active.rawAgent.inputs[0]?.threadId, replacement);
+  assert.equal(active.rawAgent.inputs[0]?.archivedThreadId, archived);
+  assert.equal(
+    active.store.getConversation('wk-recovery', 'wm-recovery')?.threadId,
+    replacement,
+  );
+  assert.equal(
+    active.store.getConversation('wk-recovery', 'wm-recovery')?.memoryThreadId,
+    '',
+  );
+  assert.equal(active.store.getInbound(messageKey)?.status, 'completed');
+});
+
+test('deleted thread recovery starts clean without advertising unavailable memory', async (t) => {
+  const active = await harness(t);
+  seed(active.store, 'deleted-thread', 'processing');
+  active.rawAgent.replacementThreadId = '01900000-0000-7000-8000-000000000003';
+
+  await active.processor.recover(active.store.recoverStartup().inbound);
+  await active.processor.waitForIdle();
+
+  assert.equal(active.rawAgent.inputs[0]?.archivedThreadId, undefined);
+  assert.equal(
+    active.store.getConversation('wk-recovery', 'wm-recovery')?.memoryThreadId,
+    '',
+  );
+});
+
+test('durable terminal MCP attempt finalizes recovery without replaying Agent input', async (t) => {
+  const active = await harness(t);
+  const messageKey = seed(active.store, 'durable-attempt');
+  const session = active.store.createAgentSession({ messageKey });
+  const first = await active.channel.execute('send_text', {
+    session: session.token,
+    content: '已经执行一',
+  });
+  const second = await active.channel.execute('send_text', {
+    session: session.token,
+    content: '已经执行二',
+  });
+  active.store.closeAgentSession(session.token);
+  active.rawAgent.inspection = {
     state: 'completed',
-    foundIds: [primaryKey, steerKey],
-    historicalText: '历史中的最新回答',
-  });
-  seedGroup(harness.store, {
-    primaryId,
-    primaryStatus: 'preparing',
-    steerId,
-    steerStatus: 'steered',
-  });
-  await recoverAll(harness);
-  assert.equal(harness.codex.submitCalls.length, 0);
-  assert.equal(harness.codex.inspectCalls.length, 1);
-  assert.equal(harness.codex.inspectCalls[0]?.latestClientInputId, steerKey);
-  assert.equal(harness.store.getInbound(steerKey)?.status, 'absorbed');
-  assert.equal(candidateContent(harness.prepared[0]!.candidates[0]!), '历史中的最新回答');
+    turnId: 'old-turn',
+    foundClientInputIds: new Set([messageKey]),
+    artifacts: [],
+    executedAttemptIds: [first.attemptId, second.attemptId],
+  };
+  await active.processor.recover(active.store.recoverStartup().inbound);
+  await active.processor.waitForIdle();
+  assert.equal(active.rawAgent.inputs.length, 0);
+  assert.equal(active.store.getInbound(messageKey)?.status, 'completed');
+  assert.deepEqual(active.store.listMessageAttempts(messageKey).map((attempt) =>
+    attempt.attemptId), [first.attemptId, second.attemptId]);
 });
 
-test('durable steering found in history is confirmed before historical finalization', async (t) => {
-  const primaryId = 'primary-confirm';
-  const steerId = 'steer-confirm';
-  const primaryKey = stableMessageKey('wk-recovery', primaryId);
-  const steerKey = stableMessageKey('wk-recovery', steerId);
-  const harness = createHarness(t, {
+test('failed primary is reclaimed before completed-history finalization on startup', async (t) => {
+  const active = await harness(t);
+  const messageKey = seed(active.store, 'failed-finalization');
+  const session = active.store.createAgentSession({ messageKey });
+  const receipt = await active.channel.execute('send_text', {
+    session: session.token,
+    content: '已经执行',
+  });
+  active.store.closeAgentSession(session.token);
+  active.store.failInbound(messageKey, new Error('finalization interrupted'));
+  active.rawAgent.inspection = {
     state: 'completed',
-    foundIds: [primaryKey, steerKey],
-    historicalText: '已确认 steering 的回答',
-  });
-  seedGroup(harness.store, {
-    primaryId,
-    primaryStatus: 'preparing',
-    steerId,
-    steerStatus: 'steering',
-  });
-  await recoverAll(harness);
-  assert.equal(harness.codex.submitCalls.length, 0);
-  assert.equal(harness.codex.inspectCalls.length, 1);
-  assert.equal(harness.store.getInbound(steerKey)?.status, 'absorbed');
-  assert.equal(candidateContent(harness.prepared[0]!.candidates[0]!), '已确认 steering 的回答');
+    turnId: 'old-turn',
+    foundClientInputIds: new Set([messageKey]),
+    artifacts: [],
+    executedAttemptIds: [receipt.attemptId],
+  };
+
+  await active.processor.recover(active.store.recoverStartup().inbound);
+  await active.processor.waitForIdle();
+
+  assert.equal(active.rawAgent.inputs.length, 0);
+  assert.equal(active.store.getInbound(messageKey)?.status, 'completed');
+  assert.equal(active.store.listMessageAttempts(messageKey).length, 1);
 });
 
-test('missing steering is merged into one continuation instead of stale history', async (t) => {
-  const primaryId = 'primary-missing';
-  const steerId = 'missing-steer';
-  const primaryKey = stableMessageKey('wk-recovery', primaryId);
-  const harness = createHarness(t, {
-    state: 'completed',
-    foundIds: [primaryKey],
-    historicalText: '不应直接使用的旧回答',
-  }, '合并缺失 steering 后的回答');
-  const { steerKey } = seedGroup(harness.store, {
-    primaryId,
-    primaryStatus: 'preparing',
-    steerId,
-    steerStatus: 'steering',
-  });
-  await recoverAll(harness);
-  assert.equal(harness.codex.submitCalls.length, 1);
-  assert.match(harness.codex.submitCalls[0]?.contextText || '', /原始问题/u);
-  assert.match(harness.codex.submitCalls[0]?.contextText || '', /最新调整/u);
-  assert.equal(harness.store.getInbound(steerKey)?.status, 'absorbed');
-  assert.equal(candidateContent(harness.prepared[0]!.candidates[0]!), '合并缺失 steering 后的回答');
-});
-
-test('[H03] human takeover and pause suppress recovery without Codex activity', async (t) => {
-  for (const mode of ['human', 'paused'] as const) {
-    await t.test(mode, async (t) => {
-      const harness = createHarness(t);
-      const { primaryKey } = seedGroup(harness.store, {
-        primaryId: `primary-${mode}`,
-        primaryStatus: 'preparing',
+describe.each(['accepted', 'uncertain'] as const)('%s recovery receipt', (status) => {
+  test('recovery may auditably choose no additional send after accepted or uncertain', async (t) => {
+      const active = await harness(t, status);
+      const messageKey = seed(active.store, `no-action-${status}`);
+      const session = active.store.createAgentSession({ messageKey });
+      const receipt = await active.channel.execute('send_text', {
+        session: session.token,
+        content: '已经尝试发送',
       });
-      if (mode === 'human') {
-        harness.store.setConversationMode({
-          openKfId: 'wk-recovery',
-          externalUserId: 'wm-recovery',
-          mode: 'human',
-        });
-      } else {
-        harness.store.setRuntimePaused(true);
-      }
-      await recoverAll(harness);
-      assert.equal(harness.store.getInbound(primaryKey)?.status, 'suppressed');
-      assert.equal(inspectAttempts(harness.store.database, primaryKey).length, 0);
-      assert.equal(harness.codex.inspectCalls.length, 0);
-      assert.equal(harness.codex.submitCalls.length, 0);
-    });
-  }
+      assert.equal(receipt.status, status);
+      active.store.closeAgentSession(session.token);
+      active.store.failInbound(messageKey, new Error('turn ended before completion'));
+      active.rawAgent.noAction = true;
+
+      await active.processor.recover(active.store.recoverStartup().inbound);
+      await active.processor.waitForIdle();
+
+      assert.equal(active.rawAgent.inputs.length, 1);
+      assert.equal(active.rawAgent.inputs[0]?.allowNoAction, true);
+      assert.equal(active.sends.length, 1);
+      assert.equal(active.store.getInbound(messageKey)?.status, 'completed');
+    assert.equal(active.store.listMessageAttempts(messageKey).length, 1);
+  });
 });

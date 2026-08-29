@@ -1,13 +1,11 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import {
   SEND_TOOL_NAMES,
   SendContractError,
   normalizeMediaCatalog,
   normalizeSendIntent,
-  prepareSendBatch,
-  prepareTextChunks,
 } from '../../src/domain/send-contract.ts';
 
 const mediaCatalog = Object.freeze([{ ref: 'media:0', kind: 'image' }]);
@@ -16,7 +14,7 @@ function hasContractCode(error: unknown, code: string): boolean {
   return error instanceof SendContractError && error.code === code;
 }
 
-test('[O01] validates only the five supported outbound candidate types', () => {
+test('validates only the five supported outbound message types', () => {
   const candidates = [
     normalizeSendIntent('send_text', { content: '你好' }),
     normalizeSendIntent(
@@ -85,7 +83,7 @@ test('media catalog contains only media:N image capabilities', () => {
   );
 });
 
-test('[O05] rejects private destinations and guessed mini-program fields', () => {
+test('rejects private destinations and guessed mini-program fields', () => {
   for (const url of [
     'http://127.0.0.1/private',
     'http://2130706433/private',
@@ -136,43 +134,16 @@ test('[O05] rejects private destinations and guessed mini-program fields', () =>
   );
 });
 
-test('[O07] host preparation splits UTF-8 text and enforces the final five-message budget', () => {
-  const content = '你'.repeat(900);
-  const chunks = prepareTextChunks(content);
-  assert.equal(chunks.length, 2);
-  assert.equal(chunks.join(''), content);
-  assert.ok(
-    chunks.every((chunk) => Buffer.byteLength(chunk, 'utf8') <= 2048),
-  );
-
-  const finalBatch = prepareSendBatch([
-    { type: 'text', content },
-    {
-      type: 'location',
-      name: '天安门',
-      address: '北京市东城区',
-      latitude: 39.9087,
-      longitude: 116.3975,
-    },
-  ]);
-  assert.equal(finalBatch.length, 3);
-
+test('one MCP text execution enforces the official 2048-byte boundary', () => {
+  assert.doesNotThrow(() =>
+    normalizeSendIntent('send_text', { content: 'a'.repeat(2048) }));
   assert.throws(
-    () =>
-      prepareSendBatch(
-        Array.from({ length: 6 }, (_, index) => ({
-          type: 'location',
-          name: `地点${index}`,
-          address: `地址${index}`,
-          latitude: 39,
-          longitude: 116,
-        })),
-      ),
-    (error: unknown) => hasContractCode(error, 'send_budget_exceeded'),
+    () => normalizeSendIntent('send_text', { content: 'a'.repeat(2049) }),
+    /2048 UTF-8 bytes/u,
   );
 });
 
-test('[O02] candidate validation is pure and does not add recipients or mutate input', () => {
+test('send validation is pure and does not add recipients or mutate input', () => {
   const input = {
     title: '帮助',
     description: '说明',

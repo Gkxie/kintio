@@ -1,0 +1,30 @@
+name: PR metadata
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+jobs:
+  title:
+    name: PR title
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Require a semantic PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          node --input-type=module -e '
+            const title = process.env.PR_TITLE || "";
+            const valid = /^(?:feat|fix|docs|refactor|test|chore|perf|build|ci|revert)(?:\([a-z0-9][a-z0-9-]*\))?!?: .+/u;
+            if (!valid.test(title)) {
+              console.error("Use: type(optional-scope): concise description");
+              process.exit(1);
+            }
+          '

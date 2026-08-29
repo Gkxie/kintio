@@ -69,7 +69,7 @@ function createMultipartBody({
   filename,
   contentType,
 }: Omit<ImageMedia, 'type'>): { body: Buffer; contentType: string } {
-  const boundary = `----wechat-bot-${crypto.randomUUID()}`;
+  const boundary = `----kintio-${crypto.randomUUID()}`;
   const header = Buffer.from(
     [
       `--${boundary}`,
@@ -161,7 +161,7 @@ export class WecomApiClient {
     timeoutMs?: number;
   }) {
     if (!corpId || !kfSecret) {
-      throw new Error('WeCom CorpID and customer-service Secret are required');
+      throw new Error('WeCom CorpID and WeChat KF Secret are required');
     }
 
     if (typeof fetchImpl !== 'function') {

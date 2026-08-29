@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import type { WecomApiClient } from '../../src/services/wecom-api.ts';
 import { WecomSync } from '../../src/services/wecom-sync.ts';
@@ -16,10 +16,10 @@ function asRecord(value: unknown): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-test('[G04] sync persists every page and cursor before enqueueing normalized inbox work', async (t) => {
+test('sync persists known and unknown messages with the page cursor before enqueueing', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-'));
   const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
-  t.after(async () => {
+  t.onTestFinished(async () => {
     store.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
@@ -48,6 +48,14 @@ test('[G04] sync persists every page and cursor before enqueueing normalized inb
             desc: 'AI 开发',
             url: 'https://example.com/creator',
           },
+        },
+        {
+          msgid: 'unknown-one',
+          external_userid: 'wm-one',
+          origin: 3,
+          msgtype: 'future_type',
+          send_time: 125,
+          future_type: { content: 'opaque' },
         },
       ],
     },
@@ -91,10 +99,12 @@ test('[G04] sync persists every page and cursor before enqueueing normalized inb
   assert.deepEqual(enqueued, [
     stableMessageKey('wk-one', 'customer-one'),
     stableMessageKey('wk-one', 'link-one'),
+    stableMessageKey('wk-one', 'unknown-one'),
   ]);
   const firstKey = enqueued[0];
   const secondKey = enqueued[1];
-  assert.ok(firstKey && secondKey);
+  const thirdKey = enqueued[2];
+  assert.ok(firstKey && secondKey && thirdKey);
   const text = store.getInbound(firstKey);
   const link = store.getInbound(secondKey);
   assert.ok(text?.payload && link?.payload);
@@ -106,13 +116,85 @@ test('[G04] sync persists every page and cursor before enqueueing normalized inb
   assert.match(String(link.payload.summary), /AI 开发/u);
   const linkSync = asRecord(link.payload.sync);
   assert.equal(linkSync.index, 1);
+  const unknown = store.getInbound(thirdKey);
+  assert.equal(unknown?.type, 'unknown');
+  assert.equal(asRecord(unknown?.payload?.sync).index, 2);
+
   await sync.close();
+});
+
+test('a live callback during startup catch-up joins the recovery snapshot', async (t) => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-startup-'));
+  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  store.ingestSyncPage({
+    openKfId: 'wk-one',
+    nextCursor: 'cursor-one',
+    messages: [],
+  });
+  let releaseStartup!: () => void;
+  const startupBlocked = new Promise<void>((resolve) => { releaseStartup = resolve; });
+  const calls: SyncInput[] = [];
+  const enqueued: string[] = [];
+  const sync = new WecomSync({
+    store,
+    startPaused: true,
+    logger: { info() {}, warn() {}, error() {} },
+    apiClient: {
+      async syncMessages(input: SyncInput): Promise<SyncResult> {
+        calls.push(structuredClone(input));
+        if (calls.length === 1) {
+          await startupBlocked;
+          return {
+            next_cursor: 'cursor-two',
+            has_more: 0,
+            msg_list: [{
+              msgid: 'missed', external_userid: 'wm-one', origin: 3,
+              msgtype: 'text', text: { content: '停机消息' },
+            }],
+          };
+        }
+        return {
+          next_cursor: 'cursor-three',
+          has_more: 0,
+          msg_list: [{
+            msgid: 'live', external_userid: 'wm-one', origin: 3,
+            msgtype: 'text', text: { content: '刚进线消息' },
+          }],
+        };
+      },
+    },
+    processor: {
+      async enqueue(messageKey: string) { enqueued.push(messageKey); },
+    },
+  });
+  t.onTestFinished(async () => {
+    await sync.close();
+    store.close();
+    await fs.rm(directory, { recursive: true, force: true });
+  });
+
+  const catchUp = sync.catchUp();
+  const live = sync.enqueue({ callbackToken: 'live-token', openKfId: 'wk-one' });
+  releaseStartup();
+  await Promise.all([catchUp, live, sync.waitForIdle()]);
+
+  assert.deepEqual(calls, [
+    { cursor: 'cursor-one', callbackToken: '', openKfId: 'wk-one' },
+    { cursor: 'cursor-two', callbackToken: 'live-token', openKfId: 'wk-one' },
+  ]);
+  assert.equal(store.getCursor('wk-one'), 'cursor-three');
+  assert.deepEqual(enqueued, []);
+  assert.deepEqual(
+    store.recoverStartup().inbound.slice(-2).map((record) => record.msgid),
+    ['missed', 'live'],
+  );
+  sync.startConsuming();
 });
 
 test('has_more without a new cursor is rejected without advancing state', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-stall-'));
   const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
-  t.after(async () => {
+  t.onTestFinished(async () => {
     store.close();
     await fs.rm(directory, { recursive: true, force: true });
   });

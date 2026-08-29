@@ -1,15 +1,13 @@
 import { isIP } from 'node:net';
 
-import { splitUtf8 } from '../lib/text.ts';
-
-export const SEND_TYPES = [
+const SEND_TYPES = [
   'text',
   'image',
   'link',
   'miniprogram',
   'location',
 ] as const;
-export type SendType = (typeof SEND_TYPES)[number];
+type SendType = (typeof SEND_TYPES)[number];
 
 export const SEND_TOOL_NAMES = [
   'send_text',
@@ -53,9 +51,8 @@ type SendInput = Record<string, unknown> | undefined;
 const TOOL_TYPES = new Map<string, SendType>(
   SEND_TOOL_NAMES.map((name, index) => [name, SEND_TYPES[index]!]),
 );
-const MEDIA_REFERENCE = /^media:(?:0|[1-9]\d?)$/u;
+const MEDIA_REFERENCE = /^(?:media|artifact):(?:0|[1-9]\d?)$/u;
 const MAX_TEXT_BYTES = 2048;
-const MAX_BATCH_MESSAGES = 5;
 
 export class SendContractError extends Error {
   readonly code: string;
@@ -193,7 +190,7 @@ function normalizeText(input: SendInput): Extract<SendIntent, { type: 'text' }> 
     content: requiredText(
       input?.content,
       'Text content',
-      MAX_TEXT_BYTES * MAX_BATCH_MESSAGES,
+      MAX_TEXT_BYTES,
     ),
   });
 }
@@ -293,49 +290,4 @@ export function normalizeSendIntent(
   if (type === 'link') return normalizeLink(input);
   if (type === 'miniprogram') return normalizeMiniProgram(input);
   return normalizeLocation(input);
-}
-
-export function prepareTextChunks(content: unknown): readonly string[] {
-  const text = normalizeText({ content });
-  return Object.freeze(
-    splitUtf8(text.content, MAX_TEXT_BYTES).map((chunk) => chunk),
-  );
-}
-
-export function prepareSendBatch(
-  intents: readonly SendInput[],
-  {
-    mediaCatalog = [],
-    maxMessages = MAX_BATCH_MESSAGES,
-  }: { mediaCatalog?: unknown; maxMessages?: number } = {},
-): readonly SendIntent[] {
-  if (!Array.isArray(intents)) fail('Send batch must be an array');
-  if (!Number.isInteger(maxMessages) || maxMessages < 1 || maxMessages > 5) {
-    fail('Host send budget must be between 1 and 5', 'invalid_send_budget');
-  }
-  const catalog = normalizeMediaCatalog(mediaCatalog);
-  const messages: SendIntent[] = [];
-
-  for (const candidate of intents) {
-    const intent = normalizeSendIntent(candidate?.type, candidate, {
-      mediaCatalog: catalog,
-    });
-    if (intent.type === 'text') {
-      messages.push(
-        ...prepareTextChunks(intent.content).map((content) =>
-          Object.freeze({ type: 'text', content }),
-        ),
-      );
-    } else {
-      messages.push(intent);
-    }
-    if (messages.length > maxMessages) {
-      fail(
-        `Final send batch exceeds the host budget of ${maxMessages}`,
-        'send_budget_exceeded',
-      );
-    }
-  }
-
-  return Object.freeze(messages);
 }

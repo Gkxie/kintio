@@ -8,27 +8,43 @@ const MAX_SYNC_PAGES = 100;
 
 export class WecomSync {
   readonly apiClient: Pick<WecomApiClient, 'syncMessages'>;
-  readonly store: Pick<SqliteStore, 'getCursor' | 'ingestSyncPage'>;
+  readonly store: Pick<
+    SqliteStore,
+    | 'getCursor'
+    | 'listSyncOpenKfIds'
+    | 'ingestSyncPage'
+    | 'promoteDeferredConversation'
+  >;
   readonly processor: Pick<ConversationProcessor, 'enqueue'>;
   readonly logger: Logger;
   private readonly queues = new Map<string, Promise<void>>();
   private accepting = true;
+  private consuming = false;
 
   constructor({
     apiClient,
     store,
     processor,
     logger = console,
+    startPaused = false,
   }: {
     apiClient: Pick<WecomApiClient, 'syncMessages'>;
-    store: Pick<SqliteStore, 'getCursor' | 'ingestSyncPage'>;
+    store: Pick<
+      SqliteStore,
+      | 'getCursor'
+      | 'listSyncOpenKfIds'
+      | 'ingestSyncPage'
+      | 'promoteDeferredConversation'
+    >;
     processor: Pick<ConversationProcessor, 'enqueue'>;
     logger?: Logger;
+    startPaused?: boolean;
   }) {
     this.apiClient = apiClient;
     this.store = store;
     this.processor = processor;
     this.logger = logger;
+    this.consuming = !startPaused;
   }
 
   enqueue({
@@ -39,14 +55,38 @@ export class WecomSync {
     openKfId: string;
   }): Promise<void> {
     if (!this.accepting) return Promise.resolve();
+    return this.#queue(callbackToken, openKfId, false);
+  }
+
+  catchUp(): Promise<void> {
+    if (!this.accepting) return Promise.resolve();
+    if (this.consuming) {
+      throw new Error('startup catch-up requires paused consumption');
+    }
+    const openKfIds = this.store.listSyncOpenKfIds();
+    if (openKfIds.length) {
+      this.logger.info?.(
+        `[wecom] startup catch-up accounts=${openKfIds.length}`,
+      );
+    }
+    return Promise.all(
+      openKfIds.map((openKfId) => this.#queue('', openKfId, true)),
+    ).then(() => undefined);
+  }
+
+  #queue(
+    callbackToken: string,
+    openKfId: string,
+    deferred: boolean,
+  ): Promise<void> {
     const previous = this.queues.get(openKfId) || Promise.resolve();
     const task = previous.then(
-      () => this.#drain(callbackToken, openKfId),
-      () => this.#drain(callbackToken, openKfId),
+      () => this.#drain(callbackToken, openKfId, deferred),
+      () => this.#drain(callbackToken, openKfId, deferred),
     );
     const guarded = task.catch((error) => {
       this.logger.error?.(
-        `[wecom] sync failed open_kfid=${openKfId}: ${error.message}`,
+        `[wecom] sync failed: ${error.message}`,
       );
     });
     this.queues.set(openKfId, guarded);
@@ -56,7 +96,11 @@ export class WecomSync {
     return guarded;
   }
 
-  async #drain(callbackToken: string, openKfId: string): Promise<void> {
+  async #drain(
+    callbackToken: string,
+    openKfId: string,
+    deferred: boolean,
+  ): Promise<void> {
     let cursor = this.store.getCursor(openKfId);
 
     for (let page = 0; page < MAX_SYNC_PAGES; page += 1) {
@@ -77,20 +121,45 @@ export class WecomSync {
         expectedCursor: cursor,
         nextCursor,
         messages,
+        deferred,
       });
       cursor = ingested.cursor;
-      await Promise.all(
-        ingested.insertedMessageKeys.map((messageKey) =>
-          this.processor.enqueue(messageKey),
-        ),
-      );
+      if (!deferred) {
+        const ready = new Map<number, string>();
+        const conversations = new Set(
+          messages.map((message) =>
+            `${message.conversation.accountKey}\0${message.conversation.peerId}`
+          ),
+        );
+        for (const conversation of conversations) {
+          const [service = '', customer = ''] = conversation.split('\0');
+          for (const record of this.store.promoteDeferredConversation({
+            openKfId: service,
+            externalUserId: customer,
+          })) {
+            ready.set(record.inboxSeq, record.messageKey);
+          }
+        }
+        if (this.consuming) {
+          await Promise.all(
+            [...ready.entries()].sort(([left], [right]) => left - right)
+              .map(([, messageKey]) => this.processor.enqueue(messageKey)),
+          );
+        }
+      }
       if (result.has_more !== 1) return;
     }
     throw new Error(`sync_msg exceeded ${MAX_SYNC_PAGES} pages`);
   }
 
   async waitForIdle(): Promise<void> {
-    await Promise.allSettled([...this.queues.values()]);
+    while (this.queues.size) {
+      await Promise.allSettled([...this.queues.values()]);
+    }
+  }
+
+  startConsuming(): void {
+    this.consuming = true;
   }
 
   stopAccepting(): void {

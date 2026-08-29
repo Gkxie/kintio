@@ -159,7 +159,7 @@ export function acquireSingleInstanceLock({
       isProcessAlive(current.pid)
     ) {
       throw new SingleInstanceLockError(
-        `Another wechat-bot instance is running with PID ${current.pid}`,
+        `Another Kintio instance is running with PID ${current.pid}`,
         { owner: current },
       );
     }
@@ -196,7 +196,7 @@ export function acquireSingleInstanceLock({
         isProcessAlive(Number(checked.pid))
       ) {
         throw new SingleInstanceLockError(
-          `Another wechat-bot instance acquired the lock with PID ${checked.pid}`,
+          `Another Kintio instance acquired the lock with PID ${checked.pid}`,
           { owner: checked },
         );
       }

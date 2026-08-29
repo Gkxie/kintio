@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
@@ -15,7 +15,7 @@ function unusedUpload(): Promise<never> {
   return Promise.reject(new Error('uploadMedia was not expected'));
 }
 
-test('[C04] media gateway resolves only image attachments for Codex', async () => {
+test('media gateway resolves only image attachments for Codex', async () => {
   const downloads: string[] = [];
   const gateway = new WecomMediaGateway({
     apiClient: {
@@ -105,4 +105,37 @@ test('inbound images are downloaded, re-uploaded, and cached for sending', async
   assert.equal(uploads.length, 1);
   assert.equal(uploads[0]?.type, 'image');
   assert.equal(uploads[0]?.filename, 'customer-image.png');
+});
+
+test('media gateway validates kinds and derives a JPEG filename', async () => {
+  const uploads: UploadInput[] = [];
+  const gateway = new WecomMediaGateway({
+    apiClient: {
+      async downloadMedia() {
+        return { bytes: Buffer.from('jpeg'), contentType: 'image/jpeg' };
+      },
+      async uploadMedia(media: UploadInput) {
+        uploads.push(media);
+        return { media_id: 'jpeg-media' };
+      },
+    },
+  });
+  assert.equal(await gateway.cloneForSend({
+    kind: 'image',
+    sourceMediaId: 'jpeg-source',
+  }), 'jpeg-media');
+  assert.equal(uploads[0]?.filename, 'image.jpg');
+  await assert.rejects(
+    gateway.upload({
+      kind: 'video',
+      bytes: Buffer.alloc(1),
+      filename: 'video.mp4',
+      contentType: 'video/mp4',
+    }),
+    /Unsupported attachment kind/u,
+  );
+  await assert.rejects(
+    gateway.cloneForSend({ kind: 'video', sourceMediaId: 'video-source' }),
+    /Unsupported outbound attachment kind/u,
+  );
 });

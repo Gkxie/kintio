@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { describe, test } from 'vitest';
 
 import { WecomApiClient, WecomApiError } from '../../src/services/wecom-api.ts';
 
@@ -76,7 +76,7 @@ test('WeCom API caches access tokens and sends official sync/send payloads', asy
   });
 });
 
-test('[G03] WeCom API refreshes an expired access token once', async () => {
+test('WeCom API refreshes an expired access token once', async () => {
   const tokenValues = ['old-token', 'new-token'];
   let tokenRequests = 0;
   let syncRequests = 0;
@@ -114,7 +114,7 @@ test('[G03] WeCom API refreshes an expired access token once', async () => {
   assert.equal(syncRequests, 2);
 });
 
-test('[G03] WeCom API exposes nonzero errcodes as typed errors', async () => {
+test('WeCom API exposes nonzero errcodes as typed errors', async () => {
   const client = new WecomApiClient({
     corpId: 'ww-test',
     kfSecret: 'kf-secret',
@@ -389,7 +389,7 @@ test('prepared sends reject embedded targets, unsupported types, and bad client 
   );
 });
 
-test('[G03] concurrent token callers share one request', async () => {
+test('concurrent token callers share one request', async () => {
   let calls = 0;
   let release!: () => void;
   const barrier = new Promise<void>((resolve) => {
@@ -414,8 +414,7 @@ test('[G03] concurrent token callers share one request', async () => {
   assert.equal(calls, 1);
 });
 
-test('[G03] transport, HTTP, non-JSON, and invalid token responses stay typed', async (t) => {
-  const cases: Array<[string, typeof fetch, RegExp]> = [
+describe.each<[string, typeof fetch, RegExp]>([
     [
       'transport',
       async () => {
@@ -426,17 +425,15 @@ test('[G03] transport, HTTP, non-JSON, and invalid token responses stay typed', 
     ['http', async () => jsonResponse({ errcode: 1 }, 503), /HTTP 503/u],
     ['non-json', async () => new Response('oops'), /non-JSON/u],
     ['invalid-token', async () => jsonResponse({ errcode: 0 }), /invalid response/u],
-  ];
-  for (const [name, fetchImpl, expected] of cases) {
-    await t.test(name, async () => {
-      const client = new WecomApiClient({
-        corpId: 'ww-test',
-        kfSecret: 'kf-secret',
-        fetchImpl,
-      });
-      await assert.rejects(client.getAccessToken(), expected);
+  ])('%s failure', (_name, fetchImpl, expected) => {
+  test('transport, HTTP, non-JSON, and invalid token responses stay typed', async () => {
+    const client = new WecomApiClient({
+      corpId: 'ww-test',
+      kfSecret: 'kf-secret',
+      fetchImpl,
     });
-  }
+    await assert.rejects(client.getAccessToken(), expected);
+  });
 });
 
 test('media validation and streaming limits reject oversized input early', async () => {

@@ -2,8 +2,8 @@ import assert from 'node:assert/strict';
 import type { Serializable } from 'node:child_process';
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
-import test from 'node:test';
-import type { TestContext } from 'node:test';
+import { describe, test } from 'vitest';
+import type { TestContext } from 'vitest';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -18,7 +18,6 @@ import { testWecomMessage } from '../support/wecom-message.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
 const workerMode = process.argv[2] || '';
-const typeStripExecArgv = ['--experimental-strip-types'] as const;
 const openKfId = 'wk-authorization';
 const externalUserId = 'wm-authorization';
 const confirmationText = '暗号确认，请继续对话';
@@ -34,7 +33,8 @@ function sendToParent(
   if (typeof process.send !== 'function') {
     throw new Error('Authorization recovery worker requires IPC');
   }
-  process.send(message, callback);
+  if (callback) process.send(message, callback);
+  else process.send(message);
 }
 
 function finishWorker(store: SqliteStore, message: Serializable): void {
@@ -69,7 +69,7 @@ function runAtomicWorker(
     return 0;
   });
   store.database.exec(`
-    CREATE TEMP TRIGGER crash_before_authorization_outbox
+    CREATE TEMP TRIGGER crash_before_authorization_attempt
     BEFORE INSERT ON send_attempts
     WHEN NEW.source = 'authorization'
     BEGIN
@@ -203,7 +203,6 @@ async function assertNoChildSend(
 ): Promise<void> {
   const child = startTestChild(t, currentFile, {
     args: ['--send-worker', databaseFile, 'none'],
-    execArgv: typeStripExecArgv,
   });
   assert.deepEqual(await child.waitForMessage('no-send'), { type: 'no-send' });
   assert.deepEqual(await child.waitForExit(), { code: 0, signal: null });
@@ -220,8 +219,8 @@ if (workerMode === '--atomic-worker') {
 } else if (workerMode === '--send-worker') {
   runSendWorker(process.argv[3] || '', process.argv[4] || '');
 } else {
-  test('[A04] authorization confirmation remains at most once across every send crash boundary', async (t) => {
-    await t.test('SIGKILL inside authorization rolls back both authorization and outbox', async (subtest) => {
+  describe('authorization confirmation crash boundaries', () => {
+    test('transaction rollback keeps authorization and confirmation atomic', async (subtest) => {
       const seeded = await seedDatabase(subtest, 'atomic');
       const barrierFile = `${seeded.filePath}.authorization-barrier`;
       const child = startTestChild(subtest, currentFile, {
@@ -231,7 +230,6 @@ if (workerMode === '--atomic-worker') {
           seeded.messageKey,
           barrierFile,
         ],
-        execArgv: typeStripExecArgv,
       });
       await waitForFile(barrierFile);
       assert.deepEqual(await child.stop('SIGKILL'), {
@@ -240,7 +238,7 @@ if (workerMode === '--atomic-worker') {
       });
 
       const recovered = new SqliteStore({ filePath: seeded.filePath });
-      subtest.after(() => recovered.close());
+      subtest.onTestFinished(() => recovered.close());
       assert.deepEqual(recovered.getAuthorization(externalUserId), {
         externalUserId,
         authorized: false,
@@ -260,11 +258,10 @@ if (workerMode === '--atomic-worker') {
       assert.equal(inspectAttempts(recovered.database, seeded.messageKey).length, 1);
     });
 
-    await t.test('committed pending confirmation survives SIGKILL and is accepted once', async (subtest) => {
+    test('committed confirmation survives a crash and sends once', async (subtest) => {
       const seeded = await seedDatabase(subtest, 'pending');
       const authorizer = startTestChild(subtest, currentFile, {
         args: ['--authorization-worker', seeded.filePath, seeded.messageKey],
-        execArgv: typeStripExecArgv,
       });
       const committed = await authorizer.waitForMessage(
         (message): message is WorkerMessage =>
@@ -287,7 +284,6 @@ if (workerMode === '--atomic-worker') {
 
       const sender = startTestChild(subtest, currentFile, {
         args: ['--send-worker', seeded.filePath, 'accept-exit'],
-        execArgv: typeStripExecArgv,
       });
       const accepted = await sender.waitForMessage('send-accepted');
       assert.equal(
@@ -299,7 +295,7 @@ if (workerMode === '--atomic-worker') {
       await assertNoChildSend(subtest, seeded.filePath);
     });
 
-    await t.test('SIGKILL after send claim becomes uncertain and is never retried', async (subtest) => {
+    test('claimed confirmation becomes uncertain and is never retried', async (subtest) => {
       const seeded = await seedDatabase(subtest, 'sending');
       const prepared = new SqliteStore({ filePath: seeded.filePath });
       evaluateThird(prepared, seeded.messageKey);
@@ -309,7 +305,6 @@ if (workerMode === '--atomic-worker') {
 
       const sender = startTestChild(subtest, currentFile, {
         args: ['--send-worker', seeded.filePath, 'hold'],
-        execArgv: typeStripExecArgv,
       });
       const claimed = await sender.waitForMessage('send-claimed');
       assert.equal(
@@ -331,7 +326,7 @@ if (workerMode === '--atomic-worker') {
       await assertNoChildSend(subtest, seeded.filePath);
     });
 
-    await t.test('SIGKILL after accepted commit leaves no confirmation to resend', async (subtest) => {
+    test('accepted confirmation is never resent after a crash', async (subtest) => {
       const seeded = await seedDatabase(subtest, 'accepted');
       const prepared = new SqliteStore({ filePath: seeded.filePath });
       evaluateThird(prepared, seeded.messageKey);
@@ -341,7 +336,6 @@ if (workerMode === '--atomic-worker') {
 
       const sender = startTestChild(subtest, currentFile, {
         args: ['--send-worker', seeded.filePath, 'accept-hold'],
-        execArgv: typeStripExecArgv,
       });
       const accepted = await sender.waitForMessage('send-accepted');
       assert.equal(

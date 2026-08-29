@@ -2,13 +2,19 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
-import type { TestContext } from 'node:test';
+import { test } from 'vitest';
+import type { TestContext } from 'vitest';
 
 import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
-import type { AgentCompletion, AgentInput, AgentSubmission } from '../../src/services/codex-agent.ts';
+import type { AgentInput } from '../../src/agent/runtime.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
+import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import {
+  SimulatedToolAgent,
+  type SimulatedAgentCompletion,
+  type SimulatedAgentSubmission,
+} from '../support/executing-agent.ts';
 import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 function deferred<T>() {
@@ -30,7 +36,7 @@ interface Harness {
 
 async function createHarness(
   t: TestContext,
-  handler: (input: AgentInput, store: SqliteStore) => Promise<AgentSubmission>,
+  handler: (input: AgentInput, store: SqliteStore) => Promise<SimulatedAgentSubmission>,
   resolveMedia: (input: AgentInput['message']) => Promise<readonly []> = async () => [],
   allowedUserIds: readonly string[] = ['wm-one'],
 ): Promise<Harness> {
@@ -39,43 +45,42 @@ async function createHarness(
   const inputs: AgentInput[] = [];
   const downloads: string[] = [];
   const errors: string[] = [];
+  let sendSequence = 0;
   let cursor = '';
   const codexAgent = {
-    async submit(input: AgentInput): Promise<AgentSubmission> {
+    async submit(input: AgentInput): Promise<SimulatedAgentSubmission> {
       inputs.push(input);
       return handler(input, store);
     },
     async close() {},
     async abort() {},
   };
+  const channel = new WechatKfToolExecutor({
+    store,
+    apiClient: {
+      async sendPreparedMessage() {
+        sendSequence += 1;
+        return { msgid: `wx-${sendSequence}` };
+      },
+    },
+    mediaGateway: {
+      async upload() { return { media_id: 'uploaded' }; },
+      async cloneForSend() { return 'cloned'; },
+      async getCardThumbnailMediaId() { return 'thumbnail'; },
+    },
+    observeMs: 0,
+    logger: { info() {}, error() {} },
+  });
   const processor = new ConversationProcessor({
     store,
-    codexAgent,
+    agent: new SimulatedToolAgent({ inner: codexAgent, tools: channel }),
     mediaGateway: {
       async resolveForCodex(message) {
         downloads.push(message.messageKey);
         return resolveMedia(message);
       },
     },
-    outboundPreparer: {
-      async prepare({ candidates }) {
-        const first = candidates[0];
-        const content = first && 'content' in first ? String(first.content) : 'reply';
-        return {
-          attempts: [{
-            sendIndex: 0,
-            sentType: 'text',
-            payload: {
-              msgtype: 'text',
-              text: { content },
-            },
-          }],
-          spoolPaths: [],
-        };
-      },
-      async cleanup() {},
-    },
-    delivery: { async kick() {} },
+    channel,
     allowedUserIds,
     authorization: { trigger: '发车', requiredConsecutive: 3 },
     logger: {
@@ -96,8 +101,9 @@ async function createHarness(
     return key;
   }
 
-  t.after(async () => {
+  t.onTestFinished(async () => {
     await processor.abort();
+    await channel.close();
     store.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
@@ -111,41 +117,34 @@ function customer(msgid: string, content: string, overrides: Record<string, unkn
   };
 }
 
-function started(input: AgentInput, store: SqliteStore, completion: Promise<AgentCompletion>): AgentSubmission {
-  const claimed = store.claimInbound({
-    messageKey: input.message.messageKey,
-    clientInputId: input.message.messageKey,
-    consumeHeldContext: Boolean(input.consumeHeldContext),
-  });
+function started(
+  input: AgentInput,
+  completion: Promise<SimulatedAgentCompletion>,
+): SimulatedAgentSubmission {
   return {
     kind: 'started', primaryMessageKey: input.message.messageKey, turnId: 'turn-gate',
-    completion: completion.then((result) => ({
-      ...result,
-      expectedConversationEpoch: claimed.message.claimedConversationEpoch,
-      expectedRuntimeEpoch: claimed.message.claimedRuntimeEpoch,
-    })),
+    threadId: input.threadId,
+    completion,
   };
 }
 
-function immediate(input: AgentInput, store: SqliteStore): AgentSubmission {
-  return started(input, store, Promise.resolve({
-    candidates: [{ type: 'text', content: 'reply' }],
-    mediaCatalog: input.mediaCatalog || [],
-    expectedConversationEpoch: 0,
-    expectedRuntimeEpoch: 0,
+function immediate(input: AgentInput): SimulatedAgentSubmission {
+  return started(input, Promise.resolve({
+    replies: [{ type: 'text', content: 'reply' }],
   }));
 }
 
-test('[G05][H01] malformed customer, human, and system records are ignored safely', async (t) => {
-  const harness = await createHarness(t, async (input, store) => immediate(input, store));
+test('malformed records and unsupported origin=5 are ignored without side effects', async (t) => {
+  const harness = await createHarness(t, async (input) => immediate(input));
   const keys = [
     harness.ingest(customer('bad-customer', 'x', { external_userid: '' })),
     harness.ingest({
-      msgid: 'bad-human', origin: 5, msgtype: 'text', text: { content: 'x' },
+      msgid: 'unsupported-origin', open_kfid: 'wk-one', external_userid: 'wm-one',
+      origin: 5, msgtype: 'text', text: { content: 'x' },
     }),
     harness.ingest({
       msgid: 'bad-system', origin: 4, msgtype: 'event',
-      event: { event_type: 'session_status_change', change_type: 1 },
+      event: { event_type: 'future_event' },
     }),
   ];
   for (const key of keys) await harness.processor.enqueue(key);
@@ -153,12 +152,14 @@ test('[G05][H01] malformed customer, human, and system records are ignored safel
     'ignored', 'ignored', 'ignored',
   ]);
   assert.equal(harness.inputs.length, 0);
+  assert.equal(harness.downloads.length, 0);
+  assert.ok(keys.every((key) => harness.store.listMessageAttempts(key).length === 0));
 });
 
-test('[A01][A02][G05] unsupported message resets unauthorized trigger progress without Codex or media', async (t) => {
+test('unsupported message resets unauthorized trigger progress without Codex or media', async (t) => {
   const harness = await createHarness(
     t,
-    async (input, store) => immediate(input, store),
+    async (input) => immediate(input),
     async () => [],
     [],
   );
@@ -175,32 +176,10 @@ test('[A01][A02][G05] unsupported message resets unauthorized trigger progress w
   assert.equal(harness.downloads.length, 0);
 });
 
-test('[H02][H04] ended session returns to bot and hands held context to the next turn', async (t) => {
-  const harness = await createHarness(t, async (input, store) => immediate(input, store));
-  const human = harness.ingest({
-    ...customer('human', '人工上下文'), origin: 5, servicer_userid: 'admin-one',
-  });
-  await harness.processor.enqueue(human);
-  const ended = harness.ingest({
-    msgid: 'ended', origin: 4, msgtype: 'event',
-    event: {
-      event_type: 'session_status_change', open_kfid: 'wk-one',
-      external_userid: 'wm-one', change_type: 3,
-    },
-  });
-  await harness.processor.enqueue(ended);
-  const next = harness.ingest(customer('next', '继续'));
-  await harness.processor.enqueue(next);
-  await harness.processor.waitForIdle();
-  assert.equal(harness.store.getConversation('wk-one', 'wm-one')?.mode, 'bot');
-  assert.match(harness.inputs[0]?.handoffContext || '', /人工上下文/u);
-  assert.equal(harness.store.getInbound(human)?.status, 'absorbed');
-});
-
-test('[C06] media download failure leaves received input recoverable and never starts Codex', async (t) => {
+test('media download failure leaves received input recoverable and never starts Codex', async (t) => {
   const harness = await createHarness(
     t,
-    async (input, store) => immediate(input, store),
+    async (input) => immediate(input),
     async () => { throw new Error('download unavailable'); },
   );
   const key = harness.ingest(customer('image', '', {
@@ -212,9 +191,30 @@ test('[C06] media download failure leaves received input recoverable and never s
   assert.match(harness.errors[0] || '', /download unavailable/u);
 });
 
-test('[R04] synchronous Codex start failure preserves claimed input for recovery', async (t) => {
-  const harness = await createHarness(t, async (input, store) => {
-    store.claimInbound({ messageKey: input.message.messageKey });
+test('transient media failure retries online and completes without a duplicate send', async (t) => {
+  let calls = 0;
+  const harness = await createHarness(
+    t,
+    async (input) => immediate(input),
+    async () => {
+      calls += 1;
+      if (calls < 3) throw new Error('temporary media outage');
+      return [];
+    },
+  );
+  const key = harness.ingest(customer('image-retry', '', {
+    msgtype: 'image', text: undefined, image: { media_id: 'image-id' },
+  }));
+  await harness.processor.enqueue(key);
+  await harness.processor.waitForIdle();
+  assert.equal(calls, 3);
+  assert.equal(harness.inputs.length, 1);
+  assert.equal(harness.store.getInbound(key)?.status, 'completed');
+  assert.equal(inspectAttempts(harness.store.database, key).length, 1);
+});
+
+test('synchronous Codex start failure preserves claimed input for recovery', async (t) => {
+  const harness = await createHarness(t, async () => {
     throw new Error('turn start failed');
   });
   const key = harness.ingest(customer('start-fail', 'x'));
@@ -223,20 +223,27 @@ test('[R04] synchronous Codex start failure preserves claimed input for recovery
   assert.match(harness.errors[0] || '', /turn start failed/u);
 });
 
-test('[S08] synchronous steer failure requeues follow-up while primary remains active', async (t) => {
-  let primary = '';
-  const pending = new Promise<AgentCompletion>(() => {});
-  const harness = await createHarness(t, async (input, store) => {
-    if (!primary) {
-      primary = input.message.messageKey;
-      return started(input, store, pending);
+test('transient Agent start failure inspects recovery state and succeeds online', async (t) => {
+  let calls = 0;
+  const harness = await createHarness(t, async (input) => {
+    calls += 1;
+    if (calls === 1) throw new Error('temporary turn start failure');
+    return immediate(input);
+  });
+  const key = harness.ingest(customer('start-retry', 'x'));
+  await harness.processor.enqueue(key);
+  await harness.processor.waitForIdle();
+  assert.equal(calls, 2);
+  assert.equal(harness.store.getInbound(key)?.status, 'completed');
+  assert.equal(inspectAttempts(harness.store.database, key).length, 1);
+});
+
+test('synchronous steer failure requeues follow-up while primary remains active', async (t) => {
+  const pending = new Promise<SimulatedAgentCompletion>(() => {});
+  const harness = await createHarness(t, async (input) => {
+    if (input.mode === 'start') {
+      return started(input, pending);
     }
-    store.beginInboundSteering({
-      messageKey: input.message.messageKey,
-      primaryMessageKey: primary,
-      clientInputId: input.message.messageKey,
-    });
-    store.requeueInboundSteering(input.message.messageKey, primary);
     throw new Error('steer rejected');
   });
   const primaryKey = harness.ingest(customer('primary', 'x'));
@@ -249,9 +256,9 @@ test('[S08] synchronous steer failure requeues follow-up while primary remains a
   await harness.processor.abort();
 });
 
-test('[R04] asynchronous completion failure marks primary failed in background tracker', async (t) => {
-  const harness = await createHarness(t, async (input, store) =>
-    started(input, store, Promise.reject(new Error('background failed'))),
+test('asynchronous completion failure marks primary failed in background tracker', async (t) => {
+  const harness = await createHarness(t, async (input) =>
+    started(input, Promise.reject(new Error('background failed'))),
   );
   const key = harness.ingest(customer('background', 'x'));
   await harness.processor.enqueue(key);
@@ -260,47 +267,104 @@ test('[R04] asynchronous completion failure marks primary failed in background t
   assert.match(harness.store.getInbound(key)?.errorMessage || '', /background failed/u);
 });
 
-test('[H03][R04] recovery processes an arrived human takeover before the active primary', async (t) => {
-  const harness = await createHarness(t, async (input, store) => immediate(input, store));
-  const primary = harness.ingest(customer('crashed-primary', 'old task'));
-  harness.store.claimInbound({ messageKey: primary });
-  harness.store.markInboundPreparing(primary, 'crashed-turn');
-  const human = harness.ingest({
-    ...customer('arrived-human', '人工接管'),
-    origin: 5,
-    servicer_userid: 'admin',
+test('transient asynchronous completion failure is re-enqueued with a bounded recovery', async (t) => {
+  let calls = 0;
+  const harness = await createHarness(t, async (input) => {
+    calls += 1;
+    return calls === 1
+      ? started(input, Promise.reject(new Error('temporary completion failure')))
+      : immediate(input);
   });
-  await harness.processor.recover(harness.store.recoverStartup().inbound);
+  const key = harness.ingest(customer('completion-retry', 'x'));
+  await harness.processor.enqueue(key);
   await harness.processor.waitForIdle();
-  assert.equal(harness.store.getConversation('wk-one', 'wm-one')?.mode, 'human');
-  assert.equal(harness.store.getInbound(primary)?.status, 'suppressed');
-  assert.equal(harness.store.getInbound(human)?.status, 'held');
-  assert.equal(harness.inputs.length, 0);
-  assert.deepEqual(inspectAttempts(harness.store.database, primary), []);
+  assert.equal(calls, 2);
+  assert.equal(harness.store.getInbound(key)?.status, 'completed');
+  assert.equal(inspectAttempts(harness.store.database, key).length, 1);
 });
 
-test('[S08] follow-ups that arrived before completion supersede the old result even when processed later', async (t) => {
-  const oldCompletion = deferred<AgentCompletion>();
-  const finalCompletion = deferred<AgentCompletion>();
+test('repeated completion validation failure stops after two online recoveries', async (t) => {
+  let calls = 0;
+  const harness = await createHarness(t, async (input) => {
+    calls += 1;
+    return started(input, Promise.resolve({}));
+  });
+  const key = harness.ingest(customer('completion-bounded', 'x'));
+  await harness.processor.enqueue(key);
+  await harness.processor.waitForIdle();
+  assert.equal(calls, 3);
+  assert.equal(harness.store.getInbound(key)?.status, 'failed');
+  assert.equal(inspectAttempts(harness.store.database, key).length, 0);
+});
+
+test('no-action decision is rejected outside recovery with a terminal attempt', async (t) => {
+  let calls = 0;
+  const harness = await createHarness(t, async (input) => {
+    calls += 1;
+    return started(input, Promise.resolve({ decision: 'no_action' }));
+  });
+  const key = harness.ingest(customer('no-action-denied', 'x'));
+  await harness.processor.enqueue(key);
+  await harness.processor.waitForIdle();
+  assert.equal(calls, 3);
+  assert.equal(harness.store.getInbound(key)?.status, 'failed');
+  assert.equal(inspectAttempts(harness.store.database, key).length, 0);
+});
+
+test('failed primary with two steers recovers the latest direction once', async (t) => {
+  let rejectFirst!: (error: Error) => void;
+  const first = new Promise<SimulatedAgentCompletion>((_resolve, reject) => {
+    rejectFirst = reject;
+  });
+  let starts = 0;
+  let activePrimary = '';
+  const harness = await createHarness(t, async (input) => {
+    if (input.mode === 'steer') {
+      return {
+        kind: 'steered',
+        primaryMessageKey: activePrimary,
+        turnId: 'turn-steered',
+      };
+    }
+    starts += 1;
+    activePrimary = input.message.messageKey;
+    return starts === 1 ? started(input, first) : immediate(input);
+  });
+  const primary = harness.ingest(customer('recover-primary', '先回答'));
+  const firstSteer = harness.ingest(customer('recover-steer-one', '第一次调整'));
+  const secondSteer = harness.ingest(customer('recover-steer-two', '第二次调整'));
+  await harness.processor.enqueue(primary);
+  await harness.processor.enqueue(firstSteer);
+  await harness.processor.enqueue(secondSteer);
+  rejectFirst(new Error('turn crashed after steering'));
+  await harness.processor.waitForIdle();
+
+  assert.equal(starts, 2);
+  assert.equal(harness.store.getInbound(primary)?.status, 'completed');
+  assert.equal(harness.store.getInbound(firstSteer)?.status, 'absorbed');
+  assert.equal(harness.store.getInbound(secondSteer)?.status, 'absorbed');
+  const attempts = inspectAttempts(harness.store.database, primary);
+  assert.equal(attempts.length, 1);
+  assert.equal(
+    attempts[0]?.metadata?.direction,
+    harness.store.getInbound(secondSteer)?.inboxSeq,
+  );
+});
+
+test('follow-ups that arrived before completion supersede the old result even when processed later', async (t) => {
+  const oldCompletion = deferred<SimulatedAgentCompletion>();
+  const finalCompletion = deferred<SimulatedAgentCompletion>();
   let call = 0;
   let latestPrimary = '';
-  const harness = await createHarness(t, async (input, store) => {
+  const harness = await createHarness(t, async (input) => {
     call += 1;
     if (call === 1) {
-      return started(input, store, oldCompletion.promise);
+      return started(input, oldCompletion.promise);
     }
     if (call === 2) {
       latestPrimary = input.message.messageKey;
-      return started(input, store, finalCompletion.promise);
+      return started(input, finalCompletion.promise);
     }
-    store.beginInboundSteering({
-      messageKey: input.message.messageKey,
-      primaryMessageKey: latestPrimary,
-      clientInputId: input.message.messageKey,
-    });
-    store.confirmInboundSteered(input.message.messageKey, {
-      codexTurnId: 'turn-latest',
-    });
     return {
       kind: 'steered',
       primaryMessageKey: latestPrimary,
@@ -311,25 +375,21 @@ test('[S08] follow-ups that arrived before completion supersede the old result e
   await harness.processor.enqueue(primary);
   const followOne = harness.ingest(customer('backlog-one', '只说三个景点'));
   const followTwo = harness.ingest(customer('backlog-two', '改成东北景点'));
-  const queuedOne = harness.processor.enqueue(followOne);
-  const queuedTwo = harness.processor.enqueue(followTwo);
   oldCompletion.resolve({
-    candidates: [{ type: 'text', content: '过时回答' }],
-    mediaCatalog: [],
-    expectedConversationEpoch: 0,
-    expectedRuntimeEpoch: 0,
-  });
-  await Promise.all([queuedOne, queuedTwo]);
-  finalCompletion.resolve({
-    candidates: [{ type: 'text', content: '最终回答' }],
-    mediaCatalog: [],
-    expectedConversationEpoch: 0,
-    expectedRuntimeEpoch: 0,
+    replies: [{ type: 'text', content: '过时回答' }],
   });
   await harness.processor.waitForIdle();
   assert.equal(harness.store.getInbound(primary)?.status, 'suppressed');
-  assert.equal(harness.store.getInbound(followOne)?.status, 'ready');
+
+  const queuedOne = harness.processor.enqueue(followOne);
+  const queuedTwo = harness.processor.enqueue(followTwo);
+  await Promise.all([queuedOne, queuedTwo]);
+  finalCompletion.resolve({
+    replies: [{ type: 'text', content: '最终回答' }],
+  });
+  await harness.processor.waitForIdle();
+  assert.equal(harness.store.getInbound(followOne)?.status, 'completed');
   assert.equal(harness.store.getInbound(followTwo)?.status, 'absorbed');
   assert.deepEqual(inspectAttempts(harness.store.database, primary), []);
-  assert.equal(inspectAttempts(harness.store.database, followOne).length, 1);
+  assert.equal(inspectAttempts(harness.store.database, followOne)[0]?.status, 'accepted');
 });

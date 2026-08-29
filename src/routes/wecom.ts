@@ -123,7 +123,7 @@ export function registerWecomRoutes(
         const openKfId = extractXmlTag(message, 'OpenKfId') || 'unknown';
         const callbackToken = extractXmlTag(message, 'Token');
 
-        logger.info(`[wecom] accepted callback event=${event} open_kfid=${openKfId}`);
+        logger.info(`[wecom] accepted callback event=${event}`);
 
         if (event === 'kf_msg_or_event' && messageProcessor) {
           if (callbackToken && openKfId !== 'unknown') {

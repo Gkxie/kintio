@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import {
   CUSTOMER_MESSAGE_TYPES,
@@ -126,7 +126,7 @@ const fixtures: readonly MessageFixture[] = [
   ['note', {}],
 ];
 
-test('[C03] normalizes every known customer type with stable sync metadata', () => {
+test('normalizes every known customer type with stable sync metadata', () => {
   assert.equal(fixtures.length, CUSTOMER_MESSAGE_TYPES.length);
   for (const [index, [msgtype, payload]] of fixtures.entries()) {
     const message = normalizeWecomMessage(
@@ -137,8 +137,9 @@ test('[C03] normalizes every known customer type with stable sync metadata', () 
 
     assert.equal(message.type, msgtype);
     assert.equal(message.origin, MESSAGE_ORIGINS.CUSTOMER);
-    assert.equal(message.conversation.openKfId, 'wk-one');
-    assert.equal(message.conversation.externalUserId, 'wm-one');
+    assert.equal(message.conversation.channel, 'wechat_kf');
+    assert.equal(message.conversation.accountKey, 'wk-one');
+    assert.equal(message.conversation.peerId, 'wm-one');
     assert.deepEqual(message.sync, { cursor: 'cursor-one', index });
     assert.ok(renderMessageForCodex(message).length > 0, msgtype);
     assert.equal(isSupportedCustomerMessage(message), true);
@@ -156,7 +157,7 @@ test('preserves exact customer text for authorization while rendering a clean su
   assert.equal(message.summary, '发车');
 });
 
-test('[C04] only images expose downloadable inbound attachments', () => {
+test('only images expose downloadable inbound attachments', () => {
   for (const [msgtype, payload] of fixtures.filter(([type]) =>
     ['image', 'voice', 'video', 'file'].includes(type),
   )) {
@@ -179,10 +180,10 @@ test('[C04] only images expose downloadable inbound attachments', () => {
     ...fileFixture[1],
   });
   assert.match(file.summary, /合同\.pdf/u);
-  assert.match(file.summary, /未下载或打开/u);
+  assert.match(file.summary, /not downloaded or opened/u);
 });
 
-test('[C05] recursively summarizes merged history without leaking nested media IDs', () => {
+test('recursively summarizes merged history without leaking nested media IDs', () => {
   const item = (
     msgtype: string,
     payload: FixturePayload | string,
@@ -235,14 +236,14 @@ test('[C05] recursively summarizes merged history without leaking nested media I
 
   for (const expected of [
     '关键文本',
-    '微信图片',
-    '微信语音',
-    '微信视频',
+    'WeChat image',
+    'WeChat voice',
+    'WeChat video',
     '账单.pdf',
     '天安门',
     'https://example.com/help',
     '内层正文',
-    '内容无法解析',
+    'unreadable payload',
   ]) {
     assert.ok(message.summary.includes(expected), expected);
   }
@@ -255,16 +256,20 @@ test('normalizes system events and rejects unknown customer types from support',
     origin: 4,
     msgtype: 'event',
     event: {
-      event_type: 'session_status_change',
+      event_type: 'msg_send_fail',
       open_kfid: 'wk-event',
       external_userid: 'wm-event',
-      change_type: 3,
+      fail_msgid: 'wx-failed',
+      fail_type: 13,
     },
   });
   assert.equal(event.origin, MESSAGE_ORIGINS.SYSTEM);
   assert.equal(event.type, MESSAGE_TYPES.EVENT);
-  assert.equal(event.attributes.change_type, 3);
-  assert.equal(event.conversation.openKfId, 'wk-event');
+  assert.equal(event.attributes.fail_type, 13);
+  assert.equal(event.conversation.accountKey, 'wk-event');
+
+  const unsupportedOrigin = normalizeWecomMessage({ ...base, origin: 5 });
+  assert.equal(unsupportedOrigin.origin, MESSAGE_ORIGINS.UNKNOWN);
 
   const unknown = normalizeWecomMessage({
     ...base,

@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Usage questions and discussion
+    url: https://github.com/Gkxie/kintio/discussions/categories/q-a
+    about: Use searchable Discussions for deployment, configuration, ideas, and open-ended questions.
+  - name: Early-stage ideas
+    url: https://github.com/Gkxie/kintio/discussions/categories/ideas
+    about: Discuss goals and boundaries first; open a feature issue once the behavior has clear acceptance criteria.
+  - name: Security vulnerability
+    url: https://github.com/Gkxie/kintio/security/advisories/new
+    about: Privately report credential exposure, authorization bypasses, cross-conversation access, and other security issues.
+  - name: Conduct or abuse
+    url: https://github.com/Gkxie/kintio/blob/master/CODE_OF_CONDUCT.md#enforcement
+    about: Use the private reporting path described here; never publish identities or incident details in an issue.

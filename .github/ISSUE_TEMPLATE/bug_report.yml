@@ -1,0 +1,82 @@
+name: Bug report
+description: Report a reproducible problem
+title: "[Bug] "
+labels: [bug, 'status: needs triage']
+body:
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed credentials, user IDs, real conversations, media, databases, and local filesystem paths.
+          required: true
+
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Affected adapter
+      options:
+        - WeChat KF API
+        - iLink Bot
+        - Both adapters
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Provide a release, Git commit, or state that you tested the latest default branch.
+      placeholder: release tag / commit SHA / latest default branch
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Provide the runtime versions and startup method used for the reproduction. Use N/A where needed and remove hostnames, usernames, and local paths.
+      render: shell
+      placeholder: |
+        OS: Ubuntu 24.04
+        Node: paste `node --version`
+        pnpm: paste `pnpm --version`
+        Codex CLI: paste `codex --version` or N/A
+        Start method: pnpm start / PM2 / other
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Starting from service startup, list the minimum ordered steps. Use fake IDs and synthetic messages.
+    validations:
+      required: true
+
+  - type: textarea
+    id: minimal_reproduction
+    attributes:
+      label: Minimal reproduction or failing test
+      description: Optional. Link a synthetic reproduction or paste a focused failing test. Never include live credentials or conversations.
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Redacted logs or additional context
+      description: Do not paste `.env`, SQLite data, credentials, real user IDs, media, or complete conversations.

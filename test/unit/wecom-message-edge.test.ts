@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import {
   MESSAGE_TYPES,
@@ -19,15 +19,15 @@ function customer(msgtype: string, section: unknown = undefined) {
   });
 }
 
-test('[G05][C03] malformed and unknown payloads produce explicit safe summaries', () => {
+test('malformed and unknown payloads produce explicit safe summaries', () => {
   const empty = normalizeWecomMessage(null);
   assert.equal(empty.type, MESSAGE_TYPES.UNKNOWN);
   assert.equal(isSupportedCustomerMessage(empty), false);
-  assert.match(renderMessageForCodex(empty), /内容未解析/u);
+  assert.match(renderMessageForCodex(empty), /content not parsed/u);
 
   const primitive = normalizeWecomMessage('not-an-object');
   assert.equal(primitive.origin, 'unknown');
-  assert.equal(primitive.conversation.externalUserId, '');
+  assert.equal(primitive.conversation.peerId, '');
 
   const unknown = customer('future_type', { future_type: { secret: 'x' } });
   assert.equal(unknown.type, MESSAGE_TYPES.UNKNOWN);
@@ -35,7 +35,7 @@ test('[G05][C03] malformed and unknown payloads produce explicit safe summaries'
   assert.doesNotMatch(unknown.summary, /secret/u);
 });
 
-test('[C03] optional structured fields remain useful without inventing details', () => {
+test('optional structured fields remain useful without inventing details', () => {
   const menuWithoutList = customer('msgmenu', { msgmenu: { head_content: '选择' } });
   assert.match(menuWithoutList.summary, /选择/u);
 
@@ -48,15 +48,15 @@ test('[C03] optional structured fields remain useful without inventing details',
   assert.match(menu.summary, /售后/u);
 
   const sparseFile = customer('file', { file: {} });
-  assert.match(sparseFile.summary, /内容未下载或打开/u);
+  assert.match(sparseFile.summary, /content not downloaded or opened/u);
 
   const sparseLocation = customer('location', {
     location: { name: '未知坐标', latitude: 'bad', longitude: null },
   });
-  assert.doesNotMatch(sparseLocation.summary, /纬度/u);
+  assert.doesNotMatch(sparseLocation.summary, /latitude/u);
 });
 
-test('[C05] malformed and deeply nested merged history is bounded', () => {
+test('malformed and deeply nested merged history is bounded', () => {
   const malformed = customer('merged_msg', {
     merged_msg: {
       title: '混合记录',
@@ -66,7 +66,7 @@ test('[C05] malformed and deeply nested merged history is bounded', () => {
       ],
     },
   });
-  assert.match(malformed.summary, /内容无法解析/u);
+  assert.match(malformed.summary, /unreadable payload/u);
 
   let nested: Record<string, unknown> = {
     msgtype: 'text',
@@ -82,6 +82,6 @@ test('[C05] malformed and deeply nested merged history is bounded', () => {
     };
   }
   const deep = customer('merged_msg', { merged_msg: nested.merged_msg });
-  assert.match(deep.summary, /嵌套深度上限/u);
+  assert.match(deep.summary, /nesting limit reached/u);
   assert.ok(Buffer.byteLength(deep.summary) <= 16 * 1024);
 });

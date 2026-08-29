@@ -2,13 +2,15 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
-import type { TestContext } from 'node:test';
+import { describe, test } from 'vitest';
+import type { TestContext } from 'vitest';
 
 import {
   MAX_WECHAT_IMAGE_BYTES,
-  cleanupStagedImageOrphans,
   detectImageFormat,
+} from '../../src/lib/image-format.ts';
+import {
+  cleanupStagedImageOrphans,
   withStagedImages,
 } from '../../src/services/image-stager.ts';
 
@@ -34,10 +36,14 @@ test('image stager detects formats by magic bytes instead of headers', () => {
     mimeType: 'image/bmp',
   });
   assert.equal(detectImageFormat(Buffer.from('not-an-image')), null);
+  assert.equal(detectImageFormat(Buffer.alloc(3)), null);
+  assert.equal(detectImageFormat('not-a-buffer'), null);
+  assert.equal(detectImageFormat(Buffer.from('RIFF0000NOPE', 'ascii')), null);
 });
 
-test('[C06][SEC04] staged image inputs use private files and always clean their directory', async () => {
+test('staged image inputs use private files and always clean their directory', async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'image-stage-test-'));
+  await fs.chmod(root, 0o755);
   const png = Buffer.from(
     '89504e470d0a1a0a0000000d4948445200000001000000010806000000',
     'hex',
@@ -72,36 +78,41 @@ test('[C06][SEC04] staged image inputs use private files and always clean their 
   );
   assert.deepEqual(await fs.readdir(root), []);
 
-  const orphan = path.join(root, 'wechat-codex-image-crashed-turn');
+  const orphan = path.join(root, 'kintio-image-crashed-turn');
+  const talkFerryOrphan = path.join(root, 'talkferry-image-crashed-turn');
+  const originalOrphan = path.join(root, 'wechat-codex-image-crashed-turn');
   const unrelated = path.join(root, 'keep-me');
   await fs.mkdir(orphan, { recursive: true });
   await fs.writeFile(path.join(orphan, 'customer.png'), png);
+  await fs.mkdir(talkFerryOrphan, { recursive: true });
+  await fs.writeFile(path.join(talkFerryOrphan, 'customer.png'), png);
+  await fs.mkdir(originalOrphan, { recursive: true });
+  await fs.writeFile(path.join(originalOrphan, 'customer.png'), png);
   await fs.mkdir(unrelated);
   cleanupStagedImageOrphans(root);
   await assert.rejects(fs.access(orphan), { code: 'ENOENT' });
+  await assert.rejects(fs.access(talkFerryOrphan), { code: 'ENOENT' });
+  await assert.rejects(fs.access(originalOrphan), { code: 'ENOENT' });
   await fs.access(unrelated);
-  assert.equal((await fs.stat(root)).mode & 0o777, 0o700);
+  assert.equal((await fs.stat(root)).mode & 0o777, 0o755);
   await fs.rm(root, { recursive: true, force: true });
 });
 
-test('staging rejects empty, oversized, and unknown image bytes', async (t: TestContext) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'image-stage-invalid-'));
-  t.after(() => fs.rm(root, { recursive: true, force: true }));
-  const invalidCases: ReadonlyArray<readonly [string, Buffer, RegExp]> = [
-    ['empty', Buffer.alloc(0), /empty/u],
-    ['oversized', Buffer.alloc(MAX_WECHAT_IMAGE_BYTES + 1), /2 MiB/u],
-    ['unknown', Buffer.from('not an image'), /not a supported/u],
-  ];
-  for (const [name, bytes, expected] of invalidCases) {
-    await t.test(name, async () => {
-      await assert.rejects(
-        withStagedImages(
-          [{ bytes }],
-          { temporaryRoot: root },
-          async () => {},
-        ),
-        expected,
-      );
-    });
-  }
+describe.each<readonly [string, Buffer, RegExp]>([
+  ['empty', Buffer.alloc(0), /empty/u],
+  ['oversized', Buffer.alloc(MAX_WECHAT_IMAGE_BYTES + 1), /2 MiB/u],
+  ['unknown', Buffer.from('not an image'), /not a supported/u],
+])('%s image', (_name, bytes, expected) => {
+  test('staging rejects empty, oversized, and unknown image bytes', async (t: TestContext) => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'image-stage-invalid-'));
+    t.onTestFinished(() => fs.rm(root, { recursive: true, force: true }));
+    await assert.rejects(
+      withStagedImages(
+        [{ bytes }],
+        { temporaryRoot: root },
+        async () => {},
+      ),
+      expected,
+    );
+  });
 });

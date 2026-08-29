@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import test, { type TestContext } from 'node:test';
+import { test, type TestContext } from 'vitest';
 import assert from 'node:assert/strict';
 
 import {
@@ -12,7 +12,7 @@ import {
 
 function lockPath(t: TestContext): string {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-lock-'));
-  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  t.onTestFinished(() => fs.rmSync(directory, { recursive: true, force: true }));
   return path.join(directory, 'wecom.lock');
 }
 

@@ -1,7 +1,7 @@
 {
   "compilerOptions": {
-    "target": "ES2023",
-    "lib": ["ES2023"],
+    "target": "ES2024",
+    "lib": ["ES2024"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "moduleDetection": "force",
@@ -29,12 +29,7 @@
   },
   "include": [
     "index.ts",
-    "src/**/*.ts",
-    "scripts/runtime-control.ts",
-    "scripts/migrate-legacy.ts",
-    "scripts/check-size.ts",
-    "scripts/authorization.ts",
-    "types/**/*.d.ts"
+    "src/**/*.ts"
   ],
   "exclude": ["dist", "node_modules", "test"]
 }

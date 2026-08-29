@@ -2,11 +2,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
-import type { TestContext } from 'node:test';
+import { test } from 'vitest';
+import type { TestContext } from 'vitest';
 
+import { IlinkLoginStore } from '../../src/ilink/login-store.ts';
+import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
 import { inspectAttempt } from '../support/sqlite-inspect.ts';
+import { seedPendingAttempts } from '../support/pending-attempt.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 async function createStore(t: TestContext) {
@@ -16,7 +19,7 @@ async function createStore(t: TestContext) {
     filePath: path.join(directory, 'wecom.sqlite'),
     clock: () => clock.value,
   });
-  t.after(async () => {
+  t.onTestFinished(async () => {
     store.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
@@ -41,7 +44,7 @@ function ingest(
   return stableMessageKey(openKfId, msgid);
 }
 
-test('[O06] media TTL cleanup is conversation scoped and preserves fresh media', async (t) => {
+test('media TTL cleanup is conversation scoped and preserves fresh media', async (t) => {
   const { store, clock } = await createStore(t);
   const oldA = ingest(store, 'wk-a', 'wm-a', 'old-a', '');
   const oldB = ingest(store, 'wk-b', 'wm-b', 'old-b', '');
@@ -87,20 +90,15 @@ test('[O06] media TTL cleanup is conversation scoped and preserves fresh media',
   );
 });
 
-test('[R01][R07] cleanup retains uncertain, deletes expired blocked fallbacks, and expires accepted/failed audits', async (t) => {
+test('cleanup retains uncertain and expires accepted/failed audits', async (t) => {
   const { store, clock } = await createStore(t);
   let cursor = '';
 
-  function reserve(msgid: string, attempts: Parameters<SqliteStore['finalizeInboundBatch']>[0]['attempts']) {
+  function reserve(msgid: string, attempts: Parameters<typeof seedPendingAttempts>[2]) {
     const key = ingest(store, 'wk-one', 'wm-one', msgid, cursor);
     cursor = `${cursor}-${msgid}`;
-    const claimed = store.claimInbound({ messageKey: key }).message;
-    return store.finalizeInboundBatch({
-      messageKey: key,
-      expectedConversationEpoch: claimed.claimedConversationEpoch,
-      expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-      attempts,
-    });
+    store.claimInbound({ messageKey: key });
+    return seedPendingAttempts(store, key, attempts);
   }
 
   const accepted = reserve('accepted', [{
@@ -127,31 +125,60 @@ test('[R01][R07] cleanup retains uncertain, deletes expired blocked fallbacks, a
   if (!uncertainSending) throw new Error('Expected uncertain send');
   store.markSendUncertain(uncertainSending.attemptId, new Error('network'));
 
-  const blocked = reserve('blocked', [
-    {
-      sendIndex: 0, sentType: 'location',
-      payload: { msgtype: 'location', location: { name: 'place' } },
-    },
-    {
-      sendIndex: 1, sentType: 'text', status: 'blocked', fallbackForIndex: 0,
-      payload: { msgtype: 'text', text: { content: 'fallback' } },
-    },
-  ]);
-  const blockedPrimary = store.beginNextSend();
-  if (!blockedPrimary) throw new Error('Expected blocked primary');
-  store.completeSend(blockedPrimary.attemptId, { wecomMsgId: 'blocked-primary' });
-
   clock.value = 5_000;
   const result = store.cleanup({
     mediaMaxAgeMs: 10_000,
     payloadMaxAgeMs: 100,
     acceptedAuditMaxAgeMs: 100,
   });
-  assert.equal(result.blockedFallbacks, 1);
-  assert.equal(result.audits, 3);
-  assert.equal(inspectAttempt(store.database, uncertain.attempts[0]!.attemptId)?.status, 'uncertain');
-  assert.ok(inspectAttempt(store.database, uncertain.attempts[0]!.attemptId)?.payload);
-  assert.equal(inspectAttempt(store.database, accepted.attempts[0]!.attemptId), undefined);
-  assert.equal(inspectAttempt(store.database, failed.attempts[0]!.attemptId), undefined);
-  assert.equal(inspectAttempt(store.database, blocked.attempts[1]!.attemptId), undefined);
+  assert.equal(result.audits, 2);
+  assert.equal(inspectAttempt(store.database, uncertain[0]!.attemptId)?.status, 'uncertain');
+  assert.ok(inspectAttempt(store.database, uncertain[0]!.attemptId)?.payload);
+  assert.equal(inspectAttempt(store.database, accepted[0]!.attemptId), undefined);
+  assert.equal(inspectAttempt(store.database, failed[0]!.attemptId), undefined);
+});
+
+test('iLink login cleanup audits an expired offer before deleting its secret', async (t) => {
+  const { store, clock } = await createStore(t);
+  store.database.prepare(`
+    INSERT INTO ilink_login_offers (
+      offer_id, source_message_key, source_open_kfid, source_external_userid,
+      secret_generation, nonce, ciphertext, auth_tag, api_base_url, status,
+      expires_at, last_polled_at, error_code, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, 0, '', ?, ?)
+  `).run(
+    'qo_expired_cleanup',
+    'source-expired-cleanup',
+    'wk-expired-cleanup',
+    'wm-expired-cleanup',
+    1,
+    'nonce',
+    'ciphertext',
+    'auth-tag',
+    'https://ilinkai.weixin.qq.com/',
+    1_500,
+    1_000,
+    1_000,
+  );
+  clock.value = 2_000;
+
+  const offers = new IlinkLoginStore({
+    store,
+    secretBox: new IlinkSecretBox(Buffer.alloc(32, 7).toString('base64url')),
+    clock: () => clock.value,
+  });
+  offers.cleanup();
+
+  assert.equal(store.database.prepare(`
+    SELECT 1 FROM ilink_login_offers WHERE offer_id = 'qo_expired_cleanup'
+  `).get(), undefined);
+  assert.deepEqual({ ...(store.database.prepare(`
+    SELECT result, account_key, offered_at, completed_at
+    FROM ilink_enrollment_audit WHERE offer_id = 'qo_expired_cleanup'
+  `).get() as Record<string, unknown>) }, {
+    result: 'expired',
+    account_key: '',
+    offered_at: 1_000,
+    completed_at: 2_000,
+  });
 });

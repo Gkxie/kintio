@@ -4,11 +4,11 @@ import {
   type Serializable,
 } from 'node:child_process';
 import path from 'node:path';
-import type { TestContext } from 'node:test';
+import type { TestContext } from 'vitest';
 
 const MAX_CAPTURED_OUTPUT = 64 * 1024;
 
-export interface ChildExit {
+interface ChildExit {
   code: number | null;
   signal: NodeJS.Signals | null;
 }
@@ -17,21 +17,20 @@ export interface StartTestChildOptions {
   args?: readonly string[];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
-  execArgv?: readonly string[];
   timeoutMs?: number;
 }
 
-export interface WaitForMessageOptions {
+interface WaitForMessageOptions {
   label?: string;
   timeout?: number;
 }
 
-export interface CapturedChildOutput {
+interface CapturedChildOutput {
   stdout: string;
   stderr: string;
 }
 
-export type MessagePredicate<T extends Serializable = Serializable> = (
+type MessagePredicate<T extends Serializable = Serializable> = (
   message: Serializable,
 ) => message is T;
 
@@ -82,17 +81,12 @@ export function startTestChild(
     args = [],
     cwd = process.cwd(),
     env = {},
-    execArgv,
     timeoutMs = 5_000,
   }: StartTestChildOptions = {},
 ): TestChild {
-  const childExecArgv = execArgv ?? (/\.(?:cts|mts|ts)$/u.test(modulePath)
-    ? ['--experimental-strip-types']
-    : []);
   const child = fork(path.resolve(modulePath), [...args], {
     cwd,
     env: { ...process.env, ...env },
-    execArgv: [...childExecArgv],
     stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
   });
   if (!child.stdout || !child.stderr) {
@@ -210,7 +204,9 @@ export function startTestChild(
     return exited;
   }
 
-  testContext.after(() => stop());
+  testContext.onTestFinished(async () => {
+    await stop();
+  });
   return {
     child,
     waitForMessage,

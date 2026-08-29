@@ -1,0 +1,52 @@
+name: Feature request
+description: Describe what you want to accomplish with an agent through a messaging adapter
+title: "[Feature] "
+labels: [enhancement, 'status: needs triage']
+body:
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: This request contains no credentials, user IDs, real conversations, media, or other private information.
+          required: true
+
+  - type: dropdown
+    id: channel
+    attributes:
+      label: Affected adapter
+      options:
+        - WeChat KF API
+        - iLink Bot
+        - A new public messaging adapter
+        - Adapter-independent
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: scenario
+    attributes:
+      label: Use case
+      description: Who is trying to do what, and why do the current capabilities not solve it?
+    validations:
+      required: true
+
+  - type: textarea
+    id: outcome
+    attributes:
+      label: Desired outcome
+      description: Describe the user-visible result; you do not need to design the internal architecture first.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current workaround
+
+  - type: textarea
+    id: implementation
+    attributes:
+      label: Implementation notes (optional)
+      description: If you know the relevant provider API or code, add links, constraints, or a proposed approach.

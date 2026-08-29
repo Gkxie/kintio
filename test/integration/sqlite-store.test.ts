@@ -1,12 +1,11 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import test, { type TestContext } from 'node:test';
+import { test, type TestContext } from 'vitest';
 import assert from 'node:assert/strict';
 
 import {
   CursorConflictError,
-  SendInvariantError,
   SqliteStore,
   stableMessageKey,
 } from '../../src/state/sqlite-store.ts';
@@ -18,6 +17,7 @@ import {
   inspectSchemaVersion,
 } from '../support/sqlite-inspect.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
+import { seedPendingAttempts } from '../support/pending-attempt.ts';
 
 function createStore(
   t: TestContext,
@@ -27,7 +27,7 @@ function createStore(
   const filePath = path.join(directory, 'state.sqlite');
   const clock = { value: now };
   const store = new SqliteStore({ filePath, clock: () => clock.value });
-  t.after(() => {
+  t.onTestFinished(() => {
     store.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
@@ -38,19 +38,20 @@ function customerMessage(
   msgid: string,
   externalUserId = 'wm-a',
   content = msgid,
+  openKfId = 'wk-a',
 ): NormalizedMessage {
   return testWecomMessage({
     id: msgid,
     sentAt: 100,
-    openKfId: 'wk-a',
+    openKfId,
     externalUserId,
     text: content,
   });
 }
 
-test('[SEC04] SQLite store creates private directory and WAL/FULL/FK schema', (t) => {
+test('SQLite store creates private directory and WAL/FULL/FK schema', (t) => {
   const { store, filePath } = createStore(t);
-  assert.equal(inspectSchemaVersion(store.database), 3);
+  assert.equal(inspectSchemaVersion(store.database), 21);
   assert.deepEqual(inspectPragmas(store.database), {
     journalMode: 'wal',
     synchronous: 2,
@@ -66,12 +67,20 @@ test('[SEC04] SQLite store creates private directory and WAL/FULL/FK schema', (t
     .all() as { name: string }[])
     .map((row) => row.name);
   assert.deepEqual(tables, [
+    'agent_artifacts',
+    'agent_sessions',
     'authorizations',
     'conversations',
+    'delivery_failures',
+    'ilink_account_secrets',
+    'ilink_accounts',
+    'ilink_enrollment_audit',
+    'ilink_inbound_images',
+    'ilink_login_offers',
+    'ilink_reply_window_secrets',
+    'ilink_reply_windows',
     'inbound_media',
     'inbound_messages',
-    'runtime_controls',
-    'schema_meta',
     'send_attempts',
     'sync_cursors',
   ]);
@@ -81,7 +90,20 @@ test('[SEC04] SQLite store creates private directory and WAL/FULL/FK schema', (t
   assert.deepEqual(store.foreignKeyCheck(), []);
 });
 
-test('[G04][R05] sync page atomically inserts messages and advances a CAS cursor', (t) => {
+test('SQLite store preserves an existing shared parent directory mode', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-sqlite-shared-'));
+  fs.chmodSync(directory, 0o777);
+  const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
+  t.onTestFinished(() => {
+    store.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+
+  assert.equal(fs.statSync(directory).mode & 0o777, 0o777);
+  assert.equal(fs.statSync(store.filePath).mode & 0o777, 0o600);
+});
+
+test('sync page atomically inserts messages and advances a CAS cursor', (t) => {
   const { store } = createStore(t);
   const systemEvent = testWecomMessage({
     id: '',
@@ -93,7 +115,7 @@ test('[G04][R05] sync page atomically inserts messages and advances a CAS cursor
     externalUserId: '',
     text: '',
     summary: '[event]',
-    attributes: { event_type: 'session_status_change' },
+    attributes: { event_type: 'future_event' },
   });
   const result = store.ingestSyncPage({
     openKfId: 'wk-a',
@@ -135,7 +157,7 @@ test('[G04][R05] sync page atomically inserts messages and advances a CAS cursor
     openKfId: 'wk-b',
     expectedCursor: '',
     nextCursor: 'b-1',
-    messages: [customerMessage('msg-1')],
+    messages: [customerMessage('msg-1', 'wm-a', 'msg-1', 'wk-b')],
   });
   assert.notEqual(
     stableMessageKey('wk-a', 'msg-1'),
@@ -143,7 +165,37 @@ test('[G04][R05] sync page atomically inserts messages and advances a CAS cursor
   );
 });
 
-test('[A05] authorization is global but consecutive trigger counting resets by open_kfid', (t) => {
+test('deferred startup messages stay out of recovery until promoted by live activity or idle drain', (t) => {
+  const { store } = createStore(t);
+  store.ingestSyncPage({
+    openKfId: 'wk-a',
+    nextCursor: 'deferred',
+    deferred: true,
+    messages: [
+      customerMessage('a-one', 'wm-a'),
+      customerMessage('a-two', 'wm-a'),
+      customerMessage('b-one', 'wm-b'),
+    ],
+  });
+  assert.deepEqual(store.recoverStartup().inbound, []);
+  assert.deepEqual(
+    store.promoteDeferredConversation({
+      openKfId: 'wk-a', externalUserId: 'wm-a',
+    }).map((record) => record.msgid),
+    ['a-one', 'a-two'],
+  );
+  assert.deepEqual(
+    store.recoverStartup().inbound.map((record) => record.msgid),
+    ['a-one', 'a-two'],
+  );
+  assert.deepEqual(
+    store.activateNextDeferredConversation().map((record) => record.msgid),
+    ['b-one'],
+  );
+  assert.equal(store.getInbound(stableMessageKey('wk-a', 'b-one'))?.deferred, false);
+});
+
+test('authorization is global but consecutive trigger counting resets by open_kfid', (t) => {
   const { store } = createStore(t);
   const ingest = (openKfId: string, cursor: string, msgid: string): string => {
     const next = `${cursor || 'start'}-${msgid}`;
@@ -151,7 +203,7 @@ test('[A05] authorization is global but consecutive trigger counting resets by o
       openKfId,
       expectedCursor: cursor,
       nextCursor: next,
-      messages: [customerMessage(msgid, 'wm-auth', '发车')],
+      messages: [customerMessage(msgid, 'wm-auth', '发车', openKfId)],
     });
     return next;
   };
@@ -233,28 +285,33 @@ test('[A05] authorization is global but consecutive trigger counting resets by o
   );
 });
 
-test('held human context is consumed exactly once with the next claimed turn', (t) => {
+test('a later customer direction prevents an older send from completing its primary early', (t) => {
   const { store } = createStore(t);
+  const firstPage = store.ingestSyncPage({
+    openKfId: 'wk-a',
+    nextCursor: 'race-one',
+    messages: [customerMessage('race-primary', 'wm-race')],
+  });
+  const primary = firstPage.insertedMessageKeys[0]!;
+  store.claimInbound({ messageKey: primary });
+  const session = store.createAgentSession({ messageKey: primary });
+  const attempt = store.reserveAgentSend({
+    sessionToken: session.token,
+    sentType: 'text',
+    payload: { msgtype: 'text', text: { content: 'old direction' } },
+  });
   store.ingestSyncPage({
     openKfId: 'wk-a',
-    nextCursor: 'one',
-    messages: [customerMessage('held'), customerMessage('next')],
+    expectedCursor: 'race-one',
+    nextCursor: 'race-two',
+    messages: [customerMessage('race-followup', 'wm-race')],
   });
-  const heldKey = stableMessageKey('wk-a', 'held');
-  const nextKey = stableMessageKey('wk-a', 'next');
-  store.markInboundHeld(heldKey);
-  const claimed = store.claimInbound({
-    messageKey: nextKey,
-    consumeHeldContext: true,
-  });
-  assert.deepEqual(claimed.heldContext.map((item) => item.messageKey), [heldKey]);
-  assert.equal(store.getInbound(heldKey)?.status, 'absorbed');
-  assert.equal(store.getInbound(heldKey)?.contextStatus, 'consumed');
-  assert.equal(store.getInbound(heldKey)?.primaryMessageKey, nextKey);
-  assert.deepEqual(store.listHeldContext('wk-a', 'wm-a'), []);
+  store.closeAgentSession(session.token);
+  store.completeSend(attempt.attemptId, { wecomMsgId: 'wx-race-old' });
+  assert.equal(store.getInbound(primary)?.status, 'processing');
 });
 
-test('[S08] a steer rejected at the completed-turn boundary can become a fresh turn once', (t) => {
+test('a steer rejected at the completed-turn boundary can become a fresh turn once', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
     openKfId: 'wk-a',
@@ -276,156 +333,7 @@ test('[S08] a steer rejected at the completed-turn boundary can become a fresh t
   assert.equal(requeued.codexTurnId, '');
   assert.equal(requeued.clientInputId, '');
   assert.throws(() => store.requeueInboundSteering(boundary, primary));
-  assert.equal(store.claimInbound({ messageKey: boundary }).message.status, 'processing');
-});
-
-test('[R02][R06] final batch is atomic, epoch guarded, and rejects changed fingerprints', (t) => {
-  const { store } = createStore(t);
-  store.ingestSyncPage({
-    openKfId: 'wk-a',
-    nextCursor: 'one',
-    messages: [customerMessage('primary'), customerMessage('follow-up')],
-  });
-  const primary = stableMessageKey('wk-a', 'primary');
-  const followUp = stableMessageKey('wk-a', 'follow-up');
-  const claimed = store.claimInbound({ messageKey: primary }).message;
-  store.beginInboundSteering({
-    messageKey: followUp,
-    primaryMessageKey: primary,
-  });
-  store.confirmInboundSteered(followUp, {
-    codexTurnId: 'turn-1',
-    steeringBoundary: 10,
-  });
-  const result = store.finalizeInboundBatch({
-    messageKey: primary,
-    steeringMessageKeys: [followUp],
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: [
-      {
-        sendIndex: 0,
-        source: 'codex_tool',
-        sentType: 'text',
-        payload: { msgtype: 'text', text: { content: '最终回答' } },
-      },
-    ],
-  });
-  assert.equal(result.suppressed, false);
-  assert.equal(store.getInbound(primary)?.status, 'ready');
-  assert.equal(store.getInbound(followUp)?.status, 'absorbed');
-  assert.deepEqual(result.attempts[0]?.payload, {
-    msgtype: 'text',
-    text: { content: '最终回答' },
-  });
-  const duplicate = store.finalizeInboundBatch({
-    messageKey: primary,
-    steeringMessageKeys: [followUp],
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: [
-      {
-        sendIndex: 0,
-        source: 'codex_tool',
-        sentType: 'text',
-        payload: { msgtype: 'text', text: { content: '最终回答' } },
-      },
-    ],
-  });
-  assert.equal(duplicate.duplicate, true);
-
-  assert.throws(
-    () =>
-      store.finalizeInboundBatch({
-        messageKey: primary,
-        steeringMessageKeys: [],
-        expectedConversationEpoch: claimed.claimedConversationEpoch,
-        expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-        attempts: [
-          {
-            sendIndex: 0,
-            sentType: 'text',
-            payload: { msgtype: 'text', text: { content: '内容变化' } },
-          },
-        ],
-      }),
-    (error: unknown) => error instanceof SendInvariantError,
-  );
-
-  store.ingestSyncPage({
-    openKfId: 'wk-a',
-    expectedCursor: 'one',
-    nextCursor: 'two',
-    messages: [customerMessage('paused')],
-  });
-  const pausedKey = stableMessageKey('wk-a', 'paused');
-  const pausedClaim = store.claimInbound({ messageKey: pausedKey }).message;
-  store.setRuntimePaused(true);
-  const suppressed = store.finalizeInboundBatch({
-    messageKey: pausedKey,
-    expectedConversationEpoch: pausedClaim.claimedConversationEpoch,
-    expectedRuntimeEpoch: pausedClaim.claimedRuntimeEpoch,
-    attempts: [
-      {
-        sendIndex: 0,
-        sentType: 'text',
-        payload: { msgtype: 'text', text: { content: '不应发送' } },
-      },
-    ],
-  });
-  assert.equal(suppressed.suppressed, true);
-  assert.equal(store.getInbound(pausedKey)?.status, 'suppressed');
-  assert.deepEqual(inspectAttempts(store.database, pausedKey), []);
-});
-
-test('delivery failure atomically activates one reserved fallback', (t) => {
-  const { store } = createStore(t);
-  store.ingestSyncPage({
-    openKfId: 'wk-a',
-    nextCursor: 'one',
-    messages: [customerMessage('delivery')],
-  });
-  const messageKey = stableMessageKey('wk-a', 'delivery');
-  const claimed = store.claimInbound({ messageKey }).message;
-  store.finalizeInboundBatch({
-    messageKey,
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: [
-      {
-        sendIndex: 0,
-        sentType: 'location',
-        payload: {
-          msgtype: 'location',
-          location: { name: '地点', latitude: 1, longitude: 2 },
-        },
-      },
-      {
-        sendIndex: 1,
-        sentType: 'text',
-        status: 'blocked',
-        fallbackForIndex: 0,
-        payload: { msgtype: 'text', text: { content: '地点' } },
-      },
-    ],
-  });
-  const primary = store.beginNextSend();
-  assert.ok(primary);
-  assert.equal(primary.messageKey, messageKey);
-  assert.equal(primary.type, 'location');
-  assert.equal(primary.status, 'sending');
-  store.failSend(primary.attemptId, { code: 40000, message: 'rejected' });
-  const fallback = store.beginNextSend();
-  assert.ok(fallback);
-  assert.equal(fallback.sendIndex, 1);
-  assert.equal(fallback.type, 'text');
-  assert.throws(
-    () => store.completeSend(fallback.attemptId, { wecomMsgId: '' }),
-    /wecomMsgId is required/u,
-  );
-  assert.equal(inspectAttempt(store.database, fallback.attemptId)?.status, 'sending');
-  store.completeSend(fallback.attemptId, { wecomMsgId: 'wecom-fallback' });
-  assert.equal(store.getInbound(messageKey)?.status, 'completed');
+  assert.equal(store.claimInbound({ messageKey: boundary }).status, 'processing');
 });
 
 test('startup converts only in-flight sends to uncertain and never requeues them', (t) => {
@@ -438,25 +346,20 @@ test('startup converts only in-flight sends to uncertain and never requeues them
     messages: [customerMessage('recover')],
   });
   const messageKey = stableMessageKey('wk-a', 'recover');
-  const claimed = first.claimInbound({ messageKey }).message;
-  first.finalizeInboundBatch({
-    messageKey,
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: [
+  first.claimInbound({ messageKey });
+  seedPendingAttempts(first, messageKey, [
       {
         sendIndex: 0,
         sentType: 'text',
         payload: { msgtype: 'text', text: { content: '可能已发' } },
       },
-    ],
-  });
+    ]);
   const sending = first.beginNextSend();
   assert.ok(sending);
   first.close();
 
   const second = new SqliteStore({ filePath });
-  t.after(() => {
+  t.onTestFinished(() => {
     second.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
@@ -467,43 +370,151 @@ test('startup converts only in-flight sends to uncertain and never requeues them
   assert.equal(second.getInbound(messageKey)?.status, 'completed');
 });
 
-test('delivery rejects a stale batch even when human or pause mode was later restored', (t) => {
+test('startup revokes every capability issued by the previous process', (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-session-recover-'));
+  const filePath = path.join(directory, 'state.sqlite');
+  const first = new SqliteStore({ filePath });
+  first.ingestSyncPage({
+    openKfId: 'wk-a',
+    nextCursor: 'one',
+    messages: [customerMessage('active-session')],
+  });
+  const messageKey = stableMessageKey('wk-a', 'active-session');
+  first.claimInbound({ messageKey });
+  const session = first.createAgentSession({ messageKey });
+  first.close();
+
+  const second = new SqliteStore({ filePath });
+  t.onTestFinished(() => {
+    second.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  assert.equal(second.getAgentSession(session.token).messageKey, messageKey);
+  second.recoverStartup();
+  assert.throws(() => second.getAgentSession(session.token), /closed/u);
+});
+
+test('startup requeues inferred steering without a Codex turn and preserves confirmed steering', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
     openKfId: 'wk-a',
-    nextCursor: 'one',
-    messages: [customerMessage('stale-batch')],
-  });
-  const messageKey = stableMessageKey('wk-a', 'stale-batch');
-  const claimed = store.claimInbound({ messageKey }).message;
-  store.finalizeInboundBatch({
-    messageKey,
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: [
-      {
-        sendIndex: 0,
-        sentType: 'text',
-        payload: { msgtype: 'text', text: { content: '过期回答' } },
-      },
+    nextCursor: 'steering-recovery',
+    messages: [
+      customerMessage('unconfirmed-primary'),
+      customerMessage('unconfirmed-followup'),
+      customerMessage('confirmed-primary'),
+      customerMessage('confirmed-followup'),
     ],
   });
-  store.setConversationMode({
-    openKfId: 'wk-a',
-    externalUserId: 'wm-a',
-    mode: 'human',
+  const unconfirmedPrimary = stableMessageKey('wk-a', 'unconfirmed-primary');
+  const unconfirmedFollowup = stableMessageKey('wk-a', 'unconfirmed-followup');
+  store.claimInbound({ messageKey: unconfirmedPrimary });
+  store.beginInboundSteering({
+    messageKey: unconfirmedFollowup,
+    primaryMessageKey: unconfirmedPrimary,
   });
-  store.setConversationMode({
-    openKfId: 'wk-a',
-    externalUserId: 'wm-a',
-    mode: 'bot',
+
+  const confirmedPrimary = stableMessageKey('wk-a', 'confirmed-primary');
+  const confirmedFollowup = stableMessageKey('wk-a', 'confirmed-followup');
+  store.claimInbound({ messageKey: confirmedPrimary });
+  store.markInboundPreparing(confirmedPrimary, 'turn-confirmed');
+  store.beginInboundSteering({
+    messageKey: confirmedFollowup,
+    primaryMessageKey: confirmedPrimary,
   });
-  assert.equal(store.beginNextSend(), undefined);
-  assert.equal(store.getInbound(messageKey)?.status, 'suppressed');
+
+  store.recoverStartup();
+  assert.equal(store.getInbound(unconfirmedFollowup)?.status, 'received');
+  assert.equal(store.getInbound(unconfirmedFollowup)?.primaryMessageKey, '');
+  assert.equal(store.getInbound(confirmedFollowup)?.status, 'steering');
   assert.equal(
-    inspectAttempts(store.database, messageKey)[0]?.errorCode,
-    'suppressed',
+    store.getInbound(confirmedFollowup)?.primaryMessageKey,
+    confirmedPrimary,
   );
+  assert.equal(store.getInbound(confirmedFollowup)?.codexTurnId, 'turn-confirmed');
+});
+
+test('recovery snapshot ignores known backlog but a newly arrived message invalidates it', (t) => {
+  const { store } = createStore(t);
+  store.ingestSyncPage({
+    openKfId: 'wk-a',
+    nextCursor: 'snapshot-one',
+    messages: [
+      customerMessage('snapshot-primary'),
+      customerMessage('snapshot-known-later'),
+    ],
+  });
+  const primary = stableMessageKey('wk-a', 'snapshot-primary');
+  const knownLater = stableMessageKey('wk-a', 'snapshot-known-later');
+  store.claimInbound({ messageKey: primary });
+  const allowed = store.createAgentSession({
+    messageKey: primary,
+    boundaryMessageKey: knownLater,
+  });
+  const attempt = store.reserveAgentSend({
+    sessionToken: allowed.token,
+    sentType: 'text',
+    payload: { msgtype: 'text', text: { content: '独立回答' } },
+  });
+  assert.equal(
+    attempt.metadata?.direction,
+    store.getInbound(primary)?.inboxSeq,
+  );
+  store.closeAgentSession(allowed.token);
+
+  const stale = store.createAgentSession({
+    messageKey: primary,
+    boundaryMessageKey: knownLater,
+  });
+  store.ingestSyncPage({
+    openKfId: 'wk-a',
+    expectedCursor: 'snapshot-one',
+    nextCursor: 'snapshot-two',
+    messages: [customerMessage('snapshot-new-live')],
+  });
+  assert.throws(() => store.reserveAgentSend({
+    sessionToken: stale.token,
+    sentType: 'text',
+    payload: { msgtype: 'text', text: { content: '不应发送' } },
+  }), /active conversation direction/u);
+});
+
+test('archived memory binding follows the short-lived session and clears on completion', (t) => {
+  const { store } = createStore(t);
+  store.ingestSyncPage({
+    openKfId: 'wk-a',
+    nextCursor: 'memory',
+    messages: [customerMessage('memory-turn')],
+  });
+  const messageKey = stableMessageKey('wk-a', 'memory-turn');
+  store.claimInbound({ messageKey });
+  store.setConversationThread({
+    openKfId: 'wk-a',
+    externalUserId: 'wm-a',
+    threadId: '01900000-0000-7000-8000-000000000002',
+    memoryThreadId: '01900000-0000-7000-8000-000000000001',
+  });
+  const session = store.createAgentSession({ messageKey });
+  assert.equal(
+    store.getAgentSession(session.token).memoryThreadId,
+    '01900000-0000-7000-8000-000000000001',
+  );
+  const [pending] = seedPendingAttempts(store, messageKey, [{
+    sendIndex: 0,
+    source: 'mcp_tool',
+    sentType: 'text',
+    payload: { msgtype: 'text', text: { content: 'done' } },
+  }]);
+  assert.ok(pending);
+  const sending = store.beginNextSend();
+  assert.ok(sending);
+  store.completeSend(sending.attemptId, { wecomMsgId: 'wx-memory' });
+  store.finalizeAgentExecution({
+    messageKey,
+    attemptIds: [sending.attemptId],
+  });
+  assert.equal(store.getConversation('wk-a', 'wm-a')?.memoryThreadId, '');
+  assert.throws(() => store.getAgentSession(session.token), /closed/u);
 });
 
 test('recent channel facts are conversation scoped and use the conversation index', (t) => {
@@ -521,19 +532,14 @@ test('recent channel facts are conversation scoped and use the conversation inde
     ['b-fact', 'wm-b'],
   ] as const) {
     const messageKey = stableMessageKey('wk-a', msgid);
-    const claimed = store.claimInbound({ messageKey }).message;
-    store.finalizeInboundBatch({
-      messageKey,
-      expectedConversationEpoch: claimed.claimedConversationEpoch,
-      expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-      attempts: [
+    store.claimInbound({ messageKey });
+    seedPendingAttempts(store, messageKey, [
         {
           sendIndex: 0,
           sentType: 'text',
           payload: { msgtype: 'text', text: { content: externalUserId } },
         },
-      ],
-    });
+      ]);
     const attempt = store.beginNextSend();
     assert.ok(attempt);
     store.completeSend(attempt.attemptId, { wecomMsgId: `wx-${externalUserId}` });
@@ -562,62 +568,6 @@ test('recent channel facts are conversation scoped and use the conversation inde
   );
 });
 
-test('send drain skips more than 100 stale attempts and still claims the next valid one', (t) => {
-  const { store } = createStore(t);
-  const staleMessages = Array.from({ length: 100 }, (_, index) =>
-    customerMessage(`stale-${index}`, 'wm-backlog')
-  );
-  store.ingestSyncPage({
-    openKfId: 'wk-a',
-    nextCursor: 'stale-cursor',
-    messages: staleMessages,
-  });
-  for (const message of staleMessages) {
-    const messageKey = stableMessageKey('wk-a', message.id);
-    const claimed = store.claimInbound({ messageKey }).message;
-    store.finalizeInboundBatch({
-      messageKey,
-      expectedConversationEpoch: claimed.claimedConversationEpoch,
-      expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-      attempts: [{
-        sendIndex: 0,
-        sentType: 'text',
-        payload: { msgtype: 'text', text: { content: message.id } },
-      }],
-    });
-  }
-  store.setConversationMode({
-    openKfId: 'wk-a',
-    externalUserId: 'wm-backlog',
-    mode: 'human',
-  });
-  store.setConversationMode({
-    openKfId: 'wk-a',
-    externalUserId: 'wm-backlog',
-    mode: 'bot',
-  });
-  const valid = customerMessage('valid-101', 'wm-backlog');
-  store.ingestSyncPage({
-    openKfId: 'wk-a',
-    expectedCursor: 'stale-cursor',
-    nextCursor: 'valid-cursor',
-    messages: [valid],
-  });
-  const validKey = stableMessageKey('wk-a', valid.id);
-  const validClaim = store.claimInbound({ messageKey: validKey }).message;
-  store.finalizeInboundBatch({
-    messageKey: validKey,
-    expectedConversationEpoch: validClaim.claimedConversationEpoch,
-    expectedRuntimeEpoch: validClaim.claimedRuntimeEpoch,
-    attempts: [{
-      sendIndex: 0,
-      sentType: 'text',
-      payload: { msgtype: 'text', text: { content: 'valid' } },
-    }],
-  });
-  assert.equal(store.beginNextSend()?.messageKey, validKey);
-});
-
 test('startup recovery returns every pending inbound beyond the old 1000-row cap', (t) => {
   const { store } = createStore(t);
   const messages = Array.from({ length: 1_001 }, (_, index) =>
@@ -635,7 +585,7 @@ test('startup recovery returns every pending inbound beyond the old 1000-row cap
   assert.equal(store.recoverStartup().inbound.length, 1_001);
 });
 
-test('primary failure also terminates an in-flight steering record', (t) => {
+test('primary failure requeues its steering input for bounded recovery', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
     openKfId: 'wk-a',
@@ -651,10 +601,11 @@ test('primary failure also terminates an in-flight steering record', (t) => {
   });
   store.failInbound(primaryKey, new Error('turn failed'));
   assert.equal(store.getInbound(primaryKey)?.status, 'failed');
-  assert.equal(store.getInbound(steerKey)?.status, 'failed');
+  assert.equal(store.getInbound(steerKey)?.status, 'received');
+  assert.equal(store.getInbound(steerKey)?.primaryMessageKey, '');
 });
 
-test('[O06][SEC02] composite foreign keys reject cross-customer media and send targets', (t) => {
+test('composite foreign keys reject cross-customer media and send targets', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
     openKfId: 'wk-a',
@@ -682,42 +633,4 @@ test('[O06][SEC02] composite foreign keys reject cross-customer media and send t
       )
     `).run(messageKey),
   /FOREIGN KEY/u);
-});
-
-test('cleanup removes expired blocked fallbacks before their primary audit row', (t) => {
-  const { store, clock } = createStore(t);
-  const message = customerMessage('cleanup-fallback');
-  store.ingestSyncPage({
-    openKfId: 'wk-a',
-    nextCursor: 'cleanup-cursor',
-    messages: [message],
-  });
-  const messageKey = stableMessageKey('wk-a', message.id);
-  const claimed = store.claimInbound({ messageKey }).message;
-  store.finalizeInboundBatch({
-    messageKey,
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: [
-      {
-        sendIndex: 0,
-        sentType: 'location',
-        payload: { msgtype: 'location', location: { latitude: 1, longitude: 2 } },
-      },
-      {
-        sendIndex: 1,
-        sentType: 'text',
-        fallbackForIndex: 0,
-        status: 'blocked',
-        payload: { msgtype: 'text', text: { content: 'fallback' } },
-      },
-    ],
-  });
-  const primary = store.beginNextSend();
-  assert.ok(primary);
-  store.completeSend(primary.attemptId, { wecomMsgId: 'cleanup-wecom-id' });
-  clock.value += 31 * 24 * 60 * 60 * 1_000;
-  const cleaned = store.cleanup();
-  assert.equal(cleaned.blockedFallbacks, 1);
-  assert.equal(inspectAttempts(store.database, messageKey).length, 0);
 });

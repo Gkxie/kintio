@@ -13,7 +13,6 @@ export interface TestWecomMessageOptions {
   sentAt?: number;
   cursor?: string;
   index?: number;
-  servicerUserId?: string;
   text?: string;
   summary?: string;
   attributes?: Readonly<Record<string, unknown>>;
@@ -30,7 +29,6 @@ export function testWecomMessage({
   sentAt = 1,
   cursor = '',
   index = 0,
-  servicerUserId = '',
   text = id,
   summary = text,
   attributes = {},
@@ -43,8 +41,11 @@ export function testWecomMessage({
     rawType,
     sentAt,
     sync: Object.freeze({ cursor, index }),
-    conversation: Object.freeze({ openKfId, externalUserId }),
-    actor: Object.freeze({ servicerUserId }),
+    conversation: Object.freeze({
+      channel: 'wechat_kf',
+      accountKey: openKfId,
+      peerId: externalUserId,
+    }),
     text,
     summary,
     attributes: Object.freeze({ ...attributes }),

@@ -1,46 +1,48 @@
 {
-  "name": "wechat-bot",
-  "version": "1.0.0",
+  "name": "kintio",
+  "version": "0.4.0",
   "private": true,
+  "license": "Apache-2.0",
   "packageManager": "pnpm@10.34.5",
   "type": "module",
-  "description": "WeCom customer-service callback built with Hono",
+  "description": "Connect chat channels to an Agent you control",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Gkxie/kintio.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Gkxie/kintio/issues"
+  },
+  "homepage": "https://github.com/Gkxie/kintio#readme",
+  "keywords": [
+    "chat",
+    "im",
+    "ai-agent",
+    "codex",
+    "mcp"
+  ],
   "scripts": {
-    "clean": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\"",
-    "build": "pnpm run clean && tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.test.json",
-    "dev": "node --experimental-strip-types --watch index.ts",
+    "build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
+    "dev": "node --watch index.ts",
     "start": "pnpm run build && node dist/index.js",
-    "pause": "node --experimental-strip-types scripts/runtime-control.ts pause",
-    "resume": "node --experimental-strip-types scripts/runtime-control.ts resume",
-    "status": "node --experimental-strip-types scripts/runtime-control.ts status",
-    "migrate:legacy": "node --experimental-strip-types scripts/migrate-legacy.ts",
-    "auth": "node --experimental-strip-types scripts/authorization.ts",
-    "test": "pnpm run test:deterministic",
-    "test:markers": "node --experimental-strip-types scripts/check-test-markers.ts",
-    "test:acceptance": "REQUIRE_DETERMINISTIC_ACCEPTANCE=1 node --experimental-strip-types scripts/check-test-markers.ts",
-    "test:release": "REQUIRE_VERIFIED_ACCEPTANCE=1 node --experimental-strip-types scripts/check-test-markers.ts && pnpm run test:coverage && RUN_REAL_CODEX=1 pnpm run test:agent",
-    "test:size": "pnpm run build && node --experimental-strip-types scripts/check-size.ts",
-    "test:unit": "node --experimental-strip-types --test test/unit/*.test.ts",
-    "test:integration": "node --experimental-strip-types --test test/integration/*.test.ts",
-    "test:recovery": "node --experimental-strip-types --test --test-concurrency=1 test/recovery/*.test.ts",
-    "test:security": "node --experimental-strip-types --test test/security/*.test.ts",
-    "test:deterministic": "pnpm run typecheck && pnpm run test:acceptance && pnpm run test:size && node --experimental-strip-types --test --test-concurrency=1 test/unit/*.test.ts test/integration/*.test.ts test/recovery/*.test.ts test/security/*.test.ts",
-    "test:coverage": "pnpm run typecheck && pnpm run test:acceptance && pnpm run test:size && node --experimental-strip-types --test --test-concurrency=1 --experimental-test-coverage --test-coverage-include='index.ts' --test-coverage-include='src/**/*.ts' --test-coverage-include='scripts/**/*.ts' --test-coverage-exclude='dist/**' --test-coverage-exclude='test/**' --test-coverage-lines=90 --test-coverage-branches=80 --test-coverage-functions=90 test/unit/*.test.ts test/integration/*.test.ts test/recovery/*.test.ts test/security/*.test.ts",
-    "test:agent": "node --experimental-strip-types --test --test-concurrency=1 test/opt-in/real-codex.integration.ts",
-    "test:live": "node --experimental-strip-types --test --test-concurrency=1 test/opt-in/live-wecom.integration.ts"
+    "test": "vitest run"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24"
   },
   "dependencies": {
     "@hono/node-server": "^2.0.12",
     "@modelcontextprotocol/sdk": "^1.30.0",
-    "hono": "^4.12.8",
+    "hono": "^4.13.5",
+    "qrcode": "1.5.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@types/node": "22.13",
-    "typescript": "^7.0.2"
+    "@types/node": "24.13.3",
+    "@types/qrcode": "1.5.6",
+    "@vitest/coverage-v8": "4.1.11",
+    "knip": "6.32.2",
+    "typescript": "^7.0.2",
+    "vitest": "4.1.11"
   }
 }

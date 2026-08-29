@@ -3,26 +3,30 @@ import type { Serializable } from 'node:child_process';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test, { type TestContext } from 'node:test';
+import { describe, test, type TestContext } from 'vitest';
 import { fileURLToPath } from 'node:url';
 
 import type {
-  AgentCompletion,
   AgentInput,
-  AgentSubmission,
   HistoryInspection,
-} from '../../src/services/codex-agent.ts';
+} from '../../src/agent/runtime.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { SqliteStore } from '../../src/state/sqlite-store.ts';
-import type { NormalizedMessage, PreparedAttempt } from '../../src/types.ts';
+import type { NormalizedMessage } from '../../src/types.ts';
 import { startTestChild, type TestChild } from '../support/child-process.ts';
+import {
+  SimulatedToolAgent,
+  type SimulatedAgentCompletion,
+  type SimulatedAgentRuntime,
+  type SimulatedAgentSubmission,
+} from '../support/executing-agent.ts';
 import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.ts';
+import { seedPendingAttempts } from '../support/pending-attempt.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
 const mode = process.argv[2] || '';
-const typeStripExecArgv = ['--experimental-strip-types'] as const;
 
 interface SeedMessage extends Record<string, Serializable> {
   type: 'seeded';
@@ -47,7 +51,7 @@ function ingest(
   store: SqliteStore,
   message: NormalizedMessage,
 ): string {
-  const { openKfId } = message.conversation;
+  const openKfId = message.conversation.accountKey;
   const [key] = store.ingestSyncPage({
     openKfId,
     expectedCursor: store.getCursor(openKfId),
@@ -63,17 +67,12 @@ function reserve(
   key: string,
   contents: readonly string[],
 ): string[] {
-  const claimed = store.claimInbound({ messageKey: key }).message;
-  return store.finalizeInboundBatch({
-    messageKey: key,
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: contents.map((content, sendIndex) => ({
+  store.claimInbound({ messageKey: key });
+  return seedPendingAttempts(store, key, contents.map((content, sendIndex) => ({
       sendIndex,
       sentType: 'text',
       payload: { msgtype: 'text', text: { content } },
-    })),
-  }).attempts.map((attempt) => attempt.attemptId);
+    }))).map((attempt) => attempt.attemptId);
 }
 
 function sendParent(message: SeedMessage): void {
@@ -87,7 +86,7 @@ async function seedWorker(databaseFile: string, scenario: string): Promise<void>
   const attempts: string[] = [];
   if (scenario === 'codex') {
     const processing = ingest(store, normalized('processing'));
-    const preparing = ingest(store, normalized('preparing'));
+    const preparing = ingest(store, normalized('preparing', 'wk-crash', 'wm-crash-two'));
     store.claimInbound({ messageKey: processing });
     store.claimInbound({ messageKey: preparing });
     store.markInboundPreparing(preparing, 'crashed-turn');
@@ -98,38 +97,6 @@ async function seedWorker(databaseFile: string, scenario: string): Promise<void>
       keys.push(key);
       attempts.push(...reserve(store, key, [openKfId]));
     }
-  } else if (scenario === 'fallback') {
-    const key = ingest(store, normalized('message-fallback'));
-    keys.push(key);
-    const claimed = store.claimInbound({ messageKey: key }).message;
-    const finalized = store.finalizeInboundBatch({
-      messageKey: key,
-      expectedConversationEpoch: claimed.claimedConversationEpoch,
-      expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-      attempts: [
-        {
-          sendIndex: 0,
-          sentType: 'location',
-          payload: {
-            msgtype: 'location',
-            location: {
-              name: '地点', address: '地址', latitude: 39, longitude: 116,
-            },
-          },
-        },
-        {
-          sendIndex: 1,
-          sentType: 'text',
-          payload: { msgtype: 'text', text: { content: '安全兜底' } },
-          fallbackForIndex: 0,
-          status: 'blocked',
-        },
-      ],
-    });
-    attempts.push(...finalized.attempts.map((attempt) => attempt.attemptId));
-    const primary = store.beginNextSend();
-    if (!primary) throw new Error('Expected fallback primary attempt');
-    store.failSend(primary.attemptId, new Error('definitive failure'));
   } else {
     const key = ingest(store, normalized(`message-${scenario}`));
     keys.push(key);
@@ -156,7 +123,7 @@ if (mode === '--seed') {
 } else {
   async function workspace(t: TestContext): Promise<string> {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'pipeline-crash-'));
-    t.after(() => fs.rm(directory, { recursive: true, force: true }));
+    t.onTestFinished(() => fs.rm(directory, { recursive: true, force: true }));
     return directory;
   }
 
@@ -172,7 +139,6 @@ if (mode === '--seed') {
   ): Promise<SeedMessage> {
     const child: TestChild = startTestChild(t, currentFile, {
       args: ['--seed', databaseFile, scenario],
-      execArgv: typeStripExecArgv,
     });
     const seeded = await child.waitForMessage(isSeeded);
     assert.deepEqual(await child.stop('SIGKILL'), {
@@ -182,31 +148,27 @@ if (mode === '--seed') {
     return seeded;
   }
 
-  class RecoveryAgent {
+  class RecoveryAgent implements SimulatedAgentRuntime {
     submissions = 0;
-    readonly #store: SqliteStore;
-    constructor(store: SqliteStore) { this.#store = store; }
+    async ensureThread(conversationId: string, threadId: string): Promise<string> {
+      return threadId || `thread-recovery-${conversationId}`;
+    }
+    activePrimary(): undefined { return undefined; }
     async inspectHistory(): Promise<HistoryInspection> {
       return {
-        state: 'missing', turnId: '', foundClientInputIds: new Set(), candidates: [],
+        state: 'missing', turnId: '', foundClientInputIds: new Set(), artifacts: [],
       };
     }
-    async submit(input: AgentInput): Promise<AgentSubmission> {
+    async submit(input: AgentInput): Promise<SimulatedAgentSubmission> {
       this.submissions += 1;
-      const claimed = this.#store.claimInbound({
-        messageKey: input.message.messageKey,
-        clientInputId: input.clientInputId || input.message.messageKey,
-      });
-      const completion: AgentCompletion = {
-        candidates: [{ type: 'text', content: `recovered-${input.message.text}` }],
-        mediaCatalog: [],
-        expectedConversationEpoch: claimed.message.claimedConversationEpoch,
-        expectedRuntimeEpoch: claimed.message.claimedRuntimeEpoch,
+      const completion: SimulatedAgentCompletion = {
+        replies: [{ type: 'text', content: `recovered-${input.message.text}` }],
       };
       return {
         kind: 'started',
         primaryMessageKey: input.message.messageKey,
         turnId: `recovery-${this.submissions}`,
+        threadId: input.threadId,
         completion: Promise.resolve(completion),
       };
     }
@@ -214,31 +176,37 @@ if (mode === '--seed') {
     async abort(): Promise<void> {}
   }
 
-  test('[R04] processing and preparing crash recover Codex once into one outbox each', async (t) => {
+  function channel(
+    store: SqliteStore,
+    sendPreparedMessage: (input: Parameters<
+      import('../../src/services/wecom-api.ts').WecomApiClient['sendPreparedMessage']
+    >[0]) => Promise<Record<string, unknown>>,
+  ): WechatKfToolExecutor {
+    return new WechatKfToolExecutor({
+      store,
+      apiClient: { sendPreparedMessage },
+      mediaGateway: {
+        async upload() { return { media_id: 'unused' }; },
+        async cloneForSend() { throw new Error('not expected'); },
+        async getCardThumbnailMediaId() { throw new Error('not expected'); },
+      },
+      observeMs: 0,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+  }
+
+  test('processing and preparing crash recover Codex once into one MCP attempt each', async (t) => {
     const root = await workspace(t);
     const database = path.join(root, 'state.sqlite');
     const seeded = await crashSeed(t, database, 'codex');
     const store = new SqliteStore({ filePath: database });
-    const agent = new RecoveryAgent(store);
+    const agent = new RecoveryAgent();
+    const activeChannel = channel(store, async () => ({ msgid: 'wx-recovered' }));
     const processor = new ConversationProcessor({
       store,
-      codexAgent: agent,
+      agent: new SimulatedToolAgent({ inner: agent, tools: activeChannel }),
       mediaGateway: { resolveForCodex: async () => [] },
-      outboundPreparer: {
-        async prepare({ candidates }) {
-          const attempts: PreparedAttempt[] = candidates.map((candidate, sendIndex) => ({
-            sendIndex,
-            sentType: 'text',
-            payload: {
-              msgtype: 'text',
-              text: { content: 'content' in candidate ? String(candidate.content) : '' },
-            },
-          }));
-          return { attempts, spoolPaths: [] };
-        },
-        async cleanup() {},
-      },
-      delivery: { kick: async () => {} },
+      channel: activeChannel,
       allowedUserIds: ['wm-crash'],
       logger: { info() {}, warn() {}, error() {} },
     });
@@ -250,34 +218,31 @@ if (mode === '--seed') {
     }
     await processor.recover(store.recoverStartup().inbound);
     await processor.waitForIdle();
-    assert.equal(agent.submissions, 2, 'ready outbox must not start Codex again');
+    assert.equal(agent.submissions, 2, 'terminal attempts must not start Codex again');
     await processor.close();
+    await activeChannel.close();
     store.close();
   });
 
-  test('[R04] SIGKILL across turn outbox and delivery boundaries preserves Codex at-least-once and WeChat at-most-once semantics', async (t) => {
-    for (const scenario of ['pending', 'sending', 'accepted', 'partial'] as const) {
-      await t.test(`${scenario} crash`, async (subtest) => {
-        const root = await workspace(subtest);
+  describe.each(['pending', 'sending', 'accepted', 'partial'] as const)(
+    '%s crash boundary',
+    (scenario) => {
+      test('SIGKILL after persisted Agent/MCP boundary states preserves at-least-once input and at-most-once attempts', async (t) => {
+        const root = await workspace(t);
         const database = path.join(root, 'state.sqlite');
-        const seeded = await crashSeed(subtest, database, scenario);
+        const seeded = await crashSeed(t, database, scenario);
         const store = new SqliteStore({ filePath: database });
         const recovery = store.recoverStartup();
         const calls: Array<{ content: string; messageId: string }> = [];
-        const delivery = new DeliveryService({
-          store,
-          apiClient: {
-            async sendPreparedMessage(input) {
+        const delivery = channel(store,
+            async (input) => {
               const text = input.payload.text as { content?: unknown };
               calls.push({
                 content: String(text.content || ''),
                 messageId: String(input.messageId || ''),
               });
               return { msgid: `wx-${calls.length}` };
-            },
-          },
-          logger: { info() {}, warn() {}, error() {} },
-        });
+            });
         await delivery.kick();
         if (scenario === 'pending') assert.equal(calls.length, 1);
         if (scenario === 'sending') {
@@ -299,10 +264,10 @@ if (mode === '--seed') {
         await delivery.close();
         store.close();
       });
-    }
-  });
+    },
+  );
 
-  test('[R08] same raw msgid across open_kfid remains isolated through crash recovery', async (t) => {
+  test('same raw msgid across open_kfid remains isolated through crash recovery', async (t) => {
     const root = await workspace(t);
     const database = path.join(root, 'state.sqlite');
     const seeded = await crashSeed(t, database, 'isolation');
@@ -310,53 +275,17 @@ if (mode === '--seed') {
     const store = new SqliteStore({ filePath: database });
     store.recoverStartup();
     const calls: Array<{ openKfId: string; messageId: string }> = [];
-    const delivery = new DeliveryService({
-      store,
-      apiClient: {
-        async sendPreparedMessage(input) {
+    const delivery = channel(store,
+        async (input) => {
           calls.push({
             openKfId: input.openKfId,
             messageId: String(input.messageId || ''),
           });
           return { msgid: `wx-${calls.length}` };
-        },
-      },
-      logger: { info() {}, warn() {}, error() {} },
-    });
+        });
     await delivery.kick();
     assert.deepEqual(calls.map((call) => call.openKfId).sort(), ['wk-a', 'wk-b']);
     assert.equal(new Set(calls.map((call) => call.messageId)).size, 2);
-    await delivery.close();
-    store.close();
-  });
-
-  test('[O08] fallback state transition survives SIGKILL and sends exactly once', async (t) => {
-    const root = await workspace(t);
-    const database = path.join(root, 'state.sqlite');
-    const seeded = await crashSeed(t, database, 'fallback');
-    const store = new SqliteStore({ filePath: database });
-    const recovery = store.recoverStartup();
-    assert.equal(recovery.uncertainSends, 0);
-    const calls: string[] = [];
-    const delivery = new DeliveryService({
-      store,
-      apiClient: {
-        async sendPreparedMessage(input) {
-          const text = input.payload.text as { content?: unknown };
-          calls.push(String(text.content || ''));
-          return { msgid: 'wx-fallback' };
-        },
-      },
-      logger: { info() {}, warn() {}, error() {} },
-    });
-    await delivery.kick();
-    await delivery.kick();
-    assert.deepEqual(calls, ['安全兜底']);
-    const attempts = inspectAttempts(store.database, seeded.keys[0]!);
-    assert.deepEqual(attempts.map((attempt) => attempt.status), [
-      'failed',
-      'accepted',
-    ]);
     await delivery.close();
     store.close();
   });

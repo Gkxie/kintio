@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import {
   CodexAppServer,
@@ -69,6 +69,8 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
         process.send({ id: message.id, result: { turn: { id: 'turn-one' } } });
       } else if (message.method === 'turn/steer') {
         process.send({ id: message.id, result: { turnId: 'turn-one' } });
+      } else if (message.method === 'thread/delete') {
+        process.send({ id: message.id, result: {} });
       }
     });
     return child as unknown as ReturnType<SpawnProcess>;
@@ -83,7 +85,7 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
   const thread = server.startThread({
     model: 'gpt-test',
     modelReasoningEffort: 'low',
-    developerInstructions: 'fixed customer-service policy',
+    developerInstructions: 'fixed channel policy',
     workingDirectory: '/workspace',
     approvalPolicy: 'never',
   });
@@ -102,7 +104,11 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
       item: {
         id: 'old-tool', type: 'mcpToolCall', server: 'wechat_kf',
         tool: 'send_text', status: 'completed',
-        result: { structuredContent: { candidate: { type: 'text', content: 'old' } } },
+        result: {
+          structuredContent: {
+            status: 'accepted', attemptId: 'attempt-old', type: 'text', sendIndex: 0,
+          },
+        },
       },
     },
   });
@@ -127,7 +133,11 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
       item: {
         id: 'final-tool', type: 'mcpToolCall', server: 'wechat_kf',
         tool: 'send_text', status: 'completed',
-        result: { structuredContent: { candidate: { type: 'text', content: 'final' } } },
+        result: {
+          structuredContent: {
+            status: 'accepted', attemptId: 'attempt-final', type: 'text', sendIndex: 0,
+          },
+        },
       },
     },
   });
@@ -151,9 +161,15 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
   assert.equal((start?.params as RpcMessage).effort, 'low');
   assert.equal(
     (threadStart?.params as RpcMessage).developerInstructions,
-    'fixed customer-service policy',
+    'fixed channel policy',
   );
   assert.equal((steer?.params as RpcMessage).clientUserMessageId, 'wechat-message-two');
+  await server.deleteThread('thread-one');
+  assert.equal(
+    (requests.find((message) => message.method === 'thread/delete')?.params as RpcMessage)
+      .threadId,
+    'thread-one',
+  );
   await server.close();
 });
 

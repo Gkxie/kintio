@@ -4,9 +4,12 @@ export interface Logger {
   error(message: string): void;
 }
 
-export interface ConversationRef {
-  readonly openKfId: string;
-  readonly externalUserId: string;
+export type ChatChannel = 'wechat_kf' | 'weixin_ilink';
+
+interface ConversationRef {
+  readonly channel: ChatChannel;
+  readonly accountKey: string;
+  readonly peerId: string;
 }
 
 export interface ImageAttachment {
@@ -25,7 +28,6 @@ export interface NormalizedMessage {
   readonly sentAt: number;
   readonly sync: { readonly cursor: string; readonly index: number };
   readonly conversation: ConversationRef;
-  readonly actor: { readonly servicerUserId: string };
   readonly text: string;
   readonly summary: string;
   readonly attributes: Readonly<Record<string, unknown>>;
@@ -48,14 +50,4 @@ export interface MediaCatalogEntry {
   readonly filename: string;
   readonly sentAt: number;
   readonly rememberedAt: number;
-}
-
-export interface PreparedAttempt {
-  readonly sendIndex: number;
-  readonly source?: string;
-  readonly sentType: string;
-  readonly payload: Readonly<Record<string, unknown>>;
-  readonly metadata?: Readonly<Record<string, unknown>>;
-  readonly fallbackForIndex?: number;
-  readonly status?: 'pending' | 'blocked';
 }

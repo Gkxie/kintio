@@ -1,12 +1,13 @@
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import test from 'node:test';
+import { describe, test } from 'vitest';
 
 import {
   SqliteStore,
   stableMessageKey,
 } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
+import { seedPendingAttempts } from '../support/pending-attempt.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 const historySizes = [100, 10_000, 100_000] as const;
@@ -57,14 +58,14 @@ function seedHistory(database: DatabaseSync, size: number): void {
     INSERT INTO send_attempts (
       attempt_key, source_message_key, open_kfid, external_userid,
       send_index, source, sent_type, payload_json, metadata_json,
-      fallback_for_index, fingerprint, client_message_id, status,
+      fingerprint, client_message_id, status,
       wecom_msgid, error_code, error_message, fail_type, created_at, updated_at
     )
     SELECT
       'history-attempt-' || printf('%06d', inbox_seq),
       message_key, open_kfid, external_userid,
       0, 'history', 'text', NULL, NULL,
-      NULL, 'fingerprint-' || printf('%06d', inbox_seq),
+      'fingerprint-' || printf('%06d', inbox_seq),
       'client-' || printf('%06d', inbox_seq), 'accepted',
       'wecom-' || printf('%06d', inbox_seq), '', '', 0, created_at, updated_at
     FROM inbound_messages
@@ -90,27 +91,20 @@ function assertUsesIndex(details: readonly string[], indexName: string): void {
   );
 }
 
-test('[D01] critical row operations have constant changes and indexed plans at 100, 10k, and 100k history', async (t) => {
-  const profiles: ChangeProfile[] = [];
-
-  for (const size of historySizes) {
-    await t.test(`${size}-rows`, async (subtest) => {
-      const temporary = await createTempSqlite(subtest, {
+describe.each(historySizes)('%i history rows', (size) => {
+  test('critical row operations have constant changes and indexed plans at 100, 10k, and 100k history', async (t) => {
+      const temporary = await createTempSqlite(t, {
         prefix: `wechat-sql-scale-${size}-`,
         filename: 'wecom.sqlite',
       });
       const store = new SqliteStore({ filePath: temporary.filePath });
-      subtest.after(() => store.close());
+      t.onTestFinished(() => store.close());
       seedHistory(store.database, size);
 
       const openKfId = `wk-target-${size}`;
       const externalUserId = `wm-target-${size}`;
       const msgid = `target-${size}`;
       const messageKey = stableMessageKey(openKfId, msgid);
-      let claimedEpochs: {
-        conversation: number;
-        runtime: number;
-      } | undefined;
       let attemptId = '';
 
       const profile: ChangeProfile = {
@@ -135,26 +129,16 @@ test('[D01] critical row operations have constant changes and indexed plans at 1
           });
         }),
         claim: changeDelta(store.database, () => {
-          const claimed = store.claimInbound({ messageKey }).message;
-          claimedEpochs = {
-            conversation: claimed.claimedConversationEpoch,
-            runtime: claimed.claimedRuntimeEpoch,
-          };
+          store.claimInbound({ messageKey });
         }),
         finalize: changeDelta(store.database, () => {
-          if (!claimedEpochs) throw new Error('Expected claimed epochs');
-          const finalized = store.finalizeInboundBatch({
-            messageKey,
-            expectedConversationEpoch: claimedEpochs.conversation,
-            expectedRuntimeEpoch: claimedEpochs.runtime,
-            attempts: [{
+          const finalized = seedPendingAttempts(store, messageKey, [{
               sendIndex: 0,
               source: 'codex_tool',
               sentType: 'text',
               payload: { msgtype: 'text', text: { content: 'constant send' } },
-            }],
-          });
-          attemptId = finalized.attempts[0]?.attemptId || '';
+            }]);
+          attemptId = finalized[0]?.attemptId || '';
           assert.ok(attemptId);
         }),
         beginSend: changeDelta(store.database, () => {
@@ -164,7 +148,6 @@ test('[D01] critical row operations have constant changes and indexed plans at 1
           store.completeSend(attemptId, { wecomMsgId: `wecom-target-${size}` });
         }),
       };
-      profiles.push(profile);
       assert.deepEqual(profile, {
         ingest: 3,
         thread: 1,
@@ -214,73 +197,5 @@ test('[D01] critical row operations have constant changes and indexed plans at 1
         ),
         'send_conversation_idx',
       );
-    });
-  }
-
-  assert.equal(profiles.length, historySizes.length);
-  assert.ok(profiles.every((profile) =>
-    JSON.stringify(profile) === JSON.stringify(profiles[0])));
-});
-
-test('[D01][C01] v1 database upgrades queue and thread indexes without losing rows', async (t) => {
-  const temporary = await createTempSqlite(t, {
-    prefix: 'wechat-sql-v1-upgrade-',
-    filename: 'wecom.sqlite',
   });
-  const openKfId = 'wk-upgrade';
-  const externalUserId = 'wm-upgrade';
-  const msgid = 'message-upgrade';
-  const messageKey = stableMessageKey(openKfId, msgid);
-  const initial = new SqliteStore({ filePath: temporary.filePath });
-  initial.ingestSyncPage({
-    openKfId,
-    nextCursor: 'cursor-upgrade',
-    messages: [testWecomMessage({
-      id: msgid,
-      openKfId,
-      externalUserId,
-      text: 'preserve me',
-    })],
-  });
-  const claimed = initial.claimInbound({ messageKey }).message;
-  const finalized = initial.finalizeInboundBatch({
-    messageKey,
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: [{
-      sendIndex: 0,
-      source: 'codex_tool',
-      sentType: 'text',
-      payload: { msgtype: 'text', text: { content: 'preserved outbox' } },
-    }],
-  });
-  const attemptId = finalized.attempts[0]?.attemptId;
-  assert.ok(attemptId);
-  initial.close();
-
-  const legacy = new DatabaseSync(temporary.filePath);
-  legacy.exec(`
-    DROP INDEX send_status_idx;
-    DROP INDEX conversation_thread_idx;
-    CREATE INDEX send_status_idx
-      ON send_attempts(status, updated_at);
-    PRAGMA user_version = 1;
-  `);
-  legacy.close();
-
-  const upgraded = new SqliteStore({ filePath: temporary.filePath });
-  t.after(() => upgraded.close());
-  const version = upgraded.database.prepare('PRAGMA user_version').get() as {
-    user_version: number;
-  };
-  assert.equal(version.user_version, 3);
-  const indexColumns = upgraded.database
-    .prepare('PRAGMA index_info(send_status_idx)')
-    .all()
-    .map((row) => String((row as { name: unknown }).name));
-  assert.deepEqual(indexColumns, ['status', 'created_at', 'send_index']);
-  assert.equal(upgraded.getInbound(messageKey)?.status, 'ready');
-  assert.equal(upgraded.beginNextSend()?.attemptId, attemptId);
-  assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
-  assert.deepEqual(upgraded.foreignKeyCheck(), []);
 });

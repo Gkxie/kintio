@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import { createConfig } from '../../src/config.ts';
 import { createRuntime } from '../../src/runtime.ts';
@@ -12,7 +12,7 @@ function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-test('[DEP02] runtime keeps project Codex configuration isolated from the user configuration', async (t) => {
+test('runtime keeps project Codex configuration isolated from the user configuration', async (t) => {
   const temporary = await createTempSqlite(t, {
     prefix: 'wechat-runtime-',
     filename: 'wecom.sqlite',
@@ -28,7 +28,7 @@ test('[DEP02] runtime keeps project Codex configuration isolated from the user c
   const originalConfig = await fs.readFile(userConfigPath);
   const originalCodexHome = process.env.CODEX_HOME;
   process.env.CODEX_HOME = codexHome;
-  t.after(() => {
+  t.onTestFinished(() => {
     if (originalCodexHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = originalCodexHome;
   });
@@ -38,14 +38,9 @@ test('[DEP02] runtime keeps project Codex configuration isolated from the user c
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
     WECOM_CORP_ID: 'ww-runtime-test',
     WECOM_KF_SECRET: 'runtime-secret',
+    WECOM_MCP_BEARER_TOKEN: 'r'.repeat(32),
     WECOM_ALLOWED_USER_IDS: 'wm-runtime-test',
     WECOM_DB_FILE: temporary.filePath,
-    WECOM_STATE_FILE: path.join(temporary.directory, 'legacy-state.json'),
-    WECOM_LEGACY_JOURNAL_FILE: path.join(
-      temporary.directory,
-      'legacy-journal.sqlite',
-    ),
-    WECOM_BOT_PAUSE_FILE: path.join(temporary.directory, 'legacy-pause'),
     CODEX_MODEL: 'gpt-project-runtime',
     CODEX_REASONING_EFFORT: 'low',
     CODEX_WORKING_DIRECTORY: path.join(temporary.directory, 'codex-workspace'),
@@ -57,7 +52,7 @@ test('[DEP02] runtime keeps project Codex configuration isolated from the user c
     logger: { info() {}, warn() {}, error() {} },
   });
   let closed = false;
-  t.after(async () => {
+  t.onTestFinished(async () => {
     if (!closed) await runtime.close();
   });
 

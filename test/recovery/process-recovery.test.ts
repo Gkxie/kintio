@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import type { Serializable } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import test from 'node:test';
+import { test } from 'vitest';
 import { fileURLToPath } from 'node:url';
 
 import { acquireSingleInstanceLock } from '../../src/runtime/single-instance-lock.ts';
@@ -12,16 +12,12 @@ import {
 } from '../../src/state/sqlite-store.ts';
 import { startTestChild } from '../support/child-process.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
-import {
-  inspectAttempt,
-  inspectMeta,
-  setTestMeta,
-} from '../support/sqlite-inspect.ts';
+import { seedPendingAttempts } from '../support/pending-attempt.ts';
+import { inspectAttempt } from '../support/sqlite-inspect.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
 const workerMode = process.argv[2] || '';
-const typeStripExecArgv = ['--experimental-strip-types'] as const;
 
 interface WorkerMessage extends Record<string, Serializable> {
   type: string;
@@ -42,7 +38,8 @@ function sendToParent(
   if (typeof process.send !== 'function') {
     throw new Error('Recovery worker requires an IPC channel');
   }
-  process.send(message, callback);
+  if (callback) process.send(message, callback);
+  else process.send(message);
 }
 
 async function runLockWorker(lockFile: string): Promise<void> {
@@ -95,19 +92,22 @@ if (workerMode === '--lock-worker') {
 } else if (workerMode === '--sending-worker') {
   await runSendingWorker(process.argv[3] || '');
 } else {
-test('[DEP04] two real processes reject a live owner and recover its stale lock after SIGKILL', async (t) => {
+test('two real processes reject a live owner and recover its stale lock after SIGKILL', async (t) => {
     const temporary = await createTempSqlite(t, {
       prefix: 'wechat-process-lock-',
       filename: 'wecom.sqlite',
     });
     const lockFile = path.join(temporary.directory, 'wecom.lock');
     const seed = new SqliteStore({ filePath: temporary.filePath });
-    setTestMeta(seed.database, 'process_lock_sentinel', 'intact');
+    seed.ingestSyncPage({
+      openKfId: 'wk-lock-sentinel',
+      nextCursor: 'intact',
+      messages: [],
+    });
     seed.close();
 
     const first = startTestChild(t, currentFile, {
       args: ['--lock-worker', lockFile],
-      execArgv: typeStripExecArgv,
     });
     const firstOwner = await first.waitForMessage(
       (message): message is WorkerMessage =>
@@ -117,7 +117,6 @@ test('[DEP04] two real processes reject a live owner and recover its stale lock 
 
     const second = startTestChild(t, currentFile, {
       args: ['--lock-worker', lockFile],
-      execArgv: typeStripExecArgv,
     });
     const rejected = await second.waitForMessage(
       (message): message is WorkerMessage =>
@@ -136,7 +135,6 @@ test('[DEP04] two real processes reject a live owner and recover its stale lock 
 
     const recovered = startTestChild(t, currentFile, {
       args: ['--lock-worker', lockFile],
-      execArgv: typeStripExecArgv,
     });
     const recoveredOwner = await recovered.waitForMessage(
       (message): message is WorkerMessage =>
@@ -152,13 +150,13 @@ test('[DEP04] two real processes reject a live owner and recover its stale lock 
     await assert.rejects(() => fs.access(lockFile), { code: 'ENOENT' });
 
     const verified = new SqliteStore({ filePath: temporary.filePath });
-    t.after(() => verified.close());
-    assert.equal(inspectMeta(verified.database, 'process_lock_sentinel'), 'intact');
+    t.onTestFinished(() => verified.close());
+    assert.equal(verified.getCursor('wk-lock-sentinel'), 'intact');
     assert.deepEqual(verified.integrityCheck().map(Object.values), [['ok']]);
     assert.deepEqual(verified.foreignKeyCheck(), []);
   });
 
-test('[R01] SIGKILL after claiming a send changes sending to uncertain on startup without requeue', async (t) => {
+test('SIGKILL after claiming a send changes sending to uncertain on startup without requeue', async (t) => {
     const temporary = await createTempSqlite(t, {
       prefix: 'wechat-process-send-',
       filename: 'wecom.sqlite',
@@ -175,27 +173,21 @@ test('[R01] SIGKILL after claiming a send changes sending to uncertain on startu
       })],
     });
     const messageKey = stableMessageKey('wk-recovery', 'message-one');
-    const claimed = first.claimInbound({ messageKey }).message;
-    const finalized = first.finalizeInboundBatch({
-      messageKey,
-      expectedConversationEpoch: claimed.claimedConversationEpoch,
-      expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-      attempts: [
+    first.claimInbound({ messageKey });
+    const finalized = seedPendingAttempts(first, messageKey, [
         {
           sendIndex: 0,
           source: 'codex_tool',
           sentType: 'text',
           payload: { msgtype: 'text', text: { content: 'only once' } },
         },
-      ],
-    });
-    const attemptId = finalized.attempts[0]?.attemptId;
+      ]);
+    const attemptId = finalized[0]?.attemptId;
     assert.ok(attemptId);
     first.close();
 
     const sender = startTestChild(t, currentFile, {
       args: ['--sending-worker', temporary.filePath],
-      execArgv: typeStripExecArgv,
     });
     assert.deepEqual(await sender.waitForMessage('send-claimed'), {
       type: 'send-claimed',
@@ -208,7 +200,7 @@ test('[R01] SIGKILL after claiming a send changes sending to uncertain on startu
     });
 
     const recovered = new SqliteStore({ filePath: temporary.filePath });
-    t.after(() => recovered.close());
+    t.onTestFinished(() => recovered.close());
     assert.equal(inspectAttempt(recovered.database, attemptId)?.status, 'sending');
     const summary = recovered.recoverStartup();
     assert.equal(summary.uncertainSends, 1);

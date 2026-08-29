@@ -1,0 +1,106 @@
+name: CLA
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  evaluate:
+    name: CLA evaluation
+    if: >-
+      github.repository == 'Gkxie/kintio' &&
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: cla-evaluate-${{ github.repository_id }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Evaluate CLA signatures
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node --experimental-strip-types scripts/cla.ts
+
+  comment-preflight:
+    name: CLA comment preflight
+    if: >-
+      github.repository == 'Gkxie/kintio' &&
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.action == 'created' &&
+      (
+        (
+          github.event.comment.body == 'recheck' &&
+          (
+            github.event.comment.author_association == 'OWNER' ||
+            github.event.comment.author_association == 'MEMBER' ||
+            github.event.comment.author_association == 'COLLABORATOR'
+          )
+        ) ||
+        startsWith(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA')
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: cla-preflight-${{ github.repository_id }}-${{ github.event.issue.number }}-${{ github.event.comment.user.id }}
+      cancel-in-progress: true
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      mode: ${{ steps.preflight.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Check whether the comment can mutate CLA state
+        id: preflight
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node --experimental-strip-types scripts/cla.ts preflight
+
+  sign:
+    name: CLA signature
+    needs: comment-preflight
+    if: needs.comment-preflight.outputs.mode == 'sign'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    concurrency:
+      group: cla-sign-${{ github.repository_id }}
+      queue: max
+    permissions:
+      contents: write
+      pull-requests: write
+      statuses: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Record or recheck CLA signatures
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node --experimental-strip-types scripts/cla.ts

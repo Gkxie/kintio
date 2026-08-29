@@ -1,0 +1,75 @@
+<div align="center">
+
+# Kintio
+
+**把聊天通道连接到你掌控的 Agent。**
+
+[English](README.md) | 简体中文
+
+</div>
+
+这是本项目唯一的中文入口。详细文档、贡献流程与版本说明统一以英文维护。
+
+把 Kintio 部署在运行 Agent 的机器上，授权用户就能在微信等受支持的聊天入口中直接下达
+任务、补充或改变指令，并在原会话中收到结果。Kintio 负责连接聊天与 Agent，同时隔离不同
+通道的身份、状态和回复能力；当前 Agent Runtime 使用部署主机上已经登录的 Codex CLI。
+
+## 核心能力
+
+- 每个适配器身份使用独立 Agent Thread，不跨通道合并身份或历史。
+- 用户补充指令时可以调整正在执行的任务，避免旧指令排队产生过时回复。
+- SQLite Inbox 支持重启恢复，并优先处理实时消息。
+- MCP 动作只作用于当前会话，不向 Agent 暴露渠道密钥、原始用户标识或数据库路径。
+- 投递结果明确区分已受理、失败和不确定；结果不确定时不会盲目重发。
+
+目前一套部署共享一份 Agent Runtime 登录态，不是每个聊天用户绑定独立 Agent 凭据、额度和
+工作目录的多租户平台。
+
+## 当前适配器
+
+| 适配器 | 接收 | 发送 | 接入方式 |
+| --- | --- | --- | --- |
+| WeChat KF API | 文字、图片；其他类型转为明确摘要 | 文字、图片、链接、小程序、位置 | 公网 HTTPS 回调 |
+| Weixin iLink | 文字、图片；其他类型转为明确摘要 | 文字、图片 | 扫码绑定后长轮询 |
+
+## 最小启动步骤
+
+需要 Node.js 24+、`package.json` 固定版本的 pnpm 10、已安装并登录的 Codex CLI，以及至少一个
+受支持适配器的凭据。
+
+```bash
+corepack enable pnpm
+pnpm install --frozen-lockfile
+cp .env.example .env
+codex login status
+```
+
+`.env.example` 默认不启用任何适配器。请按英文[部署指南](docs/setup.md)生成强 MCP Token，
+并配置 WeChat KF API，或为已有 Weixin iLink 绑定设置 `ILINK_ENABLED=true`。
+
+```bash
+pnpm start
+```
+
+在另一个终端检查 HTTP Listener：
+
+```bash
+curl http://127.0.0.1:8888/healthz
+```
+
+返回 `ok` 只代表进程存活；投入使用前仍需按部署指南完成回调或绑定验证。
+
+## 英文文档
+
+- [Setup guide](docs/setup.md)：配置到收到第一条 Agent 回复。
+- [Architecture](docs/architecture.md)：消息链路、模块边界与身份隔离。
+- [Roadmap](ROADMAP.md)：长期方向和 `0.x` 优先级。
+- [Contributing guide](CONTRIBUTING.md)：参与方式与验证要求。
+- [Security policy](SECURITY.md)：信任边界与私密漏洞报告。
+- [Changelog](CHANGELOG.md)：用户可观察的版本变化。
+
+Kintio 处于 `0.x` 阶段，使用 [Apache License 2.0](LICENSE)。Weixin iLink 协议实现所涉及的
+第三方归属和许可证见 [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)。
+
+Kintio 是独立开源项目，与腾讯、微信、Weixin 及其他通道提供方不存在隶属、授权、背书
+或官方代表关系。

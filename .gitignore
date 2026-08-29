@@ -1,4 +1,6 @@
 .env
+.env.*
+!.env.example
 node_modules/
 dist/
 pnpm-debug.log*
@@ -6,9 +8,17 @@ pnpm-debug.log*
 *.pid
 coverage/
 data/
+*.db
+*.sqlite
+*.sqlite-*
+*.pem
+*.key
+*.p12
+*.pfx
 codex-workspace/*
 !codex-workspace/.agents/
 !codex-workspace/.agents/skills/
 !codex-workspace/.agents/skills/wechat-kf-reply-sop/
 !codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md
 .DS_Store
+.htaccess

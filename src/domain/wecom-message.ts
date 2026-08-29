@@ -4,7 +4,6 @@ import type { NormalizedMessage } from '../types.ts';
 export const MESSAGE_ORIGINS = {
   CUSTOMER: 'customer',
   SYSTEM: 'system',
-  HUMAN: 'human',
   UNKNOWN: 'unknown',
 } as const;
 
@@ -27,7 +26,7 @@ export const MESSAGE_TYPES = {
   EVENT: 'event',
   UNKNOWN: 'unknown',
 } as const;
-export type MessageType = (typeof MESSAGE_TYPES)[keyof typeof MESSAGE_TYPES];
+type MessageType = (typeof MESSAGE_TYPES)[keyof typeof MESSAGE_TYPES];
 
 export const CUSTOMER_MESSAGE_TYPES = Object.freeze([
   MESSAGE_TYPES.TEXT,
@@ -73,11 +72,6 @@ interface MergedItem {
   readonly summary: string;
 }
 
-const ORIGINS = new Map([
-  [3, MESSAGE_ORIGINS.CUSTOMER],
-  [4, MESSAGE_ORIGINS.SYSTEM],
-  [5, MESSAGE_ORIGINS.HUMAN],
-]);
 const KNOWN_TYPES = new Set(Object.values(MESSAGE_TYPES));
 const KNOWN_CUSTOMER_TYPES = new Set(CUSTOMER_MESSAGE_TYPES);
 const MAX_MERGED_ITEMS = 50;
@@ -106,8 +100,8 @@ function numberLabel(label: string, value: unknown): string {
 }
 
 function labeled(label: string, values: readonly string[]): string {
-  const detail = values.filter(Boolean).join('；');
-  return detail ? `[微信${label}] ${detail}` : `[微信${label}]`;
+  const detail = values.filter(Boolean).join('; ');
+  return detail ? `[WeChat ${label}] ${detail}` : `[WeChat ${label}]`;
 }
 
 function menuOptions(menu: LooseObject | undefined): string {
@@ -122,7 +116,7 @@ function menuOptions(menu: LooseObject | undefined): string {
       return clean(body.content || `[${type}]`, 256);
     })
     .filter(Boolean)
-    .join('、');
+    .join(', ');
 }
 
 function parseMergedItems(items: unknown, depth: number): readonly MergedItem[] {
@@ -145,7 +139,7 @@ function parseMergedItems(items: unknown, depth: number): readonly MergedItem[] 
     return Object.freeze({
       sendTime: Number(item.send_time || 0),
       type: String(item.msgtype || payload?.msgtype || 'unknown'),
-      senderName: clean(item.sender_name || '未知发送者', 256),
+      senderName: clean(item.sender_name || 'Unknown sender', 256),
       summary: summarizePayload(payload, depth),
     });
   });
@@ -154,15 +148,15 @@ function parseMergedItems(items: unknown, depth: number): readonly MergedItem[] 
 function mergedSummary(mergedValue: unknown, depth: number): string {
   const merged = asObject(mergedValue);
   if (depth >= MAX_MERGED_DEPTH) {
-    return '[微信聊天记录：已达嵌套深度上限]';
+    return '[WeChat chat history: nesting limit reached]';
   }
 
   const title = clean(merged?.title, 256);
   const items = parseMergedItems(merged?.item, depth + 1);
   const lines = [
-    `[微信聊天记录${title ? `：${title}` : ''}]`,
+    `[WeChat chat history${title ? `: ${title}` : ''}]`,
     ...items.map(
-      (item, index) => `${index + 1}. ${item.senderName}：${item.summary}`,
+      (item, index) => `${index + 1}. ${item.senderName}: ${item.summary}`,
     ),
   ];
   return truncateUtf8(lines.join('\n'), MAX_SUMMARY_BYTES, '…');
@@ -172,7 +166,7 @@ function summarizePayload(
   payload: RawMessage | null,
   depth = 0,
 ): string {
-  if (!payload || typeof payload !== 'object') return '[微信消息：内容无法解析]';
+  if (!payload || typeof payload !== 'object') return '[WeChat message: unreadable payload]';
 
   const type = String(payload.msgtype || 'unknown');
   switch (type) {
@@ -180,65 +174,65 @@ function summarizePayload(
       const content = clean(payload.text?.content, MAX_SUMMARY_BYTES);
       const menuId = clean(payload.text?.menu_id, 128);
       return menuId
-        ? `客户点击了菜单选项：${content || '[空文本]'}（menu_id：${menuId}）`
-        : content || '[微信文本：空]';
+        ? `The participant selected a menu item: ${content || '[empty text]'} (menu_id: ${menuId})`
+        : content || '[WeChat text: empty]';
     }
     case MESSAGE_TYPES.IMAGE:
-      return '[微信图片：已作为原生图像输入附加]';
+      return '[WeChat image: attached as native image input]';
     case MESSAGE_TYPES.VOICE:
-      return '[微信语音：未下载、未转写]';
+      return '[WeChat voice: not downloaded or transcribed]';
     case MESSAGE_TYPES.VIDEO:
-      return '[微信视频：未下载、未观看或转写]';
+      return '[WeChat video: not downloaded, watched, or transcribed]';
     case MESSAGE_TYPES.FILE:
-      return labeled('文件', [
+      return labeled('file', [
         clean(payload.file?.filename, 256),
         payload.file?.file_size
-          ? `大小 ${clean(payload.file.file_size, 64)}`
+          ? `size ${clean(payload.file.file_size, 64)}`
           : '',
-        '内容未下载或打开',
+        'content not downloaded or opened',
       ]);
     case MESSAGE_TYPES.LOCATION:
-      return labeled('位置', [
+      return labeled('location', [
         clean(payload.location?.name, 256),
         clean(payload.location?.address, 512),
-        numberLabel('纬度 ', payload.location?.latitude),
-        numberLabel('经度 ', payload.location?.longitude),
+        numberLabel('latitude ', payload.location?.latitude),
+        numberLabel('longitude ', payload.location?.longitude),
       ]);
     case MESSAGE_TYPES.LINK:
-      return labeled('链接', [
+      return labeled('link', [
         clean(payload.link?.title, 256),
         clean(payload.link?.desc, 512),
         clean(payload.link?.url, 2048),
       ]);
     case MESSAGE_TYPES.BUSINESS_CARD:
-      return '[微信企业名片：未解析联系人详情]';
+      return '[WeChat business card: contact details not parsed]';
     case MESSAGE_TYPES.MINIPROGRAM:
-      return labeled('小程序', [
+      return labeled('mini program', [
         clean(payload.miniprogram?.title, 256),
         clean(payload.miniprogram?.appid, 128),
         clean(payload.miniprogram?.pagepath, 1024),
       ]);
     case MESSAGE_TYPES.MSGMENU:
-      return labeled('菜单', [
+      return labeled('menu', [
         clean(payload.msgmenu?.head_content, 512),
         menuOptions(payload.msgmenu),
         clean(payload.msgmenu?.tail_content, 512),
       ]);
     case MESSAGE_TYPES.CHANNELS_SHOP_PRODUCT:
-      return labeled('视频号商品', [
+      return labeled('Channels product', [
         clean(payload.channels_shop_product?.title, 256),
         payload.channels_shop_product?.sales_price
-          ? `价格（分）${clean(payload.channels_shop_product.sales_price, 64)}`
+          ? `price (cents) ${clean(payload.channels_shop_product.sales_price, 64)}`
           : '',
         clean(payload.channels_shop_product?.shop_nickname, 256),
         payload.channels_shop_product?.product_id
-          ? `商品ID ${clean(payload.channels_shop_product.product_id, 128)}`
+          ? `product ID ${clean(payload.channels_shop_product.product_id, 128)}`
           : '',
       ]);
     case MESSAGE_TYPES.CHANNELS_SHOP_ORDER:
-      return labeled('视频号订单', [
+      return labeled('Channels order', [
         payload.channels_shop_order?.order_id
-          ? `订单号 ${clean(payload.channels_shop_order.order_id, 128)}`
+          ? `order ID ${clean(payload.channels_shop_order.order_id, 128)}`
           : '',
         clean(payload.channels_shop_order?.product_titles, 512),
         clean(payload.channels_shop_order?.price_wording, 128),
@@ -248,17 +242,17 @@ function summarizePayload(
     case MESSAGE_TYPES.MERGED_MESSAGE:
       return mergedSummary(payload.merged_msg, depth);
     case MESSAGE_TYPES.CHANNELS:
-      return labeled('视频号内容', [
+      return labeled('Channels content', [
         clean(payload.channels?.nickname, 256),
         clean(payload.channels?.title, 512),
         payload.channels?.sub_type
-          ? `类型 ${clean(payload.channels.sub_type, 64)}`
+          ? `type ${clean(payload.channels.sub_type, 64)}`
           : '',
       ]);
     case MESSAGE_TYPES.NOTE:
-      return '[微信笔记：接口未返回可读正文]';
+      return '[WeChat note: API returned no readable body]';
     default:
-      return `[微信${clean(type, 128) || 'unknown'}消息：内容未解析]`;
+      return `[WeChat ${clean(type, 128) || 'unknown'} message: content not parsed]`;
   }
 }
 
@@ -311,13 +305,18 @@ export function normalizeWecomMessage(
     ? (rawType as MessageType)
     : MESSAGE_TYPES.UNKNOWN;
   const event = asObject(raw.event);
+  const origin = Number(raw.origin);
   const mediaId =
     type === MESSAGE_TYPES.IMAGE ? String(raw.image?.media_id || '') : '';
   const text =
     type === MESSAGE_TYPES.TEXT ? String(raw.text?.content || '') : '';
   const message = {
     id: String(raw.msgid || ''),
-    origin: ORIGINS.get(Number(raw.origin)) || MESSAGE_ORIGINS.UNKNOWN,
+    origin: origin === 3
+      ? MESSAGE_ORIGINS.CUSTOMER
+      : origin === 4
+        ? MESSAGE_ORIGINS.SYSTEM
+        : MESSAGE_ORIGINS.UNKNOWN,
     type,
     rawType,
     sentAt: Number(raw.send_time || 0),
@@ -326,16 +325,14 @@ export function normalizeWecomMessage(
       index: Number.isInteger(index) && index >= 0 ? index : 0,
     }),
     conversation: Object.freeze({
-      openKfId: String(raw.open_kfid || event.open_kfid || fallbackOpenKfId),
-      externalUserId: String(raw.external_userid || event.external_userid || ''),
-    }),
-    actor: Object.freeze({
-      servicerUserId: String(raw.servicer_userid || event.servicer_userid || ''),
+      channel: 'wechat_kf',
+      accountKey: String(raw.open_kfid || event.open_kfid || fallbackOpenKfId),
+      peerId: String(raw.external_userid || event.external_userid || ''),
     }),
     text,
     summary:
       type === MESSAGE_TYPES.EVENT
-        ? `[微信系统事件：${clean(event.event_type || 'unknown', 128)}]`
+        ? `[WeChat system event: ${clean(event.event_type || 'unknown', 128)}]`
         : summarizePayload({ ...raw, msgtype: type }),
     attributes: Object.freeze(messageAttributes(type, raw)),
     attachments: Object.freeze(
@@ -361,5 +358,5 @@ export function isSupportedCustomerMessage(
 export function renderMessageForCodex(
   message: Pick<NormalizedMessage, 'summary' | 'text'>,
 ): string {
-  return String(message?.summary || message?.text || '[微信消息：无可读摘要]');
+  return String(message?.summary || message?.text || '[WeChat message: no readable summary]');
 }

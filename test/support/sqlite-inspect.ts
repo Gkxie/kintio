@@ -5,18 +5,20 @@ import type {
   JsonObject,
   SendStatus,
 } from '../../src/state/sqlite-store.ts';
+import type { ChatChannel } from '../../src/types.ts';
 
 interface AttemptRow {
   attempt_key: string;
   source_message_key: string;
   open_kfid: string;
   external_userid: string;
+  channel: ChatChannel;
+  reply_window_id: number | null;
   send_index: number;
   source: string;
   sent_type: string;
   payload_json: string | null;
   metadata_json: string | null;
-  fallback_for_index: number | null;
   fingerprint: string;
   client_message_id: string;
   status: SendStatus;
@@ -44,14 +46,13 @@ function map(row: AttemptRow): AttemptRecord {
     messageKey: row.source_message_key,
     openKfId: row.open_kfid,
     externalUserId: row.external_userid,
+    channel: row.channel,
+    replyWindowId: Number(row.reply_window_id || 0),
     sendIndex: row.send_index,
     source: row.source,
     type: row.sent_type,
     ...(payload ? { payload } : {}),
     ...(metadata ? { metadata } : {}),
-    ...(row.fallback_for_index === null
-      ? {}
-      : { fallbackForIndex: row.fallback_for_index }),
     fingerprint: row.fingerprint,
     clientMessageId: row.client_message_id,
     status: row.status,
@@ -86,28 +87,7 @@ export function inspectAttempts(
     : database.prepare(`
         SELECT * FROM send_attempts ORDER BY created_at, send_index
       `).all();
-  return (rows as AttemptRow[]).map(map);
-}
-
-export function inspectMeta(
-  database: DatabaseSync,
-  key: string,
-): string | undefined {
-  const row = database.prepare(`
-    SELECT value FROM schema_meta WHERE key = ?
-  `).get(key) as { value: string } | undefined;
-  return row?.value;
-}
-
-export function setTestMeta(
-  database: DatabaseSync,
-  key: string,
-  value: string,
-): void {
-  database.prepare(`
-    INSERT INTO schema_meta (key, value, updated_at) VALUES (?, ?, 0)
-    ON CONFLICT(key) DO UPDATE SET value = excluded.value
-  `).run(key, value);
+  return (rows as unknown as AttemptRow[]).map(map);
 }
 
 export function inspectSchemaVersion(database: DatabaseSync): number {

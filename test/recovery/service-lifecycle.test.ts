@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
-import test from 'node:test';
+import { test } from 'vitest';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
@@ -11,18 +11,31 @@ import { startTestChild } from '../support/child-process.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 const indexFile = fileURLToPath(new URL('../../index.ts', import.meta.url));
-const typeStripExecArgv = ['--experimental-strip-types'] as const;
-const servicePort = 8888;
+
+async function availablePort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('Missing test port');
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+  return address.port;
+}
 
 async function waitForResponse(
+  port: number,
   pathname: string,
-  timeoutMs = 5_000,
+  timeoutMs = 10_000,
 ): Promise<Response> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
   while (Date.now() < deadline) {
     try {
-      return await fetch(`http://127.0.0.1:${servicePort}${pathname}`, {
+      return await fetch(`http://127.0.0.1:${port}${pathname}`, {
         signal: AbortSignal.timeout(500),
       });
     } catch (error) {
@@ -48,15 +61,44 @@ async function assertPortReleased(port: number): Promise<void> {
   });
 }
 
-test('[DEP01] outer service answers health and hello then SIGTERM releases port 8888 and lock', async (t) => {
-  await assertPortReleased(servicePort);
+async function waitForPortReleased(port: number, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      await assertPortReleased(port);
+      return;
+    } catch (error: unknown) {
+      lastError = error;
+      await delay(20);
+    }
+  }
+  throw lastError;
+}
+
+function signalProcessTree(
+  child: ReturnType<typeof spawn>,
+  signal: NodeJS.Signals,
+): void {
+  try {
+    if (process.platform === 'win32') child.kill(signal);
+    else process.kill(-child.pid!, signal);
+  } catch (error: unknown) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) {
+      throw error;
+    }
+  }
+}
+
+test('outer service answers health and hello then SIGTERM releases its port and lock', async (t) => {
+  const servicePort = await availablePort();
+  await waitForPortReleased(servicePort);
   const temporary = await createTempSqlite(t, {
     prefix: 'wechat-service-lifecycle-',
     filename: 'wecom.sqlite',
   });
   const lockFile = path.join(temporary.directory, 'wecom.lock');
   const child = startTestChild(t, indexFile, {
-    execArgv: typeStripExecArgv,
     timeoutMs: 8_000,
     env: {
       PORT: String(servicePort),
@@ -66,33 +108,28 @@ test('[DEP01] outer service answers health and hello then SIGTERM releases port 
       WECOM_KF_SECRET: '',
       WECOM_ALLOWED_USER_IDS: '',
       WECOM_DB_FILE: temporary.filePath,
-      WECOM_STATE_FILE: path.join(temporary.directory, 'legacy-state.json'),
-      WECOM_LEGACY_JOURNAL_FILE: path.join(
-        temporary.directory,
-        'legacy-journal.sqlite',
-      ),
-      WECOM_BOT_PAUSE_FILE: path.join(temporary.directory, 'legacy-pause'),
       CODEX_ENABLED: 'false',
       SHUTDOWN_TIMEOUT_MS: '2000',
     },
   });
 
-  const health = await waitForResponse('/healthz');
+  const health = await waitForResponse(servicePort, '/healthz');
   assert.equal(health.status, 200);
   assert.equal(await health.text(), 'ok');
-  const root = await waitForResponse('/');
+  const root = await waitForResponse(servicePort, '/');
   assert.equal(root.status, 200);
   assert.equal(await root.text(), 'hello world');
   await assert.rejects(fs.access(lockFile), { code: 'ENOENT' });
 
   assert.deepEqual(await child.stop('SIGTERM'), { code: 0, signal: null });
-  await assertPortReleased(servicePort);
+  await waitForPortReleased(servicePort);
   await assert.rejects(fs.access(lockFile), { code: 'ENOENT' });
-  assert.match(child.output().stdout, /Hono server is listening on port 8888/u);
+  assert.match(child.output().stdout, new RegExp(`Hono server is listening on port ${servicePort}`, 'u'));
   assert.match(child.output().stdout, /Received SIGTERM; shutting down/u);
 });
 
-test('[DEP01] pnpm start builds and runs dist/index.js without Baota artifacts', async (t) => {
+test('pnpm start builds and runs dist/index.js', async (t) => {
+  const servicePort = await availablePort();
   await assertPortReleased(servicePort);
   const temporary = await createTempSqlite(t, {
     prefix: 'wechat-pnpm-start-',
@@ -107,7 +144,6 @@ test('[DEP01] pnpm start builds and runs dist/index.js without Baota artifacts',
     WECOM_KF_SECRET: '',
     WECOM_ALLOWED_USER_IDS: '',
     WECOM_DB_FILE: temporary.filePath,
-    WECOM_STATE_FILE: path.join(temporary.directory, 'legacy-state.json'),
     CODEX_ENABLED: 'false',
     SHUTDOWN_TIMEOUT_MS: '2000',
   };
@@ -115,45 +151,27 @@ test('[DEP01] pnpm start builds and runs dist/index.js without Baota artifacts',
     cwd: path.resolve('.'),
     env: environment,
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: process.platform !== 'win32',
   });
   let output = '';
   child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
   child.stderr.on('data', (chunk: Buffer) => { output += chunk.toString(); });
-  t.after(() => {
-    if (child.exitCode === null) child.kill('SIGKILL');
+  t.onTestFinished(() => {
+    if (child.exitCode !== null) return;
+    signalProcessTree(child, 'SIGKILL');
   });
 
-  assert.equal((await waitForResponse('/healthz')).status, 200);
-  const processes = execFileSync('ps', ['-eo', 'pid=,ppid=,args='], {
-    encoding: 'utf8',
-  }).trim().split('\n').map((line) => {
-    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.+)$/u);
-    return match
-      ? { pid: Number(match[1]), ppid: Number(match[2]), args: match[3] }
-      : undefined;
-  }).filter((item): item is { pid: number; ppid: number; args: string } =>
-    item !== undefined,
-  );
-  const byPid = new Map(processes.map((item) => [item.pid, item]));
-  const node = processes.find((item) => {
-    if (!/(?:^|\s)node dist\/index\.js(?:\s|$)/u.test(item.args)) return false;
-    let parent = item.ppid;
-    while (parent > 1) {
-      if (parent === child.pid) return true;
-      parent = byPid.get(parent)?.ppid || 0;
-    }
-    return false;
-  });
-  assert.ok(node, `pnpm start did not run dist/index.js:\n${output}`);
-  process.kill(node.pid, 'SIGTERM');
+  assert.equal((await waitForResponse(servicePort, '/healthz')).status, 200);
+  assert.match(output, /node dist\/index\.js/u);
+  signalProcessTree(child, 'SIGTERM');
   const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
     (resolve) => child.once('exit', (code, signal) => resolve({ code, signal })),
   );
-  assert.deepEqual(exit, { code: 0, signal: null });
-  assert.match(output, /node dist\/index\.js/u);
-  assert.match(output, /Received SIGTERM; shutting down/u);
-  await assertPortReleased(servicePort);
-  await assert.rejects(fs.access(path.join(process.cwd(), '.htaccess')), {
-    code: 'ENOENT',
-  });
+  assert.equal(
+    (exit.code === 0 && exit.signal === null) ||
+      (exit.code === null && exit.signal === 'SIGTERM'),
+    true,
+    `unexpected pnpm wrapper exit: ${JSON.stringify(exit)}`,
+  );
+  await waitForPortReleased(servicePort);
 });

@@ -2,21 +2,18 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
-import type { TestContext } from 'node:test';
+import { describe, test } from 'vitest';
+import type { TestContext } from 'vitest';
 
 import {
   CUSTOMER_MESSAGE_TYPES,
   normalizeWecomMessage,
 } from '../../src/domain/wecom-message.ts';
 import {
-  type AgentCompletion,
   type AgentInput,
-  type AgentSubmission,
-} from '../../src/services/codex-agent.ts';
+} from '../../src/agent/runtime.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { DeliveryService } from '../../src/services/delivery-service.ts';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
+import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import type { WecomApiClient } from '../../src/services/wecom-api.ts';
 import {
   SqliteStore,
@@ -24,15 +21,19 @@ import {
 } from '../../src/state/sqlite-store.ts';
 import type { ResolvedImage } from '../../src/types.ts';
 import { inspectAttempts } from '../support/sqlite-inspect.ts';
+import {
+  SimulatedToolAgent,
+  type SimulatedAgentCompletion,
+  type SimulatedAgentRuntime,
+  type SimulatedAgentSubmission,
+} from '../support/executing-agent.ts';
 
-type ProcessorAgent = ConstructorParameters<
-  typeof ConversationProcessor
->[0]['codexAgent'];
+type ProcessorAgent = SimulatedAgentRuntime;
 type ProcessorMediaGateway = ConstructorParameters<
   typeof ConversationProcessor
 >[0]['mediaGateway'];
 type PreparerMediaGateway = ConstructorParameters<
-  typeof OutboundPreparer
+  typeof WechatKfToolExecutor
 >[0]['mediaGateway'];
 type PreparedSendInput = Parameters<WecomApiClient['sendPreparedMessage']>[0];
 
@@ -138,7 +139,6 @@ interface Harness {
   readonly directory: string;
   readonly store: SqliteStore;
   readonly processor: ConversationProcessor;
-  readonly delivery: DeliveryService;
   readonly sent: PreparedSendInput[];
   ingest(raw: Record<string, unknown>, openKfId?: string): string | undefined;
   process(raw: Record<string, unknown>, openKfId?: string): Promise<string | undefined>;
@@ -156,17 +156,13 @@ async function createHarness(
     filePath: path.join(directory, 'wecom.sqlite'),
   });
   const sent: PreparedSendInput[] = [];
-  const delivery = new DeliveryService({
-    store,
-    logger: { info() {}, warn() {}, error() {} },
-    apiClient: {
-      async sendPreparedMessage(input: PreparedSendInput) {
-        sent.push(structuredClone(input));
-        options.onSend?.(input);
-        return { msgid: `accepted-${sent.length}` };
-      },
+  const apiClient = {
+    async sendPreparedMessage(input: PreparedSendInput) {
+      sent.push(structuredClone(input));
+      options.onSend?.(input);
+      return { msgid: `accepted-${sent.length}` };
     },
-  });
+  };
   const mediaGateway: ProcessorMediaGateway & PreparerMediaGateway = {
     resolveForCodex:
       options.resolveForCodex || (async () => []),
@@ -180,16 +176,22 @@ async function createHarness(
       return 'thumbnail-image';
     },
   };
-  const outboundPreparer = new OutboundPreparer({
+  const channel = new WechatKfToolExecutor({
+    store,
+    logger: { info() {}, warn() {}, error() {} },
+    apiClient,
     mediaGateway,
-    spoolDirectory: path.join(directory, 'spool'),
+    observeMs: 0,
+  });
+  const agent = new SimulatedToolAgent({
+    inner: options.createAgent(store),
+    tools: channel,
   });
   const processor = new ConversationProcessor({
     store,
-    codexAgent: options.createAgent(store),
+    agent,
     mediaGateway,
-    outboundPreparer,
-    delivery,
+    channel,
     allowedUserIds: options.allowedUserIds || [],
     authorization: options.authorization || {},
     logger: { info() {}, warn() {}, error() {} },
@@ -229,20 +231,25 @@ async function createHarness(
 
   async function idle(): Promise<void> {
     await processor.waitForIdle();
-    await delivery.waitForIdle();
+    await channel.waitForIdle();
   }
 
-  t.after(async () => {
+  t.onTestFinished(async () => {
     await processor.close();
-    await delivery.close();
+    await channel.close();
     store.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
-  return { directory, store, processor, delivery, sent, ingest, process, idle };
+  return { directory, store, processor, sent, ingest, process, idle };
 }
 
 function forbiddenAgent(calls: { value: number }): ProcessorAgent {
   return {
+    async ensureThread(_conversationId, threadId) {
+      calls.value += 1;
+      return threadId || 'thread-forbidden';
+    },
+    activePrimary() { return undefined; },
     async submit(): Promise<never> {
       calls.value += 1;
       throw new Error('Unauthorized input must not invoke Codex');
@@ -276,7 +283,7 @@ function rawCustomer({
   };
 }
 
-test('[A01] every known unauthorized customer type is silent before Codex and media work', async (t) => {
+test('every known unauthorized customer type is silent before Codex and media work', async (t) => {
   const codexCalls = { value: 0 };
   const mediaCalls = { value: 0 };
   const harness = await createHarness(t, {
@@ -306,9 +313,16 @@ test('[A01] every known unauthorized customer type is silent before Codex and me
   assert.equal(mediaCalls.value, 0);
   assert.equal(harness.sent.length, 0);
   assert.ok(keys.every((key) => harness.store.getInbound(key)?.status === 'ignored'));
+  assert.ok(keys.every((key) => {
+    const inbound = harness.store.getInbound(key);
+    return inbound && harness.store.getConversation(
+      inbound.openKfId,
+      inbound.externalUserId,
+    )?.threadId === '';
+  }));
 });
 
-test('[A02] exact authorization requires unique consecutive triggers within one open_kfid', async (t) => {
+test('exact authorization requires unique consecutive triggers within one open_kfid', async (t) => {
   const codexCalls = { value: 0 };
   const mediaCalls = { value: 0 };
   const harness = await createHarness(t, {
@@ -394,34 +408,28 @@ test('[A02] exact authorization requires unique consecutive triggers within one 
 
 class ConcurrentAgent implements ProcessorAgent {
   readonly inputs: AgentInput[] = [];
-  readonly firstCompletion = deferred<AgentCompletion>();
-  readonly store: SqliteStore;
+  readonly firstCompletion = deferred<SimulatedAgentCompletion>();
+  #threadSequence = 0;
 
-  constructor(store: SqliteStore) {
-    this.store = store;
+  async ensureThread(_conversationId: string, threadId: string): Promise<string> {
+    this.#threadSequence += 1;
+    return threadId || `thread-concurrent-${this.#threadSequence}`;
   }
 
-  async submit(input: AgentInput): Promise<AgentSubmission> {
+  activePrimary(): undefined { return undefined; }
+
+  async submit(input: AgentInput): Promise<SimulatedAgentSubmission> {
     this.inputs.push(input);
-    const { openKfId, externalUserId } = input.message.conversation;
-    const claimed = this.store.claimInbound({
-      messageKey: input.message.messageKey,
-      clientInputId: input.message.messageKey,
-    }).message;
-    const threadId = `thread-${externalUserId}`;
-    this.store.setConversationThread({ openKfId, externalUserId, threadId });
-    const completion = externalUserId === 'wm-a'
+    const completion = this.inputs.length === 1
       ? this.firstCompletion.promise
-      : Promise.resolve<AgentCompletion>({
-          candidates: [{ type: 'text', content: 'reply-b' }],
-          mediaCatalog: input.mediaCatalog || [],
-          expectedConversationEpoch: claimed.claimedConversationEpoch,
-          expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
+      : Promise.resolve<SimulatedAgentCompletion>({
+          replies: [{ type: 'text', content: 'reply-b' }],
         });
     return {
       kind: 'started',
       primaryMessageKey: input.message.messageKey,
-      turnId: `turn-${externalUserId}`,
+      turnId: `turn-${this.inputs.length}`,
+      threadId: input.threadId,
       completion,
     };
   }
@@ -430,20 +438,194 @@ class ConcurrentAgent implements ProcessorAgent {
   async abort(): Promise<void> {}
 }
 
-test('[C01][S07] a slow customer does not block another isolated thread or media catalog', async (t) => {
+class WindowAgent implements ProcessorAgent {
+  readonly inputs: AgentInput[] = [];
+  readonly completions: Array<Deferred<SimulatedAgentCompletion>> = [];
+
+  async ensureThread(conversationId: string, threadId: string): Promise<string> {
+    return threadId || `thread-${conversationId}`;
+  }
+
+  activePrimary(): undefined { return undefined; }
+
+  async submit(input: AgentInput): Promise<SimulatedAgentSubmission> {
+    this.inputs.push(input);
+    const completion = deferred<SimulatedAgentCompletion>();
+    this.completions.push(completion);
+    return {
+      kind: 'started',
+      primaryMessageKey: input.message.messageKey,
+      turnId: `window-turn-${this.inputs.length}`,
+      threadId: input.threadId,
+      completion: completion.promise,
+    };
+  }
+
+  async close(): Promise<void> {}
+  async abort(): Promise<void> {}
+}
+
+class PreemptibleAgent implements ProcessorAgent {
+  readonly inputs: AgentInput[] = [];
+  readonly completions = new Map<string, Deferred<SimulatedAgentCompletion>>();
+  active = 0;
+  maxActive = 0;
+
+  async ensureThread(conversationId: string, threadId: string): Promise<string> {
+    return threadId || `thread-${conversationId}`;
+  }
+
+  activePrimary(): undefined { return undefined; }
+
+  async submit(input: AgentInput): Promise<SimulatedAgentSubmission> {
+    this.inputs.push(input);
+    const completion = deferred<SimulatedAgentCompletion>();
+    this.completions.set(input.conversationId, completion);
+    this.active += 1;
+    this.maxActive = Math.max(this.maxActive, this.active);
+    void completion.promise.finally(() => { this.active -= 1; }).catch(() => undefined);
+    return {
+      kind: 'started',
+      primaryMessageKey: input.message.messageKey,
+      turnId: `preempt-turn-${this.inputs.length}`,
+      threadId: input.threadId,
+      completion: completion.promise,
+    };
+  }
+
+  async interrupt(conversationId: string): Promise<boolean> {
+    const completion = this.completions.get(conversationId);
+    if (!completion) return false;
+    completion.reject(new Error('low-priority turn interrupted'));
+    return true;
+  }
+
+  async close(): Promise<void> {}
+  async abort(): Promise<void> {}
+}
+
+test('the eleventh live conversation is notified and waits for a Codex slot', async (t) => {
+  const queueNotice = deferred<void>();
+  let agent: WindowAgent | undefined;
+  const harness = await createHarness(t, {
+    createAgent: () => {
+      agent = new WindowAgent();
+      return agent;
+    },
+    allowedUserIds: Array.from({ length: 11 }, (_, index) => `wm-window-${index}`),
+    onSend: (input) => {
+      const text = input.payload.text as { content?: unknown } | undefined;
+      if (text?.content === 'Your conversation is queued. Please wait.') queueNotice.resolve();
+    },
+  });
+  const keys = Array.from({ length: 11 }, (_, index) => harness.ingest(
+    rawCustomer({
+      msgid: `window-${index}`,
+      externalUserId: `wm-window-${index}`,
+      payload: { text: { content: `问题${index}` } },
+    }),
+  ));
+  assert.ok(keys.every(Boolean));
+  const tasks = keys.map((key) => harness.processor.enqueue(key!));
+  await Promise.all(tasks.slice(0, 10));
+  await queueNotice.promise;
+  assert.ok(agent);
+  assert.equal(agent.inputs.length, 10);
+
+  agent.completions[0]?.resolve({
+    replies: [{ type: 'text', content: '第一个会话完成' }],
+  });
+  await tasks[10];
+  assert.equal(agent.inputs.length, 11);
+  for (const completion of agent.completions.slice(1)) {
+    completion.resolve({ replies: [{ type: 'text', content: '会话完成' }] });
+  }
+  await harness.idle();
+
+  const queuedKey = keys[10]!;
+  assert.deepEqual(
+    harness.store.listMessageAttempts(queuedKey).map((attempt) => ({
+      source: attempt.source,
+      sendIndex: attempt.sendIndex,
+      status: attempt.status,
+    })),
+    [
+      { source: 'queue_notice', sendIndex: 0, status: 'accepted' },
+      { source: 'mcp_tool', sendIndex: 1, status: 'accepted' },
+    ],
+  );
+});
+
+test('a new live customer preempts a different deferred conversation', async (t) => {
+  const queueNotice = deferred<void>();
+  let agent: PreemptibleAgent | undefined;
+  const harness = await createHarness(t, {
+    createAgent: () => {
+      agent = new PreemptibleAgent();
+      return agent;
+    },
+    allowedUserIds: ['wm-backlog', 'wm-live'],
+    onSend: (input) => {
+      const text = input.payload.text as { content?: unknown } | undefined;
+      if (text?.content === 'Your conversation is queued. Please wait.') queueNotice.resolve();
+    },
+  });
+  const backlogKey = harness.ingest(rawCustomer({
+    msgid: 'deferred-backlog',
+    externalUserId: 'wm-backlog',
+    payload: { text: { content: '遗漏问题' } },
+  }));
+  assert.ok(backlogKey);
+  harness.store.database.prepare(`
+    UPDATE inbound_messages SET deferred = 1 WHERE message_key = ?
+  `).run(backlogKey);
+  const backlog = harness.store.activateNextDeferredConversation();
+  assert.equal(backlog.length, 1);
+  const recovery = harness.processor.recover(backlog, { priority: 'low' });
+  while (!agent || agent.inputs.length === 0) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.ok(agent);
+  assert.equal(agent.inputs.length, 1);
+
+  const liveKey = harness.ingest(rawCustomer({
+    msgid: 'live-priority',
+    externalUserId: 'wm-live',
+    payload: { text: { content: '刚进线' } },
+  }));
+  assert.ok(liveKey);
+  await Promise.all([
+    harness.processor.enqueue(liveKey),
+    queueNotice.promise,
+  ]);
+  assert.equal(agent.inputs.length, 2);
+  const liveInput = agent.inputs[1]!;
+  agent.completions.get(liveInput.conversationId)?.resolve({
+    replies: [{ type: 'text', content: '优先回复' }],
+  });
+  await recovery;
+  await harness.idle();
+
+  assert.equal(agent.maxActive, 1);
+  assert.equal(harness.store.getInbound(backlogKey)?.status, 'received');
+  assert.equal(harness.store.getInbound(backlogKey)?.deferred, true);
+  assert.equal(harness.store.getInbound(liveKey)?.status, 'completed');
+});
+
+test('a slow customer does not block another isolated thread or media catalog', async (t) => {
   const bSent = deferred<void>();
   let agent: ConcurrentAgent | undefined;
   const resolved = new Map<string, Buffer>();
   const pngA = Buffer.from('89504e470d0a1a0a01010101', 'hex');
   const pngB = Buffer.from('89504e470d0a1a0a02020202', 'hex');
   const harness = await createHarness(t, {
-    createAgent: (store) => {
-      agent = new ConcurrentAgent(store);
+    createAgent: () => {
+      agent = new ConcurrentAgent();
       return agent;
     },
     allowedUserIds: ['wm-a', 'wm-b'],
     resolveForCodex: async (message): Promise<readonly ResolvedImage[]> => {
-      const bytes = message.conversation.externalUserId === 'wm-a' ? pngA : pngB;
+      const bytes = message.conversation.peerId === 'wm-a' ? pngA : pngB;
       resolved.set(message.messageKey, bytes);
       return [{ kind: 'image', bytes, contentType: 'image/png' }];
     },
@@ -497,55 +679,36 @@ test('[C01][S07] a slow customer does not block another isolated thread or media
   assert.deepEqual(resolved.get(keyB), pngB);
 
   agent.firstCompletion.resolve({
-    candidates: [{ type: 'text', content: 'reply-a' }],
-    mediaCatalog: [],
-    expectedConversationEpoch: 0,
-    expectedRuntimeEpoch: 0,
+    replies: [{ type: 'text', content: 'reply-a' }],
   });
   await harness.idle();
   assert.deepEqual(harness.sent.map((item) => item.toUser), ['wm-b', 'wm-a']);
 });
 
 class SteeringAgent implements ProcessorAgent {
-  readonly completion = deferred<AgentCompletion>();
+  readonly completion = deferred<SimulatedAgentCompletion>();
   primaryMessageKey = '';
   turnId = 'turn-steering';
   steerCount = 0;
   latestMediaCatalog: AgentInput['mediaCatalog'] = [];
-  readonly store: SqliteStore;
-
-  constructor(store: SqliteStore) {
-    this.store = store;
+  async ensureThread(_conversationId: string, threadId: string): Promise<string> {
+    return threadId || 'thread-steering';
   }
 
-  async submit(input: AgentInput): Promise<AgentSubmission> {
+  activePrimary(): string | undefined { return this.primaryMessageKey || undefined; }
+
+  async submit(input: AgentInput): Promise<SimulatedAgentSubmission> {
     this.latestMediaCatalog = input.mediaCatalog || this.latestMediaCatalog;
-    if (!this.primaryMessageKey) {
+    if (input.mode === 'start') {
       this.primaryMessageKey = input.message.messageKey;
-      const claimed = this.store.claimInbound({
-        messageKey: input.message.messageKey,
-        clientInputId: input.message.messageKey,
-      }).message;
       return {
         kind: 'started',
         primaryMessageKey: this.primaryMessageKey,
         turnId: this.turnId,
-        completion: this.completion.promise.then((result) => ({
-          ...result,
-          expectedConversationEpoch: claimed.claimedConversationEpoch,
-          expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-        })),
+        threadId: input.threadId,
+        completion: this.completion.promise,
       };
     }
-    this.store.beginInboundSteering({
-      messageKey: input.message.messageKey,
-      primaryMessageKey: this.primaryMessageKey,
-      clientInputId: input.message.messageKey,
-    });
-    this.store.confirmInboundSteered(input.message.messageKey, {
-      codexTurnId: this.turnId,
-      steeringBoundary: this.steerCount + 1,
-    });
     this.steerCount += 1;
     return {
       kind: 'steered',
@@ -558,13 +721,12 @@ class SteeringAgent implements ProcessorAgent {
   async abort(): Promise<void> {}
 }
 
-test('[S05] 2/3/5/10 mixed follow-ups produce one latest final batch', async (t) => {
-  for (const count of [2, 3, 5, 10]) {
-    await t.test(`${count}-messages`, async (subtest) => {
-      let agent: SteeringAgent | undefined;
-      const harness = await createHarness(subtest, {
-        createAgent: (store) => {
-          agent = new SteeringAgent(store);
+describe.each([2, 3, 5, 10])('%i mixed follow-ups', (count) => {
+  test('2/3/5/10 mixed follow-ups execute only the latest direction', async (t) => {
+    let agent: SteeringAgent | undefined;
+    const harness = await createHarness(t, {
+        createAgent: () => {
+          agent = new SteeringAgent();
           return agent;
         },
         allowedUserIds: ['wm-steering'],
@@ -586,10 +748,7 @@ test('[S05] 2/3/5/10 mixed follow-ups produce one latest final batch', async (t)
       }
       assert.ok(agent);
       agent.completion.resolve({
-        candidates: [{ type: 'text', content: `latest-${count}` }],
-        mediaCatalog: agent.latestMediaCatalog || [],
-        expectedConversationEpoch: 0,
-        expectedRuntimeEpoch: 0,
+        replies: [{ type: 'text', content: `latest-${count}` }],
       });
       await harness.idle();
 
@@ -600,42 +759,39 @@ test('[S05] 2/3/5/10 mixed follow-ups produce one latest final batch', async (t)
         text: { content: `latest-${count}` },
       });
       assert.equal(harness.store.getInbound(keys[0]!)?.status, 'completed');
-      assert.ok(
-        keys.slice(1).every(
-          (key) => harness.store.getInbound(key)?.status === 'absorbed',
-        ),
-      );
-    });
-  }
+    assert.ok(
+      keys.slice(1).every(
+        (key) => harness.store.getInbound(key)?.status === 'absorbed',
+      ),
+    );
+  });
 });
 
-test('[S07][R08] identical raw msgids remain isolated across message outbox spool and client IDs', async (t) => {
+test('identical raw msgids remain isolated across MCP sessions attempts and client IDs', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'r08-isolation-'));
   const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
-  let upload = 0;
-  const preparer = new OutboundPreparer({
-    spoolDirectory: path.join(directory, 'spool'),
-    mediaGateway: {
-      async upload() {
-        upload += 1;
-        return { media_id: `generated-${upload}` };
-      },
-      async cloneForSend() {
-        throw new Error('clone was not expected');
-      },
-      async getCardThumbnailMediaId() {
-        throw new Error('thumbnail was not expected');
+  const channel = new WechatKfToolExecutor({
+    store,
+    apiClient: {
+      async sendPreparedMessage(input) {
+        return { msgid: `wx-${input.openKfId}` };
       },
     },
+    mediaGateway: {
+      async upload() { return { media_id: 'unused' }; },
+      async cloneForSend() { throw new Error('not expected'); },
+      async getCardThumbnailMediaId() { throw new Error('not expected'); },
+    },
+    observeMs: 0,
+    logger: { info() {}, error() {} },
   });
-  t.after(async () => {
+  t.onTestFinished(async () => {
+    await channel.close();
     store.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
   const sameMsgid = 'same-msgid';
   const keys: string[] = [];
-  const batches = [];
-  const bytes = Buffer.from('89504e470d0a1a0a01010101', 'hex');
 
   for (const [index, openKfId] of ['wk-a', 'wk-b'].entries()) {
     const externalUserId = 'wm-same';
@@ -651,36 +807,18 @@ test('[S07][R08] identical raw msgids remain isolated across message outbox spoo
     const messageKey = ingested.insertedMessageKeys[0];
     assert.ok(messageKey);
     keys.push(messageKey);
-    const claimed = store.claimInbound({ messageKey }).message;
-    const prepared = await preparer.prepare({
-      messageKey,
-      candidates: [
-        {
-          type: 'generated_image',
-          bytes,
-          filename: `${openKfId}.png`,
-          contentType: 'image/png',
-          generationId: `generation-${index}`,
-          revisedPrompt: `prompt-${index}`,
-        },
-      ],
+    store.claimInbound({ messageKey });
+    const session = store.createAgentSession({ messageKey });
+    await channel.execute('send_text', {
+      session: session.token,
+      content: `reply-${openKfId}`,
     });
-    batches.push(prepared);
-    store.finalizeInboundBatch({
-      messageKey,
-      expectedConversationEpoch: claimed.claimedConversationEpoch,
-      expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-      attempts: prepared.attempts,
-    });
+    store.closeAgentSession(session.token);
   }
 
   assert.notEqual(keys[0], keys[1]);
   assert.equal(keys[0], stableMessageKey('wk-a', sameMsgid));
   assert.equal(keys[1], stableMessageKey('wk-b', sameMsgid));
-  const spoolPaths = batches.flatMap((batch) => batch.spoolPaths);
-  assert.equal(new Set(spoolPaths).size, 2);
-  assert.ok(spoolPaths[0]?.includes(keys[0]!));
-  assert.ok(spoolPaths[1]?.includes(keys[1]!));
   const attemptsA = inspectAttempts(store.database, keys[0]!);
   const attemptsB = inspectAttempts(store.database, keys[1]!);
   assert.equal(attemptsA.length, 1);
@@ -688,5 +826,4 @@ test('[S07][R08] identical raw msgids remain isolated across message outbox spoo
   assert.notEqual(attemptsA[0]?.attemptId, attemptsB[0]?.attemptId);
   assert.notEqual(attemptsA[0]?.clientMessageId, attemptsB[0]?.clientMessageId);
   assert.notDeepEqual(attemptsA[0]?.payload, attemptsB[0]?.payload);
-  await preparer.cleanup(spoolPaths);
 });

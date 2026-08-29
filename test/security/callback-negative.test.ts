@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import { createApp } from '../../src/app.ts';
 import { createConfig } from '../../src/config.ts';
@@ -61,7 +61,7 @@ function appWithCalls(calls: Array<{ callbackToken: string; openKfId: string }>)
   });
 }
 
-test('[G01] decrypt rejects wrong ReceiveID, malformed Base64, padding, and length', () => {
+test('decrypt rejects wrong ReceiveID, malformed Base64, padding, and length', () => {
   const decryptor = new WecomCrypto(config.wecom);
   assert.throws(
     () => decryptor.decryptMessage(encryptMessage('message', 'ww-other')),
@@ -81,7 +81,7 @@ test('[G01] decrypt rejects wrong ReceiveID, malformed Base64, padding, and leng
   );
 });
 
-test('[G01] GET callback rejects every missing-parameter combination without enqueue', async () => {
+test('GET callback rejects every missing-parameter combination without enqueue', async () => {
   const calls: Array<{ callbackToken: string; openKfId: string }> = [];
   const app = appWithCalls(calls);
   for (const url of [
@@ -94,7 +94,7 @@ test('[G01] GET callback rejects every missing-parameter combination without enq
   }
   assert.deepEqual(calls, []);
 });
-test('[G01] POST callback rejects missing query or Encrypt without enqueue', async () => {
+test('POST callback rejects missing query or Encrypt without enqueue', async () => {
   const calls: Array<{ callbackToken: string; openKfId: string }> = [];
   const app = appWithCalls(calls);
   const missingQuery = await app.request('/', {
@@ -110,7 +110,7 @@ test('[G01] POST callback rejects missing query or Encrypt without enqueue', asy
   assert.deepEqual(calls, []);
 });
 
-test('[G02] valid non-kf event is acknowledged but never enqueued', async () => {
+test('valid non-kf event is acknowledged but never enqueued', async () => {
   const calls: Array<{ callbackToken: string; openKfId: string }> = [];
   const app = appWithCalls(calls);
   const encrypted = encryptMessage([

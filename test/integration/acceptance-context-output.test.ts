@@ -2,18 +2,18 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
-import type { TestContext } from 'node:test';
+import { test } from 'vitest';
+import type { TestContext } from 'vitest';
 
 import {
-  prepareSendBatch,
   normalizeSendIntent,
 } from '../../src/domain/send-contract.ts';
 import {
   normalizeWecomMessage,
   renderMessageForCodex,
 } from '../../src/domain/wecom-message.ts';
-import { CodexAgent, type AgentInput } from '../../src/services/codex-agent.ts';
+import type { AgentInput } from '../../src/agent/runtime.ts';
+import { CodexAgent } from '../../src/services/codex-agent.ts';
 import type {
   CodexBoundary,
   CodexInput,
@@ -23,9 +23,7 @@ import type {
 } from '../../src/services/codex-app-server.ts';
 import { withStagedImages } from '../../src/services/image-stager.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
-import { testWecomMessage } from '../support/wecom-message.ts';
+import { SqliteStore } from '../../src/state/sqlite-store.ts';
 
 const base = {
   open_kfid: 'wk-acceptance',
@@ -36,11 +34,11 @@ const base = {
 
 async function tempDirectory(t: TestContext, prefix: string): Promise<string> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
-  t.after(() => fs.rm(directory, { recursive: true, force: true }));
+  t.onTestFinished(() => fs.rm(directory, { recursive: true, force: true }));
   return directory;
 }
 
-test('[C02] link title, description, and URL enter the Codex summary', () => {
+test('link title, description, and URL enter the Codex summary', () => {
   const message = normalizeWecomMessage({
     ...base,
     msgid: 'link-one',
@@ -57,7 +55,7 @@ test('[C02] link title, description, and URL enter the Codex summary', () => {
   assert.match(summary, /https:\/\/example\.com\/creator/u);
 });
 
-test('[C04] voice, video, and file remain explicit unresolved summaries with zero downloads', async () => {
+test('voice, video, and file remain explicit unresolved summaries with zero downloads', async () => {
   let downloads = 0;
   const gateway = new WecomMediaGateway({
     apiClient: {
@@ -69,12 +67,12 @@ test('[C04] voice, video, and file remain explicit unresolved summaries with zer
     },
   });
   const fixtures = [
-    ['voice', { voice: { media_id: 'voice-secret' } }, /未下载、未转写/u],
-    ['video', { video: { media_id: 'video-secret' } }, /未下载、未观看或转写/u],
+    ['voice', { voice: { media_id: 'voice-secret' } }, /not downloaded or transcribed/u],
+    ['video', { video: { media_id: 'video-secret' } }, /not downloaded, watched, or transcribed/u],
     [
       'file',
       { file: { media_id: 'file-secret', filename: '合同.pdf' } },
-      /内容未下载或打开/u,
+      /content not downloaded or opened/u,
     ],
   ] as const;
   for (const [msgtype, payload, expected] of fixtures) {
@@ -90,7 +88,7 @@ test('[C04] voice, video, and file remain explicit unresolved summaries with zer
   assert.equal(downloads, 0);
 });
 
-test('[C06] multiple images stage in input order and clean on success and failure', async (t) => {
+test('multiple images stage in input order and clean on success and failure', async (t) => {
   const directory = await tempDirectory(t, 'ordered-images-');
   const png = Buffer.from('89504e470d0a1a0a01010101', 'hex');
   const jpeg = Buffer.from('ffd8ff020202', 'hex');
@@ -140,8 +138,11 @@ function stagedText(content: string) {
     startedSequence: 1,
     result: {
       structuredContent: {
-        staged: true,
-        candidate: { type: 'text', content },
+        status: 'accepted',
+        attemptId: `sa_${content}`,
+        sendIndex: 0,
+        type: 'text',
+        msgid: `wx-${content}`,
       },
     },
   };
@@ -168,104 +169,51 @@ class PromptBoundary implements CodexBoundary {
   async close(): Promise<void> {}
 }
 
-test('[C07] accepted, failed, and uncertain remain independent channel facts in prompts', async (t) => {
+test('API acceptance and customer observation remain distinct image facts', async (t) => {
   const directory = await tempDirectory(t, 'channel-prompt-');
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
   const boundary = new PromptBoundary();
   const agent = new CodexAgent({
     codex: boundary,
-    store,
     config: {
       model: 'gpt-channel', reasoningEffort: 'none',
       workingDirectory: directory, imageTempDirectory: directory,
       generatedImageDirectory: path.join(directory, 'generated'),
     },
   });
-  t.after(async () => {
-    await agent.close();
-    store.close();
-  });
-  let cursor = '';
+  t.onTestFinished(() => agent.close());
   const states: NonNullable<AgentInput['channelState']>[] = [
-    { accepted: true, recent: [{ sentType: 'image', status: 'accepted' }] },
-    { accepted: false, recent: [{ sentType: 'text', status: 'failed', failType: 13 }] },
-    { accepted: false, recent: [{ sentType: 'image', status: 'uncertain' }] },
+    { accepted: true },
+    { accepted: true, customerObserved: true },
   ];
   for (const [index, channelState] of states.entries()) {
     const msgid = `channel-${index}`;
-    const page = store.ingestSyncPage({
-      openKfId: 'wk-channel',
-      expectedCursor: cursor,
-      nextCursor: `${cursor}-${index}`,
-      messages: [testWecomMessage({
-        id: msgid,
-        openKfId: 'wk-channel',
-        externalUserId: 'wm-channel',
-      })],
-    });
-    cursor = `${cursor}-${index}`;
-    const messageKey = page.insertedMessageKeys[0]!;
     const submission = await agent.submit({
+      mode: 'start',
+      conversationId: 'cv-channel',
+      threadId: '',
       message: {
-        id: msgid, messageKey, origin: 'customer', type: 'text', rawType: 'text',
-        sentAt: index, sync: { cursor, index: 0 },
-        conversation: { openKfId: 'wk-channel', externalUserId: 'wm-channel' },
-        actor: { servicerUserId: '' }, text: msgid, summary: msgid,
-        attributes: {}, attachments: [],
+        messageKey: msgid, text: msgid, summary: msgid,
       },
       contextText: msgid,
       channelState,
+      toolSessionToken: `ws_${String(index).repeat(32)}`,
     });
     assert.equal(submission.kind, 'started');
     if (submission.kind === 'started') await submission.completion;
   }
-  assert.match(String(boundary.prompts[0]), /image:accepted/u);
-  assert.match(String(boundary.prompts[1]), /text:failed\(fail_type=13\)/u);
-  assert.match(String(boundary.prompts[2]), /image:uncertain/u);
-  assert.doesNotMatch(String(boundary.prompts[2]), /已被微信 API 接受/u);
+  assert.match(String(boundary.prompts[0]), /channel API accepted/u);
+  assert.match(String(boundary.prompts[0]), /does not prove client display/u);
+  assert.doesNotMatch(String(boundary.prompts[0]), /participant explicitly commented/u);
+  assert.match(String(boundary.prompts[1]), /participant explicitly commented/u);
 });
 
-test('[O03] multiple reliable locations stay native, within five, and add no pending text', async (t) => {
-  const directory = await tempDirectory(t, 'native-locations-');
-  const preparer = new OutboundPreparer({
-    spoolDirectory: path.join(directory, 'spool'),
-    mediaGateway: {
-      async upload() { return { media_id: 'unused' }; },
-      async cloneForSend() { return 'unused'; },
-      async getCardThumbnailMediaId() { return 'unused'; },
-    },
-  });
-  const locations = ['甲店', '乙店', '丙店'].map((name, index) => ({
-    type: 'location' as const,
-    name,
-    address: `${name}地址`,
-    latitude: 39 + index / 100,
-    longitude: 116 + index / 100,
-  }));
-  const prepared = await preparer.prepare({
-    messageKey: 'locations',
-    candidates: locations,
-  });
-  assert.equal(prepared.attempts.length, 5);
-  assert.deepEqual(
-    prepared.attempts.filter((item) => item.status !== 'blocked')
-      .map((item) => item.sentType),
-    ['location', 'location', 'location'],
-  );
-  assert.equal(
-    prepared.attempts.some((item) => item.sentType === 'text' && item.status !== 'blocked'),
-    false,
-  );
-});
-
-test('[O04] map URL remains a link, never a location, and private URLs are rejected', () => {
+test('map URL remains a link, never a location, and private URLs are rejected', () => {
   const link = normalizeSendIntent('send_link', {
     title: '地图',
     description: '导航链接',
     url: 'https://maps.example.com/place/one',
   });
   assert.equal(link.type, 'link');
-  assert.deepEqual(prepareSendBatch([link]), [link]);
   assert.throws(
     () => normalizeSendIntent('send_link', {
       title: '内网地图', description: '', url: 'http://127.0.0.1/map',
@@ -274,7 +222,7 @@ test('[O04] map URL remains a link, never a location, and private URLs are rejec
   );
 });
 
-test('[O05] unverifiable mini-program fields reject while text fallback remains valid', () => {
+test('unverifiable mini-program fields reject while text fallback remains valid', () => {
   assert.throws(
     () => normalizeSendIntent('send_miniprogram', {
       appId: '', title: '猜测入口', pagePath: '', sourceUrl: 'https://example.com',
@@ -289,156 +237,11 @@ test('[O05] unverifiable mini-program fields reject while text fallback remains 
   });
 });
 
-interface AttemptStatusRow {
-  readonly status: string;
-  readonly sent_type: string;
-}
-
-test('[O08] every outbound format has at most one definitive fallback and uncertain activates none', async (t) => {
-  const directory = await tempDirectory(t, 'native-fallbacks-');
-  const candidates = [
-    { type: 'text', content: '文字' },
-    { type: 'image', mediaRef: 'media:0' },
-    { type: 'link', title: '链接', description: '说明', url: 'https://example.com' },
-    {
-      type: 'miniprogram', appId: 'wx1234567890abcdef', title: '小程序',
-      pagePath: 'pages/index', sourceUrl: 'https://example.com/mini',
-    },
-    {
-      type: 'location', name: '地点', address: '地址',
-      latitude: 39, longitude: 116,
-    },
-  ] as const;
-
-  for (const [index, candidate] of candidates.entries()) {
-    const store = new SqliteStore({
-      filePath: path.join(directory, `format-${index}.sqlite`),
-    });
-    const preparer = new OutboundPreparer({
-      spoolDirectory: path.join(directory, `spool-${index}`),
-      mediaGateway: {
-        async upload() { return { media_id: 'unused' }; },
-        async cloneForSend() { return 'cloned-image'; },
-        async getCardThumbnailMediaId() { return 'thumbnail'; },
-      },
-    });
-    const mediaCatalog = candidate.type === 'image'
-      ? [{
-          ref: 'media:0', messageKey: 'source', openKfId: 'wk-one',
-          externalUserId: 'wm-one', kind: 'image' as const, mediaId: 'source-image',
-          filename: 'source.png', sentAt: 1, rememberedAt: 1,
-        }]
-      : [];
-    store.ingestSyncPage({
-      openKfId: 'wk-one', nextCursor: 'cursor',
-      messages: [testWecomMessage({
-        id: 'source', openKfId: 'wk-one', externalUserId: 'wm-one',
-      })],
-    });
-    const key = stableMessageKey('wk-one', 'source');
-    const claimed = store.claimInbound({ messageKey: key }).message;
-    const prepared = await preparer.prepare({
-      messageKey: key,
-      candidates: [candidate],
-      mediaCatalog,
-    });
-    store.finalizeInboundBatch({
-      messageKey: key,
-      expectedConversationEpoch: claimed.claimedConversationEpoch,
-      expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-      attempts: prepared.attempts,
-    });
-    const primary = store.beginNextSend()!;
-    store.failSend(primary.attemptId, new Error('definitive'));
-    const rows = store.database.prepare(`
-      SELECT status, sent_type FROM send_attempts
-      WHERE source_message_key = ? ORDER BY send_index
-    `).all(key) as unknown as AttemptStatusRow[];
-    assert.equal(rows.filter((row) => row.status === 'pending').length, index === 0 ? 0 : 1);
-    assert.ok(rows.filter((row) => row.status === 'pending').length <= 1);
-    store.close();
-  }
-
-  const store = new SqliteStore({ filePath: path.join(directory, 'uncertain.sqlite') });
-  store.ingestSyncPage({
-    openKfId: 'wk-one', nextCursor: 'cursor',
-    messages: [testWecomMessage({
-      id: 'uncertain', openKfId: 'wk-one', externalUserId: 'wm-one',
-      text: 'source',
-    })],
-  });
-  const key = stableMessageKey('wk-one', 'uncertain');
-  const claimed = store.claimInbound({ messageKey: key }).message;
-  const preparer = new OutboundPreparer({
-    spoolDirectory: path.join(directory, 'uncertain-spool'),
-    mediaGateway: {
-      async upload() { return { media_id: 'unused' }; },
-      async cloneForSend() { return 'unused'; },
-      async getCardThumbnailMediaId() { return 'unused'; },
-    },
-  });
-  const prepared = await preparer.prepare({
-    messageKey: key,
-    candidates: [{
-      type: 'location', name: '地点', address: '地址', latitude: 39, longitude: 116,
-    }],
-  });
-  store.finalizeInboundBatch({
-    messageKey: key,
-    expectedConversationEpoch: claimed.claimedConversationEpoch,
-    expectedRuntimeEpoch: claimed.claimedRuntimeEpoch,
-    attempts: prepared.attempts,
-  });
-  store.markSendUncertain(store.beginNextSend()!.attemptId, new Error('network'));
-  const rows = store.database.prepare(
-    'SELECT status, sent_type FROM send_attempts WHERE source_message_key = ? ORDER BY send_index',
-  ).all(key) as unknown as AttemptStatusRow[];
-  assert.deepEqual(rows.map((row) => row.status), ['uncertain', 'blocked']);
-  store.close();
-});
-
-test('[SEC04] database and durable spool are private and orphan cleanup preserves active files', async (t) => {
-  const directory = await tempDirectory(t, 'private-state-');
-  const databaseFile = path.join(directory, 'private', 'wecom.sqlite');
+test("SQLite state remains private without a host image spool", async (t) => {
+  const directory = await tempDirectory(t, "private-state-");
+  const databaseFile = path.join(directory, "private", "wecom.sqlite");
   const store = new SqliteStore({ filePath: databaseFile });
-  t.after(() => store.close());
+  t.onTestFinished(() => store.close());
   assert.equal((await fs.stat(path.dirname(databaseFile))).mode & 0o777, 0o700);
   assert.equal((await fs.stat(databaseFile)).mode & 0o777, 0o600);
-
-  const spoolDirectory = path.join(directory, 'spool');
-  const png = Buffer.from('89504e470d0a1a0a08080808', 'hex');
-  const preparer = new OutboundPreparer({
-    spoolDirectory,
-    mediaGateway: {
-      async upload() { throw new Error('keep durable spool'); },
-      async cloneForSend() { return 'unused'; },
-      async getCardThumbnailMediaId() { return 'unused'; },
-    },
-  });
-  const prepared = await preparer.prepare({
-    messageKey: 'active_spool',
-    candidates: [{
-      type: 'generated_image', bytes: png, filename: 'generated.png',
-      contentType: 'image/png', generationId: 'generation', revisedPrompt: 'edit',
-    }],
-  });
-  const activePath = prepared.spoolPaths[0]!;
-  const orphanPath = path.join(spoolDirectory, 'orphan.json');
-  await fs.writeFile(orphanPath, '{}', { mode: 0o600 });
-  assert.equal((await fs.stat(spoolDirectory)).mode & 0o777, 0o700);
-  assert.equal((await fs.stat(activePath)).mode & 0o777, 0o600);
-  await preparer.cleanupOrphans(new Set(['active_spool']));
-  assert.equal(await fs.access(activePath).then(() => true), true);
-  await assert.rejects(fs.access(orphanPath), { code: 'ENOENT' });
-  await preparer.cleanup(prepared.spoolPaths);
-
-  const outsidePath = path.join(directory, 'outside.txt');
-  await fs.writeFile(outsidePath, 'sentinel');
-  const linkedSpool = path.join(spoolDirectory, 'linked.json');
-  await fs.symlink(outsidePath, linkedSpool);
-  await assert.rejects(
-    preparer.restoreGenerated('linked'),
-    /regular file/u,
-  );
-  assert.equal(await fs.readFile(outsidePath, 'utf8'), 'sentinel');
 });

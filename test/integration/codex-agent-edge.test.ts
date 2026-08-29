@@ -3,15 +3,15 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
-import type { TestContext } from 'node:test';
+import { test } from 'vitest';
+import type { TestContext } from 'vitest';
 import { PassThrough, Writable } from 'node:stream';
 
 import {
   CodexAgent,
   createCodexAppServer,
-  type AgentInput,
 } from '../../src/services/codex-agent.ts';
+import type { AgentInput } from '../../src/agent/runtime.ts';
 import type {
   CodexBoundary,
   CodexInput,
@@ -21,8 +21,6 @@ import type {
   CodexTurnResult,
   SpawnProcess,
 } from '../../src/services/codex-app-server.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
-import { testWecomMessage } from '../support/wecom-message.ts';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -36,6 +34,7 @@ function deferred<T>(): Deferred<T> {
 }
 
 function tool(content: string) {
+  const attemptId = `sa_${content.replace(/[^A-Za-z0-9_-]/gu, '_')}`;
   return {
     id: `tool-${content}`,
     type: 'mcpToolCall',
@@ -45,8 +44,11 @@ function tool(content: string) {
     startedSequence: 1,
     result: {
       structuredContent: {
-        staged: true,
-        candidate: { type: 'text', content },
+        status: 'accepted',
+        attemptId,
+        sendIndex: 0,
+        type: 'text',
+        msgid: `wx-${content}`,
       },
     },
   };
@@ -123,81 +125,62 @@ class InitProcess extends EventEmitter {
 
 async function harness(t: TestContext, boundary: Boundary) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-agent-edge-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
-  let cursor = '';
   function input(messageKey: string): AgentInput {
-    const ingested = store.ingestSyncPage({
-      openKfId: 'wk-edge',
-      expectedCursor: cursor,
-      nextCursor: `${cursor}-${messageKey}`,
-      messages: [testWecomMessage({
-        id: messageKey,
-        openKfId: 'wk-edge',
-        externalUserId: 'wm-edge',
-      })],
-    });
-    cursor = `${cursor}-${messageKey}`;
-    const storedKey = ingested.insertedMessageKeys[0];
-    if (!storedKey) throw new Error('Expected inserted agent edge message');
     return {
+      mode: 'start',
+      conversationId: 'cv-edge',
+      threadId: '',
       message: {
-        id: messageKey, messageKey: storedKey, origin: 'customer', type: 'text', rawType: 'text',
-        sentAt: 1, sync: { cursor, index: 0 },
-        conversation: { openKfId: 'wk-edge', externalUserId: 'wm-edge' },
-        actor: { servicerUserId: '' }, text: messageKey, summary: messageKey,
-        attributes: {}, attachments: [],
+        messageKey, text: messageKey, summary: messageKey,
       },
       contextText: messageKey,
+      toolSessionToken: `ws_${'e'.repeat(32)}`,
     };
   }
   const agent = new CodexAgent({
     codex: boundary,
-    store,
     config: {
       model: 'gpt-edge', reasoningEffort: 'none',
       workingDirectory: directory, imageTempDirectory: directory,
       generatedImageDirectory: path.join(directory, 'generated'),
     },
   });
-  t.after(async () => {
+  t.onTestFinished(async () => {
     await agent.abort();
-    store.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
   return { agent, input };
 }
 
-test('[C07][SEC01] prompt includes media, channel, observation, handoff, and customer boundaries', async (t) => {
+test('prompt includes media, channel, observation, and customer boundaries', async (t) => {
   const boundary = new Boundary([{ items: [tool('reply')] }]);
   const { agent, input } = await harness(t, boundary);
   const base = input('prompt');
   const submission = await agent.submit({
     ...base,
+    archivedThreadId: '01900000-0000-7000-8000-000000000001',
     mediaCatalog: [{
-      ref: 'media:0', messageKey: 'prompt', openKfId: 'wk-edge',
-      externalUserId: 'wm-edge', kind: 'image', mediaId: 'secret',
-      filename: 'photo.png', sentAt: 1, rememberedAt: 1,
+      ref: 'media:0', messageKey: 'prompt', kind: 'image',
     }],
     channelState: {
       accepted: false,
       customerObserved: true,
       revisedPrompt: 'only change color',
-      recent: [{ sentType: 'image', status: 'uncertain' }],
     },
-    handoffContext: '人工客服：此前已确认订单',
   });
   assert.equal(submission.kind, 'started');
   if (submission.kind !== 'started') return;
   await submission.completion;
   const prompt = String(boundary.inputs[0]);
   for (const expected of [
-    'media:0', '近期生成图', '客户已明确评价', 'only change color',
-    'image:uncertain', '此前已确认订单', '<customer_message>',
+    'media:0', 'recent generated image', 'participant explicitly commented', 'only change color',
+    '<conversation_context>', '01900000-0000-7000-8000-000000000001',
+    'conversation_memory.read_archived_thread',
   ]) assert.match(prompt, new RegExp(expected));
-  assert.doesNotMatch(prompt, /secret/u);
+  assert.doesNotMatch(prompt, /open_kfid|external_userid|media_id/iu);
 });
 
-test('[SEC01][DEP02] app-server uses host login with path and web-search overrides', async (t) => {
+test('app-server uses host login with path and web-search overrides', async (t) => {
   const captures: Array<{
     command: string;
     args: readonly string[];
@@ -212,27 +195,70 @@ test('[SEC01][DEP02] app-server uses host login with path and web-search overrid
       pathOverride: '/custom/codex', webSearchMode: 'live',
       workingDirectory: '/custom/workspace',
     },
-    { spawnProcess },
+    {
+      spawnProcess,
+      mcpUrl: 'https://robot.example/mcp',
+      mcpBearerToken: 'test-bearer-token',
+      ilinkMcpUrl: 'https://robot.example/mcp/ilink',
+      mcpToolTimeoutSec: 35,
+      ilinkMcpToolTimeoutSec: 150,
+    },
   );
   const defaults = createCodexAppServer(
     {
       pathOverride: '', webSearchMode: 'disabled',
       workingDirectory: '/default/workspace',
     },
-    { spawnProcess },
+    {
+      spawnProcess,
+      mcpUrl: 'http://127.0.0.1:8888/mcp',
+      mcpBearerToken: 'test-bearer-token',
+    },
   );
-  t.after(async () => Promise.all([configured.close(), defaults.close()]));
+  const ilinkOnly = createCodexAppServer(
+    {
+      pathOverride: '', webSearchMode: 'disabled',
+      workingDirectory: '/ilink-only/workspace',
+    },
+    {
+      spawnProcess,
+      memoryMcpUrl: 'https://chat.example/mcp/memory',
+      ilinkMcpUrl: 'https://chat.example/mcp/ilink',
+      mcpBearerToken: 'test-bearer-token',
+    },
+  );
+  t.onTestFinished(async () => {
+    await Promise.all([configured.close(), defaults.close(), ilinkOnly.close()]);
+  });
   await configured.initialize();
   await defaults.initialize();
+  await ilinkOnly.initialize();
   assert.equal(captures[0]?.command, '/custom/codex');
+  assert.equal(captures[1]?.command, 'codex');
   assert.deepEqual(captures[0]?.args.slice(0, 2), ['app-server', '--stdio']);
   assert.equal('OPENAI_API_KEY' in (captures[0]?.env || {}), false);
   assert.equal('OPENAI_BASE_URL' in (captures[0]?.env || {}), false);
+  assert.equal(captures[0]?.env.KINTIO_MCP_BEARER_TOKEN, 'test-bearer-token');
+  assert.ok(captures[0]?.args.includes(
+    'mcp_servers.wechat_kf.url="https://robot.example/mcp"',
+  ));
+  assert.ok(captures[0]?.args.includes(
+    'mcp_servers.conversation_memory.url="https://robot.example/mcp/memory"',
+  ));
+  assert.ok(captures[0]?.args.includes('mcp_servers.wechat_kf.tool_timeout_sec=35'));
+  assert.ok(captures[0]?.args.includes('mcp_servers.weixin_ilink.tool_timeout_sec=150'));
   assert.ok(captures[0]?.args.includes('web_search="live"'));
   assert.ok(captures[1]?.args.includes('web_search="disabled"'));
+  assert.equal(
+    captures[2]?.args.some((argument) => argument.startsWith('mcp_servers.wechat_kf.')),
+    false,
+  );
+  assert.ok(captures[2]?.args.includes(
+    'mcp_servers.weixin_ilink.url="https://chat.example/mcp/ilink"',
+  ));
 });
 
-test('[R04] history inspection distinguishes missing, input-only, and completed without a boundary', async (t) => {
+test('history inspection distinguishes missing, input-only, and completed without a boundary', async (t) => {
   const boundary = new Boundary([]);
   const { agent } = await harness(t, boundary);
   assert.equal(
@@ -261,10 +287,11 @@ test('[R04] history inspection distinguishes missing, input-only, and completed 
   };
   const completed = await agent.inspectHistory('thread', ['input'], 'absent-boundary');
   assert.equal(completed.state, 'completed');
-  assert.equal(completed.candidates[0]?.type, 'text');
+  assert.deepEqual(completed.artifacts, []);
+  assert.deepEqual(completed.executedAttemptIds, ['sa_historical']);
 });
 
-test('[S08] a message arriving after active completion starts a fresh turn', async (t) => {
+test('a message arriving after active completion starts a fresh turn', async (t) => {
   const first = deferred<CodexTurnResult>();
   const boundary = new Boundary([first.promise, { items: [tool('second')] }]);
   const { agent, input } = await harness(t, boundary);
@@ -280,7 +307,7 @@ test('[S08] a message arriving after active completion starts a fresh turn', asy
   assert.equal(boundary.steerCount, 0);
 });
 
-test('[DEP01] close waits for active completion while abort closes immediately', async (t) => {
+test('close waits for active completion while abort closes immediately', async (t) => {
   const active = deferred<CodexTurnResult>();
   const closeBoundary = new Boundary([active.promise]);
   const closeHarness = await harness(t, closeBoundary);

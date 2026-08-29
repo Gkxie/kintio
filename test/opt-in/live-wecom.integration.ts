@@ -1,15 +1,22 @@
 import assert from 'node:assert/strict';
+import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import { test } from 'vitest';
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
 
 import { createConfig } from '../../src/config.ts';
 import { CodexAgent, createCodexAppServer } from '../../src/services/codex-agent.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { DeliveryService } from '../../src/services/delivery-service.ts';
+import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
+import { handleWechatKfMcpRequest } from '../../src/mcp/wechat-kf-server.ts';
+import {
+  ConversationMemoryExecutor,
+  handleConversationMemoryMcpRequest,
+} from '../../src/mcp/conversation-memory-server.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
-import { OutboundPreparer } from '../../src/services/outbound-preparer.ts';
 import { WecomApiClient } from '../../src/services/wecom-api.ts';
 import { WecomSync } from '../../src/services/wecom-sync.ts';
 import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
@@ -33,34 +40,57 @@ if (
   );
 }
 
-test('[I08][I09] mock upstream sends one accepted text through real Codex and real WeChat', { timeout: 180_000 }, async (t) => {
+test('mock upstream sends one accepted text through real Codex and real WeChat', { timeout: 180_000 }, async (t) => {
   process.stdout.write(
-    `LIVE target=${targetUserId} open_kfid=${targetOpenKfId} estimated=1/5 types=text\n`,
+    'LIVE target configured estimated=1/5 types=text\n',
   );
   const config = createConfig(process.env);
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-live-'));
   const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
-  let sendRequests = 0;
-  const trackingFetch: typeof globalThis.fetch = async (input, init) => {
-    const requestUrl = input instanceof Request ? input.url : String(input);
-    if (new URL(requestUrl).pathname === '/cgi-bin/kf/send_msg') sendRequests += 1;
-    return globalThis.fetch(input, init);
-  };
   const apiClient = new WecomApiClient({
     corpId: config.wecom.api.corpId,
     kfSecret: config.wecom.api.kfSecret,
     timeoutMs: config.wecom.api.timeoutMs,
-    fetchImpl: trackingFetch,
   });
   const mediaGateway = new WecomMediaGateway({ apiClient });
-  const codex = createCodexAppServer({
-    pathOverride: config.codex.pathOverride,
-    webSearchMode: config.codex.webSearchMode,
-    workingDirectory: config.codex.workingDirectory,
+  const channel = new WechatKfToolExecutor({
+    store,
+    apiClient,
+    mediaGateway,
+    observeMs: config.wecom.api.observeMs,
   });
+  const mcpApp = new Hono();
+  let memoryExecutor: ConversationMemoryExecutor | undefined;
+  mcpApp.all('/mcp', (context) => handleWechatKfMcpRequest({
+    request: context.req.raw,
+    executor: channel,
+    bearerToken: config.wecom.mcp.bearerToken,
+  }));
+  mcpApp.all('/mcp/memory', async (context) => memoryExecutor
+    ? await handleConversationMemoryMcpRequest({
+        request: context.req.raw,
+        executor: memoryExecutor,
+        bearerToken: config.wecom.mcp.bearerToken,
+      })
+    : context.json({ error: 'not ready' }, 503));
+  const mcpHttp = serve({ fetch: mcpApp.fetch, hostname: '127.0.0.1', port: 0 });
+  await once(mcpHttp, 'listening');
+  const mcpAddress = mcpHttp.address();
+  if (!mcpAddress || typeof mcpAddress === 'string') {
+    throw new Error('Live MCP server did not bind a TCP port');
+  }
+  const codex = createCodexAppServer({
+      pathOverride: config.codex.pathOverride,
+      webSearchMode: config.codex.webSearchMode,
+      workingDirectory: config.codex.workingDirectory,
+    }, {
+      mcpUrl: `http://127.0.0.1:${mcpAddress.port}/mcp`,
+      memoryMcpUrl: `http://127.0.0.1:${mcpAddress.port}/mcp/memory`,
+      mcpBearerToken: config.wecom.mcp.bearerToken,
+    });
+  memoryExecutor = new ConversationMemoryExecutor({ store, threads: codex });
   const agent = new CodexAgent({
     codex,
-    store,
     config: {
       model: config.codex.model,
       reasoningEffort: config.codex.reasoningEffort,
@@ -69,17 +99,11 @@ test('[I08][I09] mock upstream sends one accepted text through real Codex and re
       generatedImageDirectory: config.codex.generatedImageDirectory,
     },
   });
-  const delivery = new DeliveryService({ apiClient, store });
-  const preparer = new OutboundPreparer({
-    mediaGateway,
-    spoolDirectory: path.join(directory, 'spool'),
-  });
   const processor = new ConversationProcessor({
     store,
-    codexAgent: agent,
+    agent,
     mediaGateway,
-    outboundPreparer: preparer,
-    delivery,
+    channel,
     allowedUserIds: [targetUserId],
     authorization: config.wecom.authorization,
   });
@@ -109,12 +133,28 @@ test('[I08][I09] mock upstream sends one accepted text through real Codex and re
       },
     },
   });
-  t.after(async () => {
-    await sync.close();
-    await processor.close();
-    await delivery.close();
-    store.close();
-    await fs.rm(directory, { recursive: true, force: true });
+  t.onTestFinished(async () => {
+    let deletionError: unknown;
+    try {
+      await sync.close();
+      await processor.waitForIdle();
+      await channel.waitForIdle();
+      const threadId = store.getConversation(targetOpenKfId, targetUserId)?.threadId;
+      if (threadId) {
+        if (!codex.deleteThread) throw new Error('Codex thread deletion is unavailable');
+        await codex.deleteThread(threadId);
+      }
+    } catch (error: unknown) {
+      deletionError = error;
+    } finally {
+      await processor.close();
+      await channel.close();
+      mcpHttp.close();
+      await once(mcpHttp, 'close');
+      store.close();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+    if (deletionError) throw deletionError;
   });
 
   await sync.enqueue({
@@ -122,7 +162,7 @@ test('[I08][I09] mock upstream sends one accepted text through real Codex and re
     openKfId: targetOpenKfId,
   });
   await processor.waitForIdle();
-  await delivery.waitForIdle();
+  await channel.waitForIdle();
   const messageKey = stableMessageKey(targetOpenKfId, sourceMessageId);
   const attempts = inspectAttempts(store.database, messageKey);
   assert.equal(syncCalls, 1);
@@ -138,8 +178,7 @@ test('[I08][I09] mock upstream sends one accepted text through real Codex and re
   const attempt = attempts[0];
   assert.ok(attempt);
   assert.equal(attempt.status, 'accepted');
-  assert.equal(sendRequests, 1, 'live test refuses more than one real send_msg request');
   process.stdout.write(
-    `LIVE actual=${sendRequests}/5 status=accepted (not proof of client display)\n`,
+    `LIVE actual=${attempts.length}/5 status=accepted (not proof of client display)\n`,
   );
 });

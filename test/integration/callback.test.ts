@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import { createApp } from '../../src/app.ts';
 import { createConfig } from '../../src/config.ts';
@@ -91,7 +91,7 @@ test('GET / verifies and decrypts a valid WeCom callback challenge', async () =>
   assert.equal(await response.text(), expectedMessage);
 });
 
-test('[G01] GET rejects an invalid callback signature', async () => {
+test('GET rejects an invalid callback signature', async () => {
   const app = createTestApp();
   const encrypted = encryptMessage('invalid-signature');
   const query = createSignedQuery(encrypted);
@@ -125,7 +125,7 @@ test('POST / verifies and accepts an encrypted WeCom event', async () => {
   assert.equal(await response.text(), 'success');
 });
 
-test('[G02] POST acknowledges before asynchronously enqueueing message sync', async () => {
+test('POST acknowledges before asynchronously enqueueing message sync', async () => {
   const calls: Array<{ callbackToken: string; openKfId: string }> = [];
   const app = createTestApp({
     messageProcessor: {
@@ -159,7 +159,7 @@ test('[G02] POST acknowledges before asynchronously enqueueing message sync', as
   ]);
 });
 
-test('[G02] POST rejects request bodies larger than one MiB', async () => {
+test('POST rejects request bodies larger than one MiB', async () => {
   const app = createTestApp();
   const response = await app.request('/', {
     method: 'POST',

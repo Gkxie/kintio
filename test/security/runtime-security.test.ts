@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import { createConfig } from '../../src/config.ts';
 import { createRuntime } from '../../src/runtime.ts';
@@ -49,7 +49,7 @@ class FakeCodexProcess extends EventEmitter {
   }
 }
 
-test('[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive no business secrets', async (t) => {
+test('Codex Adapter passes only the HTTP MCP bearer and never exposes WeChat secrets', async (t) => {
   const environmentCanaries = {
     WECOM_CORP_ID: 'corp-canary',
     WECOM_KF_SECRET: 'secret-canary',
@@ -58,13 +58,15 @@ test('[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive 
     WECOM_DB_FILE: '/private/database-canary.sqlite',
     WECOM_TOOL_MEDIA_CATALOG_FILE: '/private/media-catalog-canary.json',
     WECOM_TOOL_DEFER_SEND: 'defer-switch-canary',
+    TALKFERRY_MCP_BEARER_TOKEN: 'talkferry-bearer-canary-value-12345',
+    KINTIO_MCP_BEARER_TOKEN: 'mcp-bearer-canary-value-1234567890',
   } as const;
   const previous = new Map<string, string | undefined>();
   for (const [name, value] of Object.entries(environmentCanaries)) {
     previous.set(name, process.env[name]);
     process.env[name] = value;
   }
-  t.after(() => {
+  t.onTestFinished(() => {
     for (const [name, value] of previous) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -93,20 +95,32 @@ test('[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive 
       webSearchMode: 'live',
       workingDirectory: '/mock/workspace',
     },
-    { spawnProcess, logger: { warn() {} } },
+    {
+      spawnProcess,
+      logger: { warn() {} },
+      mcpUrl: 'https://robot.example/mcp',
+      mcpBearerToken: environmentCanaries.KINTIO_MCP_BEARER_TOKEN,
+    },
   );
-  t.after(() => server.close());
+  t.onTestFinished(() => server.close());
   await server.initialize();
 
   assert.ok(captured);
   assert.equal(captured.command, '/mock/codex');
   assert.deepEqual(captured.argumentsList.slice(0, 2), ['app-server', '--stdio']);
   const serializedArguments = JSON.stringify(captured.argumentsList);
-  assert.ok(
-    captured.argumentsList.includes(
-      'mcp_servers.wechat_kf.env_vars=[]',
-    ),
-  );
+  assert.ok(captured.argumentsList.includes(
+    'mcp_servers.wechat_kf.url="https://robot.example/mcp"',
+  ));
+  assert.ok(captured.argumentsList.includes(
+    'mcp_servers.wechat_kf.bearer_token_env_var="KINTIO_MCP_BEARER_TOKEN"',
+  ));
+  assert.ok(captured.argumentsList.includes(
+    'mcp_servers.conversation_memory.url="https://robot.example/mcp/memory"',
+  ));
+  assert.ok(captured.argumentsList.includes(
+    'mcp_servers.conversation_memory.enabled_tools=["read_archived_thread"]',
+  ));
   assert.ok(serializedArguments.includes('features={apps=false'));
   assert.ok(serializedArguments.includes('code_mode_host=true'));
   assert.ok(serializedArguments.includes('code_mode=false'));
@@ -116,8 +130,23 @@ test('[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive 
     captured.argumentsList.includes('sandbox_workspace_write.network_access=false'),
   );
   assert.equal(captured.argumentsList.includes('--strict-config'), false);
-  assert.ok(serializedArguments.includes('mcp_servers.wechat_kf.command'));
-  for (const forbiddenName of Object.keys(environmentCanaries)) {
+  assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.command'), false);
+  assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.args'), false);
+  assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.env_vars'), false);
+  assert.equal(
+    captured.environment.KINTIO_MCP_BEARER_TOKEN,
+    environmentCanaries.KINTIO_MCP_BEARER_TOKEN,
+  );
+  for (const forbiddenName of [
+    'WECOM_CORP_ID',
+    'WECOM_KF_SECRET',
+    'WECOM_DB_FILE',
+    'WECOM_TOOL_OPEN_KFID',
+    'WECOM_TOOL_EXTERNAL_USER_ID',
+    'WECOM_TOOL_MEDIA_CATALOG_FILE',
+    'WECOM_TOOL_DEFER_SEND',
+    'TALKFERRY_MCP_BEARER_TOKEN',
+  ]) {
     assert.equal(forbiddenName in captured.environment, false, forbiddenName);
   }
   assert.equal(captured.environment.HOME, process.env.HOME);
@@ -126,25 +155,9 @@ test('[S03][SEC01][SEC02][SEC05] host Codex CLI and trusted staging MCP receive 
     assert.equal(serializedArguments.includes(canary), false, canary);
   }
 
-  const mcpArgsOverride = captured.argumentsList.find((argument) =>
-    argument.startsWith('mcp_servers.wechat_kf.args='),
-  );
-  assert.ok(mcpArgsOverride);
-  const nested = JSON.parse(
-    mcpArgsOverride.slice(mcpArgsOverride.indexOf('=') + 1),
-  ) as string[];
-  assert.ok(nested.some((argument) => /staging-server\.(?:js|ts)$/u.test(argument)));
-  const commandOverride = captured.argumentsList.find((argument) =>
-    argument.startsWith('mcp_servers.wechat_kf.command='),
-  );
-  assert.ok(commandOverride);
-  assert.equal(
-    JSON.parse(commandOverride.slice(commandOverride.indexOf('=') + 1)),
-    process.execPath,
-  );
 });
 
-test('[SEC03] root startup rejects a wildcard customer allowlist before creating runtime state', (t) => {
+test('root startup rejects a wildcard customer allowlist before creating runtime state', (t) => {
   const descriptor = Object.getOwnPropertyDescriptor(process, 'getuid');
   Object.defineProperty(process, 'getuid', {
     configurable: true,
@@ -152,7 +165,7 @@ test('[SEC03] root startup rejects a wildcard customer allowlist before creating
     writable: true,
     value: () => 0,
   });
-  t.after(() => {
+  t.onTestFinished(() => {
     if (descriptor) Object.defineProperty(process, 'getuid', descriptor);
     else Reflect.deleteProperty(process, 'getuid');
   });
@@ -162,6 +175,7 @@ test('[SEC03] root startup rejects a wildcard customer allowlist before creating
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
     WECOM_CORP_ID: 'ww-root-test',
     WECOM_KF_SECRET: 'root-test-secret',
+    KINTIO_MCP_BEARER_TOKEN: 'r'.repeat(32),
     WECOM_ALLOWED_USER_IDS: '*',
   });
   assert.throws(

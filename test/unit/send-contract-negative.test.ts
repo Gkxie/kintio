@@ -1,23 +1,27 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import { test } from 'vitest';
 
 import {
   SendContractError,
   normalizeMediaCatalog,
   normalizeSendIntent,
-  prepareSendBatch,
-  prepareTextChunks,
 } from '../../src/domain/send-contract.ts';
 
 function code(expected: string): (error: unknown) => boolean {
   return (error) => error instanceof SendContractError && error.code === expected;
 }
 
-test('[O07] every text field enforces its UTF-8 byte boundary', () => {
-  assert.equal(prepareTextChunks('a'.repeat(10_240)).length, 5);
+test('an empty send type fails with an explicit unknown-type error', () => {
   assert.throws(
-    () => normalizeSendIntent('text', { content: 'a'.repeat(10_241) }),
-    /10240 UTF-8 bytes/u,
+    () => normalizeSendIntent('', {}),
+    /Unsupported send type: unknown/u,
+  );
+});
+
+test('every text field enforces its UTF-8 byte boundary', () => {
+  assert.throws(
+    () => normalizeSendIntent('text', { content: 'a'.repeat(2049) }),
+    /2048 UTF-8 bytes/u,
   );
   for (const [type, field, limit, base] of [
     ['link', 'title', 128, { description: '', url: 'https://example.com' }],
@@ -41,7 +45,7 @@ test('[O07] every text field enforces its UTF-8 byte boundary', () => {
   }
 });
 
-test('[O06][SEC02] media catalogs reject duplicates excess entries and hidden capabilities', () => {
+test('media catalogs reject duplicates excess entries and hidden capabilities', () => {
   const hundred = Array.from({ length: 100 }, (_, index) => ({
     ref: `media:${index}`,
     kind: 'image',
@@ -61,7 +65,7 @@ test('[O06][SEC02] media catalogs reject duplicates excess entries and hidden ca
   assert.throws(() => normalizeMediaCatalog({}), code('invalid_media_catalog'));
 });
 
-test('[O04][SEC01] links reject credentials protocols private IPv4 and private IPv6', () => {
+test('links reject credentials protocols private IPv4 and private IPv6', () => {
   for (const url of [
     'https://user:pass@example.com/path',
     'ftp://example.com/file',
@@ -96,7 +100,7 @@ test('[O04][SEC01] links reject credentials protocols private IPv4 and private I
   }), /2048 UTF-8 bytes/u);
 });
 
-test('[O05] mini-program paths reject schemes traversal controls and bad app IDs', () => {
+test('mini-program paths reject schemes traversal controls and bad app IDs', () => {
   const valid = {
     appId: 'wx1234567890abcdef',
     title: '入口',
@@ -122,7 +126,7 @@ test('[O05] mini-program paths reject schemes traversal controls and bad app IDs
   }
 });
 
-test('[O03] location accepts exact coordinate boundaries and rejects non-finite overflow', () => {
+test('location accepts exact coordinate boundaries and rejects non-finite overflow', () => {
   for (const [latitude, longitude] of [
     [-90, -180], [90, 180], [0, 0],
   ]) {
@@ -139,23 +143,4 @@ test('[O03] location accepts exact coordinate boundaries and rejects non-finite 
       name: '点', address: '地址', latitude, longitude,
     }), /between/u);
   }
-});
-
-test('[O07] host budget validates 1..5 and counts split text before accepting a batch', () => {
-  const one = [{ type: 'text', content: 'ok' }];
-  for (const maxMessages of [0, 6, 1.5, Number.NaN]) {
-    assert.throws(
-      () => prepareSendBatch(one, { maxMessages }),
-      code('invalid_send_budget'),
-    );
-  }
-  assert.equal(prepareSendBatch(one, { maxMessages: 1 }).length, 1);
-  assert.equal(prepareSendBatch(one, { maxMessages: 5 }).length, 1);
-  assert.throws(
-    () => prepareSendBatch([
-      { type: 'text', content: '你'.repeat(3_413) },
-      { type: 'text', content: 'sixth message' },
-    ]),
-    code('send_budget_exceeded'),
-  );
 });
