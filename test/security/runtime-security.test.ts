@@ -4,7 +4,10 @@ import { PassThrough, Writable } from 'node:stream';
 import { test } from 'vitest';
 
 import { createCodexAppServer } from '../../src/services/codex-agent.ts';
-import type { SpawnProcess } from '../../src/services/codex-app-server.ts';
+import {
+  CodexAppServer,
+  type SpawnProcess,
+} from '../../src/services/codex-app-server.ts';
 
 type RpcMessage = Record<string, unknown>;
 
@@ -155,4 +158,26 @@ test('Codex Adapter passes only the HTTP MCP bearer and never exposes WeChat sec
     assert.equal(serializedArguments.includes(canary), false, canary);
   }
 
+});
+
+test('low-level Codex app-server does not inherit the host environment by default', async (t) => {
+  const name = 'KINTIO_LOW_LEVEL_ENV_CANARY';
+  const previous = process.env[name];
+  process.env[name] = 'must-not-cross-process-boundary';
+  t.onTestFinished(() => {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  });
+
+  let childEnvironment: NodeJS.ProcessEnv | undefined;
+  const child = new FakeCodexProcess();
+  const server = new CodexAppServer({
+    spawnProcess(_command, _argumentsList, options) {
+      childEnvironment = { ...options.env };
+      return child;
+    },
+  });
+  t.onTestFinished(() => server.close());
+  await server.initialize();
+  assert.deepEqual(childEnvironment, {});
 });

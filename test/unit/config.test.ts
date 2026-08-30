@@ -52,6 +52,22 @@ describe('independent channel activation', () => {
     assert.equal(config.state.lockFile, '/tmp/kintio.lock');
   });
 
+  it('does not infer iLink activation from WeChat KF credentials', () => {
+    assert.throws(() => createConfig({
+      WECOM_CORP_ID: 'ww-explicit-channel',
+      WECOM_KF_SECRET: 'secret',
+      KINTIO_MCP_BEARER_TOKEN: 'k'.repeat(32),
+    }), /ILINK_ENABLED must be explicitly true or false/u);
+    const config = createConfig({
+      WECOM_CORP_ID: 'ww-explicit-channel',
+      WECOM_KF_SECRET: 'secret',
+      KINTIO_MCP_BEARER_TOKEN: 'k'.repeat(32),
+      ILINK_ENABLED: 'false',
+    });
+    assert.equal(config.wecom.api.enabled, true);
+    assert.equal(config.ilink.enabled, false);
+  });
+
   it('keeps callback credentials paired when the callback is enabled', () => {
     assert.throws(
       () => createConfig({ WECOM_CALLBACK_TOKEN: 'CallbackToken123' }),
@@ -110,6 +126,25 @@ test('KINTIO_CONFIG_FILE selects its directory when no instance root is supplied
 
   assert.equal(config.state.databaseFile, path.join(root, 'data/kintio.sqlite'));
   assert.equal(config.codex.workingDirectory, path.join(root, 'agent-work'));
+});
+
+test('default config loading does not copy file values into process.env', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-env-scope-'));
+  const configFile = path.join(root, 'instance.env');
+  const name = 'KINTIO_CONFIG_TEST_CANARY';
+  const previous = process.env[name];
+  delete process.env[name];
+  await fs.writeFile(configFile, `${name}=file-only-value\n`);
+  t.onTestFinished(async () => {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+    await fs.rm(root, { recursive: true, force: true });
+  });
+
+  loadConfig({ envFile: configFile, root });
+  assert.equal(process.env[name], undefined);
+  loadConfig({ environment: process.env, envFile: configFile, root });
+  assert.equal(process.env[name], undefined);
 });
 
 test('fresh state uses Kintio names while an existing legacy database stays in place', () => {

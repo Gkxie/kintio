@@ -579,8 +579,12 @@ export class ConversationProcessor {
         requiredConsecutive: this.#authorization.requiredConsecutive,
         confirmationText: this.#authorization.confirmationText,
       });
-      if (result.newlyAuthorized) void this.#pipeline.channel.kick(channel);
-      return;
+      if (result.decision !== 'already_authorized') {
+        if (result.decision === 'authorized_now') {
+          void this.#pipeline.channel.kick(channel);
+        }
+        return;
+      }
     }
     if (!isSupportedCustomerMessage(message)) {
       this.#store.markInboundIgnored(messageKey);

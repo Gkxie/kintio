@@ -38,6 +38,7 @@ test('runtime keeps project Codex configuration isolated from the user configura
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
     WECOM_CORP_ID: 'ww-runtime-test',
     WECOM_KF_SECRET: 'runtime-secret',
+    ILINK_ENABLED: 'false',
     WECOM_MCP_BEARER_TOKEN: 'r'.repeat(32),
     WECOM_ALLOWED_USER_IDS: 'wm-runtime-test',
     WECOM_DB_FILE: temporary.filePath,

@@ -246,7 +246,7 @@ test('authorization is global but consecutive trigger counting resets by open_kf
     isTrigger: true,
     confirmationText: '暗号确认，请继续对话',
   });
-  assert.equal(authorized.newlyAuthorized, true);
+  assert.equal(authorized.decision, 'authorized_now');
   assert.equal(store.getAuthorization('wm-auth')?.authorized, true);
   assert.equal(store.getInbound(b3)?.status, 'ready');
   const confirmation = inspectAttempts(store.database, b3)[0];
@@ -266,9 +266,7 @@ test('authorization is global but consecutive trigger counting resets by open_kf
       isTrigger: true,
     }),
     {
-      allowed: false,
-      newlyAuthorized: false,
-      duplicate: true,
+      decision: 'duplicate',
       consecutiveMatches: 3,
     },
   );
@@ -280,8 +278,8 @@ test('authorization is global but consecutive trigger counting resets by open_kf
       openKfId: 'wk-a',
       externalUserId: 'wm-auth',
       isTrigger: false,
-    }).allowed,
-    true,
+    }).decision,
+    'already_authorized',
   );
 });
 
