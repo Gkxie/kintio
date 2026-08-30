@@ -4,6 +4,8 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.4.1 - 2026-08-30
+
 - Removed wildcard WeChat authorization; `WECOM_ALLOWED_USER_IDS` now accepts
   explicit `external_userid` values only.
 - Removed the unused `/healthz` endpoint; process state and the Hono startup log
