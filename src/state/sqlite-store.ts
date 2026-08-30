@@ -1867,6 +1867,15 @@ export class SqliteStore {
     `).all()).map((row) => row.open_kfid);
   }
 
+  registerSyncOpenKfId(openKfId: string): void {
+    const service = requiredText(openKfId, 'openKfId');
+    this.database.prepare(`
+      INSERT INTO sync_cursors (open_kfid, cursor, updated_at)
+      VALUES (?, '', ?)
+      ON CONFLICT(open_kfid) DO NOTHING
+    `).run(service, this.#now());
+  }
+
   ingestSyncPage({
     openKfId,
     expectedCursor = '',

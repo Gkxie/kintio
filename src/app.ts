@@ -3,31 +3,25 @@ import { secureHeaders } from 'hono/secure-headers';
 
 import { WecomCrypto } from './lib/wecom-crypto.ts';
 import { registerWecomRoutes } from './routes/wecom.ts';
-import { createRuntime } from './runtime.ts';
 import type { AppConfig } from './config.ts';
 import type { MessageSync } from './routes/wecom.ts';
+import type { Runtime } from './runtime.ts';
 import type { Logger } from './types.ts';
-
-type ChatApp = Hono & {
-  start(): Promise<void>;
-  stopAccepting(): void;
-  shutdown(): Promise<void>;
-  abort(): Promise<void>;
-};
 
 export function createApp({
   config,
   logger = console,
+  runtime,
   messageProcessor,
+  acceptIngress = () => true,
 }: {
   config: AppConfig;
   logger?: Logger;
+  runtime?: Runtime;
   messageProcessor?: MessageSync | null;
-}): ChatApp {
-  const app = new Hono() as ChatApp;
-  const runtime = messageProcessor === undefined
-    ? createRuntime({ config, logger })
-    : undefined;
+  acceptIngress?: () => boolean;
+}): Hono {
+  const app = new Hono();
   const activeMessageProcessor =
     runtime?.messageProcessor ?? messageProcessor ?? null;
 
@@ -47,6 +41,12 @@ export function createApp({
     ? await runtime.handleIlinkMcp(context.req.raw)
     : context.json({ error: 'not found' }, 404));
   if (config.wecom.callbackToken && config.wecom.encodingAesKey) {
+    app.use('/', async (context, next) => {
+      if (context.req.method === 'POST' && !acceptIngress()) {
+        return context.text('service unavailable', 503);
+      }
+      return await next();
+    });
     registerWecomRoutes(app, {
       wecomCrypto: new WecomCrypto(config.wecom),
       logger,
@@ -61,11 +61,6 @@ export function createApp({
     logger.error(`[server] unhandled request error: ${error.message}`);
     return context.text('internal server error', 500);
   });
-
-  app.start = () => runtime ? runtime.start() : Promise.resolve();
-  app.stopAccepting = () => runtime?.stopAccepting();
-  app.shutdown = () => runtime ? runtime.close() : Promise.resolve();
-  app.abort = () => runtime ? runtime.abort() : Promise.resolve();
 
   return app;
 }

@@ -54,8 +54,9 @@ function appWithCalls(calls: Array<{ callbackToken: string; openKfId: string }>)
     config,
     logger: { info() {}, error() {} },
     messageProcessor: {
-      async enqueue(input) {
+      enqueue(input) {
         calls.push(input);
+        return true;
       },
     },
   });

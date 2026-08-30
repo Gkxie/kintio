@@ -13,28 +13,42 @@ Requirements:
 - an HTTPS domain reverse-proxied to `127.0.0.1:8888` when using the WeChat KF callback adapter.
 
 ```bash
+git clone https://github.com/Gkxie/kintio.git
+cd kintio
 corepack enable pnpm
 pnpm install --frozen-lockfile
-cp .env.example .env
+pnpm run build
+npm install --global .
+kintio setup
 codex login status
 ```
 
 Kintio uses the local Codex CLI session directly. It does not copy API keys or modify user-level Codex configuration.
 
+The global command is installed from the checked-out source during the `0.x`
+phase. `kintio setup` creates `~/.kintio` with private directories, installs the
+bundled Agent skill, and writes `~/.kintio/.env` with mode `0600`. It refuses to
+overwrite an existing config. Use `--home` or `--config` for an explicit instance
+location; runtime state never defaults to the global package directory.
+The installed `wechat-kf-reply-sop` file is a Kintio-managed asset and is
+atomically refreshed when `setup` runs after an upgrade. Keep local Agent
+customizations outside that managed Skill path.
+
 ## 2. Configure shared settings
 
-Generate an MCP bearer token:
+`kintio setup` generates the MCP bearer token. To rotate it later, generate a
+replacement with:
 
 ```bash
 node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
 ```
 
-Write the generated value to `.env`:
+Configure the shared settings in `~/.kintio/.env`:
 
 ```dotenv
 PORT=8888
 KINTIO_MCP_URL=http://127.0.0.1:8888/mcp
-KINTIO_MCP_BEARER_TOKEN=paste_the_generated_value_here
+KINTIO_MCP_BEARER_TOKEN=keep_the_value_generated_by_setup
 CODEX_ENABLED=true
 CODEX_WEB_SEARCH_MODE=live
 ```
@@ -135,17 +149,36 @@ WeChat KF and iLink identities remain separate. Scanning the QR code does not co
 ## 5. Start and verify
 
 ```bash
-pnpm start
+kintio start
+kintio status
+kintio logs --lines 100
 ```
 
-`pnpm start` builds the TypeScript project before starting `dist/index.js`. For development, use:
+`kintio start` validates the instance config and asks the pinned PM2 dependency
+to keep exactly one `kintio` process online. Repeating it while that process is
+online reports the existing PID instead of creating another consumer. The
+installed command starts prebuilt JavaScript and never compiles TypeScript at
+runtime. It returns success only after the PM2 worker, selected instance,
+installed script, and a fresh runtime-ready marker agree. A port conflict or
+runtime initialization failure returns nonzero and stops the restart loop;
+inspect `kintio logs --no-follow` for the retained failure log.
+Readiness does not wait for downtime backlog to finish; recoverable messages
+continue at low priority after the live listeners can safely accept work.
+
+For a foreground process under a container or another service manager, use:
+
+```bash
+kintio run
+```
+
+For development inside the source checkout, use:
 
 ```bash
 pnpm run dev
 ```
 
 Successful startup prints `Hono server is listening on port 8888`. Also confirm
-that the logs contain no later `runtime startup failed` entry.
+that the logs contain no later `[supervisor] process failed` entry.
 
 For a WeChat KF deployment, save the callback configuration and complete the authorization flow in section 3.2. For an iLink deployment, send a normal message from the bound account and confirm that the agent replies. If it does not, check for `[ilink-listener] poll cycle failed` in the logs.
 
@@ -157,70 +190,94 @@ pnpm test
 
 The default tests do not contact live messaging providers or a live Codex session.
 
-## 6. Keep the service running with PM2
+## 6. Process lifecycle
 
-PM2 is an optional deployment tool, not a project dependency:
+Kintio packages a fixed PM2 version as its background process manager. Users
+operate it through the Kintio command surface:
 
 ```bash
-pnpm run build
-pm2 start ecosystem.config.cjs
-pm2 save
+kintio start
+kintio status
+kintio logs --lines 100
+kintio restart
+kintio stop
 ```
 
-When upgrading from a TalkFerry release, replace the old PM2 process instead of
-running both names concurrently:
+`stop` sends a graceful process signal covered by lifecycle tests.
+`restart` reloads the current installed code and instance config. The CLI does
+not modify Nginx, provider consoles, shell profiles, or operating-system boot
+configuration. Configure systemd or another boot mechanism separately with
+`kintio run` if the machine must start Kintio automatically after reboot.
+
+Each instance has an isolated PM2 namespace under `<home>/data/pm2`; its process
+state and logs do not mix with another Kintio instance or the user's traditional
+`~/.pm2` daemon. Every lifecycle command for a custom instance must carry the
+same selector, or `KINTIO_CONFIG_FILE` can be exported once for that shell:
 
 ```bash
-pm2 stop talkferry
-pm2 start ecosystem.config.cjs
-pm2 status kintio
-pm2 logs kintio --lines 50 --nostream
+export KINTIO_CONFIG_FILE=/absolute/path/to/existing/.env
+kintio start
+kintio status
+kintio logs --lines 100
+kintio restart
+kintio stop
 ```
 
-Deployments older than `0.2.0` used the still older process name `wechat-bot`;
-use that name in both the stop and delete commands when upgrading directly.
-Keep the stopped old PM2 entry until `kintio` remains online and its logs show
-the Hono listener and startup catch-up without a later `runtime startup failed`.
-After that verification, finalize the migration:
+With no explicit `--home`, the config directory becomes the instance root, so
+relative database and workspace paths retain their existing meaning.
+
+Existing source deployments use the traditional PM2 namespace and are invisible
+to the new instance namespace. Before the first CLI-managed start, use the old
+PM2 command once to stop and delete its `kintio`, `talkferry`, or `wechat-bot`
+entry, then verify the old process and port are gone. Only then run the command
+group above. This is a one-time ownership transfer; starting both managers would
+create competing consumers and is intentionally not automated.
 
 ```bash
-pm2 delete talkferry
-pm2 save
-```
-
-Common commands:
-
-```bash
+# Choose the name shown by the old `pm2 status` output.
+legacy_name=kintio
+pm2 stop "$legacy_name"
+pm2 delete "$legacy_name"
 pm2 status
-pm2 logs kintio
-pm2 restart kintio
 ```
 
-PM2 must run as the same operating-system user that can successfully execute `codex login status`. If you use nvm, reinstall PM2 and update its startup configuration after switching or removing a Node.js version.
+An explicitly supplied `PM2_HOME` overrides instance isolation for advanced
+migration or testing and therefore also opts into that daemon's existing
+version and process set.
+
+The global command and its PM2 daemon must run as the same operating-system user
+that can successfully execute `codex login status`. Reinstall the global Kintio
+command after switching or removing the Node.js version that owns it.
 
 ## 7. Provider constraints
 
 These constraints come from the messaging providers and cannot be bypassed locally by Kintio:
 
-- WeChat KF API access and human-agent handling are mutually exclusive. After switching to human handling, Kintio receives no further callbacks until API access is restored in the provider console.
+- The provider's API access state and provider-side takeover state are mutually exclusive. After provider-side takeover, Kintio receives no further callbacks until API access is restored in the provider console.
 - An iLink Bot can reply only within 24 hours of the user's latest message and can send at most 10 messages in that window. A new user message opens a new reply window.
 - A successful provider API response means the request was accepted, not that the client displayed it. When a process interruption leaves the result uncertain, Kintio does not resend automatically because doing so could duplicate a message.
 - Identities from different adapters remain distinct even when they belong to the same person in the real world.
 
 ## 8. Data and backups
 
-New installations store runtime state in `data/kintio.sqlite`. Upgraded
-deployments continue to use an existing `data/talkferry.sqlite` or
+CLI installations store runtime state in `~/.kintio/data/kintio.sqlite` by
+default. `--home` or `KINTIO_HOME` moves the whole instance; `--config` or
+`KINTIO_CONFIG_FILE` selects an existing environment file. Relative paths in
+that configuration resolve from the instance root, not the package manager's
+global installation directory or the caller's current directory.
+
+Upgraded deployments continue to use an existing `data/talkferry.sqlite` or
 `data/wecom.sqlite` unless `KINTIO_DB_FILE` is set explicitly. If more than one
 default state database exists, Kintio refuses to guess which one is
-authoritative; inspect them and set `KINTIO_DB_FILE` explicitly before
-starting. SQLite files, WAL files, `.env`, temporary media, and iLink storage
-keys are excluded from Git.
+authoritative. SQLite files, WAL files, environment files, temporary media, and
+iLink storage keys are excluded from Git.
+`data/pm2` is disposable process-manager state and logs, not application data;
+do not restore it with SQLite on another machine.
 
 For a deployment migration, stop the currently active process and back up these
 items together:
 
-- `.env`;
+- the active instance environment file (normally `~/.kintio/.env`);
 - the active SQLite file (`data/kintio.sqlite`, `data/talkferry.sqlite`, or
   `data/wecom.sqlite`);
 - `data/ilink-storage.key`, when using the file-based key;

@@ -8,6 +8,67 @@ The current agent runtime is Codex CLI. The code exposes a replaceable agent int
 
 A Kintio deployment shares one Codex login. Each provider identity has an independent Codex thread. Kintio does not implement a multi-tenant model with separate agent credentials or working directories for individual messaging users.
 
+## Installation and instance boundary
+
+The global `kintio` command belongs to the installed package; credentials and
+mutable runtime state do not. By default one instance owns `~/.kintio`, which
+contains its environment file, SQLite state, temporary media, and Agent
+workspace. `KINTIO_HOME` and `KINTIO_CONFIG_FILE`, or their CLI options, select
+an explicit existing instance. Relative configured paths resolve from that
+instance root and never from global `node_modules` or an arbitrary caller
+directory.
+
+[cli.ts](../cli.ts) is the executable entry and [src/cli.ts](../src/cli.ts)
+implements setup and lifecycle commands. Background execution delegates one
+process to the pinned PM2 dependency; [index.ts](../index.ts) is only the thin
+process bootstrap for [KintioSupervisor](../src/supervisor.ts). The CLI does not
+duplicate the SQLite single-instance lock or compile TypeScript during start.
+Background start succeeds only after the process atomically records a fresh
+nonce-and-PID readiness marker following Hono listen and runtime initialization;
+PM2 status alone is not treated as readiness evidence. Downtime backlog is a
+low-priority background responsibility and is not part of the readiness gate.
+
+The Supervisor—not Hono—is the process composition root:
+
+```text
+Kintio process
+└── Supervisor
+    ├── HTTP adapter: Hono callback and MCP routes
+    └── application runtime
+        ├── WeChat message synchronization
+        ├── Weixin iLink polling and login listeners
+        ├── future Feishu WebSocket or another long-lived transport
+        └── SQLite Inbox, scheduler, Agent runtime, and delivery tools
+```
+
+The Supervisor is the process-level composition root; `createRuntime()` is its
+application-level sub-composition root. A future long-lived transport belongs
+beside the existing iLink listeners in the runtime's explicit lifecycle, not in
+a Hono route. Extract a shared channel lifecycle only after the second such
+transport exposes real repetition. Separate operating-system processes remain
+an optional future failure-isolation choice, not a prerequisite for Supervisor
+ownership.
+
+Startup is deliberately phased:
+
+1. construct the shared runtime and MCP handlers;
+2. bind the Hono HTTP channel while callback ingress returns `503`;
+3. start recovery, polling, and other live listeners with MCP already reachable;
+4. open callback ingress; and
+5. publish the process readiness nonce and PID.
+
+Shutdown reverses capability rather than merely reversing object creation:
+
+1. close callback and polling ingress to new work;
+2. keep MCP reachable while active Agent turns and sends drain;
+3. close tools, SQLite, and the instance lock; and
+4. close the HTTP channel.
+
+If graceful drain exceeds its configured limit, abort immediately disables
+tools, Agent work, and listeners without kicking pending sends. The process
+allows at most five additional seconds for cancellation and then exits; SQLite
+and the instance lock use their existing crash-recovery rules on the next start.
+
 ## Message flow
 
 ```text
@@ -32,6 +93,10 @@ SQLite is the source of truth for both inbound and outbound processing:
 ### 1. Messaging adapters
 
 Messaging adapters handle provider protocols. They do not decide what the agent should say.
+
+Hono is the HTTP adapter for callbacks and MCP transport, not the Kintio process
+entry or lifecycle owner. Long polling and future WebSocket adapters do not
+depend on Hono being available as their host.
 
 - WeChat KF callback and signature verification: [src/routes/wecom.ts](../src/routes/wecom.ts)
 - WeChat KF message synchronization: [src/services/wecom-sync.ts](../src/services/wecom-sync.ts)
@@ -98,7 +163,8 @@ The exact recovery, race, and idempotency transitions are specified by these tes
 | Change agent context or steering | `src/services/codex-agent.ts`, `conversation-processor.ts` | `test/integration/codex-*`, `conversation-*` |
 | Change provider send capabilities | `src/mcp/`, `src/domain/send-contract.ts` | `test/integration/*-mcp.test.ts` |
 | Change authorization, queues, or recovery | `src/state/sqlite-store.ts`, `conversation-processor.ts` | `test/recovery/`, `sqlite-*` |
-| Change HTTP callbacks or lifecycle | `src/app.ts`, `src/runtime.ts` | `test/integration/callback.test.ts`, `runtime-*` |
+| Change installation or process lifecycle | `cli.ts`, `src/cli.ts`, `src/supervisor.ts`, `src/config.ts`, `ecosystem.config.cjs` | `test/unit/cli.test.ts`, `test/integration/supervisor.test.ts`, `test/recovery/cli-daemon.test.ts` |
+| Change HTTP callbacks or runtime shutdown | `src/app.ts`, `src/runtime.ts`, `index.ts` | `test/integration/callback.test.ts`, `runtime-*` |
 
 To add a messaging adapter, first implement its listener, identity model, and provider reply window. Then reuse the common Inbox, agent runtime, and MCP receipt contract. Do not leak its payloads or error codes into another adapter, and do not build a generalized framework for hypothetical integrations.
 
