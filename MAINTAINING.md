@@ -69,11 +69,11 @@ to make the project look active. Security reports always follow the
 [private reporting process](SECURITY.md).
 
 Bugs and Features start with `status: needs triage`. Once the direction is
-accepted, remove it and add `status: accepted`. When code is merged but has not
-reached a user release, use `status: pending release`. Add the released version
-and close the issue only after that release is available. Features entering
-implementation must align with [ROADMAP.md](ROADMAP.md) and have a real
-Milestone.
+accepted, remove it and add `status: accepted`. An issue-driven pull request
+uses a closing keyword so the issue closes when the change merges; the
+Changelog and release record carry the later version provenance. Features
+entering implementation must align with [ROADMAP.md](ROADMAP.md) and have a
+real Milestone.
 
 ## Merging pull requests
 

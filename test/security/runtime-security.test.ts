@@ -50,19 +50,14 @@ class FakeCodexProcess extends EventEmitter {
   }
 }
 
-test('Codex Adapter passes only the HTTP MCP bearer and never exposes WeChat secrets', async (t) => {
+test('Codex Adapter inherits the host environment and overlays its scoped MCP capability', async (t) => {
   const environmentCanaries = {
-    WECOM_CORP_ID: 'corp-canary',
-    WECOM_KF_SECRET: 'secret-canary',
-    WECOM_TOOL_OPEN_KFID: 'wk-canary',
-    WECOM_TOOL_EXTERNAL_USER_ID: 'wm-canary',
-    WECOM_DB_FILE: '/private/database-canary.sqlite',
-    WECOM_TOOL_MEDIA_CATALOG_FILE: '/private/media-catalog-canary.json',
-    WECOM_TOOL_DEFER_SEND: 'defer-switch-canary',
-    TALKFERRY_MCP_BEARER_TOKEN: 'talkferry-bearer-canary-value-12345',
-    KINTIO_MCP_BEARER_TOKEN: 'mcp-bearer-canary-value-1234567890',
-    KINTIO_CI_API_KEY: 'ci-provider-key-canary-value',
+    CODEX_SQLITE_HOME: '/private/codex-sqlite',
+    CODEX_CA_CERTIFICATE: '/private/codex-ca.pem',
+    http_proxy: 'http://proxy.example:8080',
+    AGENT_HOST_CANARY: 'host-environment-canary',
   } as const;
+  const mcpBearerToken = 'mcp-bearer-canary-value-1234567890';
   const previous = new Map<string, string | undefined>();
   for (const [name, value] of Object.entries(environmentCanaries)) {
     previous.set(name, process.env[name]);
@@ -101,7 +96,7 @@ test('Codex Adapter passes only the HTTP MCP bearer and never exposes WeChat sec
       spawnProcess,
       logger: { warn() {} },
       mcpUrl: 'https://robot.example/mcp',
-      mcpBearerToken: environmentCanaries.KINTIO_MCP_BEARER_TOKEN,
+      mcpBearerToken,
     },
   );
   t.onTestFinished(() => server.close());
@@ -137,33 +132,21 @@ test('Codex Adapter passes only the HTTP MCP bearer and never exposes WeChat sec
   assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.env_vars'), false);
   assert.equal(
     captured.environment.KINTIO_MCP_BEARER_TOKEN,
-    environmentCanaries.KINTIO_MCP_BEARER_TOKEN,
+    mcpBearerToken,
   );
-  for (const forbiddenName of [
-    'WECOM_CORP_ID',
-    'WECOM_KF_SECRET',
-    'WECOM_DB_FILE',
-    'WECOM_TOOL_OPEN_KFID',
-    'WECOM_TOOL_EXTERNAL_USER_ID',
-    'WECOM_TOOL_MEDIA_CATALOG_FILE',
-    'WECOM_TOOL_DEFER_SEND',
-    'TALKFERRY_MCP_BEARER_TOKEN',
-    'KINTIO_CI_API_KEY',
-  ]) {
-    assert.equal(forbiddenName in captured.environment, false, forbiddenName);
+  for (const [name, value] of Object.entries(environmentCanaries)) {
+    assert.equal(captured.environment[name], value, name);
   }
-  assert.equal(captured.environment.HOME, process.env.HOME);
-  assert.equal(captured.environment.CODEX_HOME, process.env.CODEX_HOME);
   for (const canary of Object.values(environmentCanaries)) {
     assert.equal(serializedArguments.includes(canary), false, canary);
   }
 
 });
 
-test('low-level Codex app-server does not inherit the host environment by default', async (t) => {
+test('low-level Codex app-server follows normal child-process environment inheritance', async (t) => {
   const name = 'KINTIO_LOW_LEVEL_ENV_CANARY';
   const previous = process.env[name];
-  process.env[name] = 'must-not-cross-process-boundary';
+  process.env[name] = 'must-cross-process-boundary';
   t.onTestFinished(() => {
     if (previous === undefined) delete process.env[name];
     else process.env[name] = previous;
@@ -179,5 +162,5 @@ test('low-level Codex app-server does not inherit the host environment by defaul
   });
   t.onTestFinished(() => server.close());
   await server.initialize();
-  assert.deepEqual(childEnvironment, {});
+  assert.equal(childEnvironment?.[name], 'must-cross-process-boundary');
 });

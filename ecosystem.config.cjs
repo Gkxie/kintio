@@ -26,6 +26,7 @@ module.exports = {
       merge_logs: true,
       time: true,
       env: {
+        ...process.env,
         NODE_ENV: 'production',
         KINTIO_HOME: instanceRoot,
         KINTIO_CONFIG_FILE: configFile,

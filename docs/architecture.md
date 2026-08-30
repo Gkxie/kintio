@@ -117,7 +117,17 @@ In-process queues only drive work forward; SQLite owns recoverable state. Databa
 
 [src/agent/runtime.ts](../src/agent/runtime.ts) defines the minimal agent lifecycle Kintio needs: start, steer, resume, and stop. [src/services/codex-agent.ts](../src/services/codex-agent.ts) is the current Codex CLI implementation, while [src/services/codex-app-server.ts](../src/services/codex-app-server.ts) implements the app-server protocol.
 
-The agent adapter receives channel-neutral text, images, and summaries. It never receives provider secrets, real user IDs, raw `media_id` values, or database paths. Provider payloads, error codes, and delivery policies cannot enter channel-neutral adapter input. MCP tools may return sanitized execution facts to the agent.
+The Agent process inherits the environment supplied to Kintio by its host.
+Kintio parses its instance `.env` without copying those values into
+`process.env`; adapter credentials therefore remain application configuration
+unless the operator explicitly exports them in the host environment. Each
+Agent adapter overlays only the capabilities it needs for the current runtime.
+
+The structured Agent input contains channel-neutral text, images, and summaries.
+Kintio does not place provider secrets, real user IDs, raw `media_id` values, or
+database paths in that input. Provider payloads, error codes, and delivery
+policies cannot enter channel-neutral adapter input. MCP tools may return
+sanitized execution facts to the Agent.
 
 ### 4. MCP action tools
 
