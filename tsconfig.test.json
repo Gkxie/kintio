@@ -4,6 +4,7 @@
     "noEmit": true
   },
   "include": [
+    "cli.ts",
     "index.ts",
     "src/**/*.ts",
     "scripts/**/*.ts",

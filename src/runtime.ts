@@ -34,7 +34,7 @@ import {
 import type { AppConfig } from './config.ts';
 import type { ChatChannel, Logger } from './types.ts';
 
-interface Runtime {
+export interface Runtime {
   readonly messageProcessor: WecomSync | null;
   start(): Promise<void>;
   handleMcp(request: Request): Promise<Response>;
@@ -157,7 +157,8 @@ export function createRuntime({
       }
     }, 60 * 60 * 1000);
     cleanupTimer.unref();
-    store.recoverStartup();
+    const startupInbound = store.recoverStartup().inbound.filter((record) =>
+      enabledChannels.includes(record.channel));
     const apiClient = config.wecom.api.enabled
       ? new WecomApiClient({
           corpId: config.wecom.api.corpId,
@@ -291,6 +292,7 @@ export function createRuntime({
       authorization: config.wecom.authorization,
       logger,
     });
+    let requestDeferredDrain = (): void => {};
     const sync = apiClient
       ? new WecomSync({
           apiClient,
@@ -298,9 +300,11 @@ export function createRuntime({
           processor,
           logger,
           startPaused: true,
+          onDeferredReady() {
+            queueMicrotask(requestDeferredDrain);
+          },
         })
       : undefined;
-    let requestDeferredDrain = (): void => {};
     ilinkListener = ilinkStore && ilinkSecretBox
       ? new IlinkListenerManager({
           logger,
@@ -390,7 +394,10 @@ export function createRuntime({
         })
       : undefined;
     let starting: Promise<void> | undefined;
+    let startupRecovery: Promise<void> | undefined;
     let closing: Promise<void> | undefined;
+    let accepting = true;
+    let toolsUnavailable = false;
     let ilinkClosing: Promise<void> | undefined;
     let deferredDrain: Promise<void> | undefined;
     let deferredDrainRequested = false;
@@ -427,24 +434,33 @@ export function createRuntime({
     const runtime = {
       messageProcessor: sync || null,
       start(): Promise<void> {
+        if (!accepting) return Promise.reject(new Error('Kintio runtime is stopping'));
         starting ||= (async () => {
-          await sync?.catchUp();
-          await sync?.waitForIdle();
+          const catchUp = sync?.catchUp() || Promise.resolve();
           const recovery = processor.recover(
-            activeStore.recoverStartup().inbound.filter((record) =>
-              enabledChannels.includes(record.channel)),
+            startupInbound,
+            { priority: 'low' },
           );
           sync?.startConsuming();
-          await recovery;
-          await channelDispatcher.kick();
           await ilinkListener?.start();
           await ilinkLogin?.start();
-          if (!ilinkListener) requestDeferredDrain();
+          startupRecovery = Promise.all([catchUp, recovery])
+            .then(async () => {
+              await channelDispatcher.kick();
+              if (!ilinkListener) requestDeferredDrain();
+            })
+            .catch((error: unknown) => {
+              logger.error(
+                `[recovery] startup backlog failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            });
         })();
         return starting;
       },
       handleMcp(request: Request): Promise<Response> {
-        if (closing || !wechatTools) {
+        if (toolsUnavailable || !wechatTools) {
           return Promise.resolve(
             Response.json({ error: 'service unavailable' }, { status: 503 }),
           );
@@ -456,7 +472,7 @@ export function createRuntime({
         });
       },
       handleMemoryMcp(request: Request): Promise<Response> {
-        if (closing) {
+        if (toolsUnavailable) {
           return Promise.resolve(
             Response.json({ error: 'service unavailable' }, { status: 503 }),
           );
@@ -468,7 +484,7 @@ export function createRuntime({
         });
       },
       handleIlinkMcp(request: Request): Promise<Response> {
-        if (closing || !ilinkTools) {
+        if (toolsUnavailable || !ilinkTools) {
           return Promise.resolve(
             Response.json({ error: 'service unavailable' }, { status: 503 }),
           );
@@ -480,6 +496,8 @@ export function createRuntime({
         });
       },
       stopAccepting() {
+        if (!accepting) return;
+        accepting = false;
         sync?.stopAccepting();
         processor.stopAccepting();
         ilinkClosing ||= Promise.all([
@@ -491,24 +509,39 @@ export function createRuntime({
         if (closing) return closing;
         runtime.stopAccepting();
         closing = (async () => {
-          await starting?.catch(() => undefined);
-          await deferredDrain?.catch(() => undefined);
-          await sync?.close();
-          await ilinkClosing;
-          await processor.close();
-          await ilinkTools?.waitForIdle();
-          await wechatTools?.close();
-          if (cleanupTimer) clearInterval(cleanupTimer);
-          activeStore.cleanup();
-          ilinkOffers?.cleanup();
-          activeStore.checkpoint('TRUNCATE');
-          activeStore.close();
-          instanceLock.release();
+          try {
+            await starting?.catch(() => undefined);
+            await startupRecovery?.catch(() => undefined);
+            await deferredDrain?.catch(() => undefined);
+            await sync?.close();
+            await ilinkClosing;
+            await processor.close();
+          } finally {
+            toolsUnavailable = true;
+            await Promise.allSettled([
+              ilinkTools?.waitForIdle(),
+              wechatTools?.close(),
+            ]);
+            if (cleanupTimer) clearInterval(cleanupTimer);
+            try {
+              activeStore.cleanup();
+              ilinkOffers?.cleanup();
+              activeStore.checkpoint('TRUNCATE');
+            } finally {
+              try {
+                activeStore.close();
+              } finally {
+                instanceLock.release();
+              }
+            }
+          }
         })();
         return closing;
       },
       async abort(): Promise<void> {
         runtime.stopAccepting();
+        toolsUnavailable = true;
+        wechatTools?.abort();
         await processor.abort();
         await ilinkClosing;
       },

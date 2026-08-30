@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseEnv } from 'node:util';
 
 export function resolveProjectRoot(moduleUrl: string): string {
   const moduleDirectory = path.dirname(fileURLToPath(moduleUrl));
@@ -12,9 +13,16 @@ export function resolveProjectRoot(moduleUrl: string): string {
 
 const projectRoot = resolveProjectRoot(import.meta.url);
 
+function resolveInstanceRoot(
+  environment: NodeJS.ProcessEnv = process.env,
+  fallback = projectRoot,
+): string {
+  return path.resolve(environment.KINTIO_HOME || fallback);
+}
+
 export function resolveStateFiles(
   environment: NodeJS.ProcessEnv = process.env,
-  root = projectRoot,
+  root = resolveInstanceRoot(environment),
   fileExists: (filePath: string) => boolean = fs.existsSync,
 ): { readonly databaseFile: string; readonly lockFile: string } {
   const configuredDatabaseFile =
@@ -39,6 +47,7 @@ export function resolveStateFiles(
     );
   }
   const databaseFile = path.resolve(
+    root,
     configuredDatabaseFile || existingDefaultFiles[0] || defaultDatabaseFile,
   );
   const originalDatabaseSelection =
@@ -143,9 +152,15 @@ export interface AppConfig {
   readonly codex: CodexConfig;
 }
 
-function loadEnvironmentFile(filePath: string): void {
+function loadEnvironmentFile(
+  filePath: string,
+  environment: NodeJS.ProcessEnv,
+): void {
   try {
-    process.loadEnvFile(filePath);
+    const parsed = parseEnv(fs.readFileSync(filePath, 'utf8'));
+    for (const [name, value] of Object.entries(parsed)) {
+      if (environment[name] === undefined) environment[name] = value;
+    }
   } catch (error: unknown) {
     if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
       throw error;
@@ -239,6 +254,7 @@ function parseBoundedText(
 
 export function createConfig(
   environment: NodeJS.ProcessEnv = process.env,
+  root = resolveInstanceRoot(environment),
 ): AppConfig {
   const port = parsePort(environment.PORT);
   const callbackToken = environment.WECOM_CALLBACK_TOKEN || '';
@@ -322,10 +338,11 @@ export function createConfig(
     'CODEX_WEB_SEARCH_MODE',
     'live',
   );
-  const { databaseFile, lockFile } = resolveStateFiles(environment);
+  const { databaseFile, lockFile } = resolveStateFiles(environment, root);
   const codexWorkingDirectory = path.resolve(
+    root,
     environment.CODEX_WORKING_DIRECTORY ||
-      path.join(projectRoot, 'codex-workspace'),
+      'codex-workspace',
   );
   const apiTimeoutMs = parsePositiveInteger(
     environment.WECOM_API_TIMEOUT_MS,
@@ -333,6 +350,15 @@ export function createConfig(
     'WECOM_API_TIMEOUT_MS',
     120_000,
   );
+  const shutdownTimeoutMs = parsePositiveInteger(
+    environment.SHUTDOWN_TIMEOUT_MS,
+    10_000,
+    'SHUTDOWN_TIMEOUT_MS',
+    120_000,
+  );
+  if (shutdownTimeoutMs < 1_000) {
+    throw new Error('SHUTDOWN_TIMEOUT_MS must be at least 1000');
+  }
 
   return Object.freeze({
     port,
@@ -383,6 +409,7 @@ export function createConfig(
       enabled: ilinkEnabled,
       storageKey: ilinkStorageKey,
       storageKeyFile: path.resolve(
+        root,
         environment.ILINK_STORAGE_KEY_FILE ||
           path.join(path.dirname(databaseFile), 'ilink-storage.key'),
       ),
@@ -410,11 +437,7 @@ export function createConfig(
     state: Object.freeze({
       databaseFile,
       lockFile,
-      shutdownTimeoutMs: parsePositiveInteger(
-        environment.SHUTDOWN_TIMEOUT_MS,
-        10_000,
-        'SHUTDOWN_TIMEOUT_MS',
-      ),
+      shutdownTimeoutMs,
     }),
     codex: Object.freeze({
       enabled: codexEnabled,
@@ -428,8 +451,9 @@ export function createConfig(
       ),
       webSearchMode: webSearchMode ?? 'live',
       imageTempDirectory: path.resolve(
+        root,
         environment.CODEX_IMAGE_TMP_DIR ||
-          path.join(projectRoot, 'data/codex-input'),
+          'data/codex-input',
       ),
       workingDirectory: codexWorkingDirectory,
       generatedImageDirectory: path.join(codexWorkingDirectory, 'generated_images'),
@@ -438,8 +462,23 @@ export function createConfig(
 }
 
 export function loadConfig(
-  { envFile = path.join(projectRoot, '.env') }: { envFile?: string } = {},
+  options: {
+    envFile?: string;
+    environment?: NodeJS.ProcessEnv;
+    root?: string;
+  } = {},
 ): AppConfig {
-  loadEnvironmentFile(envFile);
-  return createConfig();
+  const environment = options.environment || process.env;
+  const configuredEnvFile = options.envFile || environment.KINTIO_CONFIG_FILE;
+  const initialRoot = path.resolve(
+    options.root ||
+      environment.KINTIO_HOME ||
+      (configuredEnvFile ? path.dirname(path.resolve(configuredEnvFile)) : projectRoot),
+  );
+  const envFile = path.resolve(
+    configuredEnvFile || path.join(initialRoot, '.env'),
+  );
+  loadEnvironmentFile(envFile, environment);
+  const root = path.resolve(options.root || environment.KINTIO_HOME || initialRoot);
+  return createConfig(environment, root);
 }

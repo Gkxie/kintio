@@ -20,6 +20,7 @@ import {
   IlinkMessageType,
 } from '../../src/ilink/protocol/types.ts';
 import { CodexAgent } from '../../src/services/codex-agent.ts';
+import { createRuntime } from '../../src/runtime.ts';
 import { SqliteStore } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
@@ -240,15 +241,16 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     warn: (message: string) => loggerMessages.push(message),
     error: (message: string) => loggerMessages.push(message),
   };
-  const app = createApp({ config, logger });
+  const runtime = createRuntime({ config, logger });
+  const app = createApp({ config, logger, runtime });
   let shutDown = false;
   t.onTestFinished(async () => {
     for (const submission of submissions) {
       submission.completion.reject(new Error('active runtime test cleanup'));
     }
     if (!shutDown) {
-      await app.abort();
-      await app.shutdown();
+      await runtime.abort();
+      await runtime.close();
     }
   });
 
@@ -256,7 +258,7 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     (await app.request('/mcp/ilink', { method: 'POST' })).status,
     401,
   );
-  await app.start();
+  await runtime.start();
   await until(() => submissions.length === 2 &&
     accounts.every((value) => pollCount.get(value.botToken) === 2));
 
@@ -390,17 +392,21 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     (row) => row.status === 'accepted' && row.channel === 'weixin_ilink',
   ));
 
-  const shutdown = app.shutdown();
+  runtime.stopAccepting();
+  assert.equal(
+    (await app.request('/mcp/ilink', { method: 'POST' })).status,
+    401,
+  );
+  await runtime.close();
   assert.equal(
     (await app.request('/mcp/ilink', { method: 'POST' })).status,
     503,
   );
-  await shutdown;
   shutDown = true;
   assert.deepEqual([...abortedPolls].sort(), accounts.map((value) => value.botToken).sort());
   assert.deepEqual([...lifecycleStops].sort(), accounts.map((value) => value.botToken).sort());
   await assert.rejects(fs.access(config.state.lockFile), { code: 'ENOENT' });
-  await app.shutdown();
+  await runtime.close();
   assert.equal(
     loggerMessages.some((message) => /Codex|network request/iu.test(message)),
     false,

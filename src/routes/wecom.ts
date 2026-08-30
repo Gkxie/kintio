@@ -12,7 +12,7 @@ interface CallbackContext {
 }
 
 export interface MessageSync {
-  enqueue(input: { callbackToken: string; openKfId: string }): Promise<unknown>;
+  enqueue(input: { callbackToken: string; openKfId: string }): boolean;
 }
 
 function getCallbackParameters(
@@ -127,7 +127,18 @@ export function registerWecomRoutes(
 
         if (event === 'kf_msg_or_event' && messageProcessor) {
           if (callbackToken && openKfId !== 'unknown') {
-            void messageProcessor.enqueue({ callbackToken, openKfId });
+            let accepted = false;
+            try {
+              accepted = messageProcessor.enqueue({ callbackToken, openKfId });
+            } catch (error: unknown) {
+              logger.error(
+                `[wecom] callback sync registration failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+              return context.text('service unavailable', 503);
+            }
+            if (!accepted) return context.text('service unavailable', 503);
           } else {
             logger.warn?.(
               '[wecom] callback did not contain Token and OpenKfId; message sync skipped',

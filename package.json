@@ -6,6 +6,21 @@
   "packageManager": "pnpm@10.34.5",
   "type": "module",
   "description": "Connect chat channels to an Agent you control",
+  "bin": {
+    "kintio": "bin/kintio.js"
+  },
+  "files": [
+    "bin/kintio.js",
+    "dist",
+    "codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md",
+    ".env.example",
+    "ecosystem.config.cjs",
+    "README.md",
+    "README.zh-CN.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "THIRD_PARTY_NOTICES"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Gkxie/kintio.git"
@@ -25,7 +40,8 @@
     "build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "dev": "node --watch index.ts",
     "start": "pnpm run build && node dist/index.js",
-    "test": "vitest run"
+    "test": "vitest run",
+    "prepack": "pnpm run build"
   },
   "engines": {
     "node": ">=24"
@@ -34,6 +50,7 @@
     "@hono/node-server": "^2.0.12",
     "@modelcontextprotocol/sdk": "^1.30.0",
     "hono": "^4.13.5",
+    "pm2": "7.0.4",
     "qrcode": "1.5.4",
     "zod": "^4.4.3"
   },

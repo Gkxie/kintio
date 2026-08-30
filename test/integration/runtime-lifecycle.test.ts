@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { test } from 'vitest';
 import type { TestContext } from 'vitest';
 
@@ -87,14 +89,13 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
     (await runtime.handleIlinkMcp(new Request('http://localhost/mcp/ilink'))).status,
     401,
   );
-  await runtime.close();
 
-  const app = createApp({ config, logger });
+  const app = createApp({ config, logger, runtime });
   const rootResponse = await app.request('/');
   assert.equal(await rootResponse.text(), 'hello world');
   assert.equal((await app.request('/', { method: 'POST' })).status, 404);
   assert.equal((await app.request('/mcp/ilink', { method: 'POST' })).status, 401);
-  await app.shutdown();
+  await runtime.close();
 
   const preserved = new SqliteStore({ filePath: databaseFile });
   t.onTestFinished(() => preserved.close());
@@ -108,16 +109,12 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
   }, { live: 'received', deferred: true });
 });
 
-test('app with an injected processor has no-op lifecycle hooks', async () => {
+test('Hono remains a route adapter when no runtime is attached', async () => {
   const config = createConfig({
     WECOM_CALLBACK_TOKEN: 'RuntimeToken123',
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
   });
   const app = createApp({ config, logger, messageProcessor: null });
-  await app.start();
-  app.stopAccepting();
-  await app.abort();
-  await app.shutdown();
   assert.equal((await app.request('/mcp', { method: 'POST' })).status, 404);
 });
 
@@ -143,16 +140,73 @@ test('active runtime stop/abort/close are safe and close releases the instance l
   await runtime.close();
 });
 
-test('app stopAccepting, abort, and shutdown hooks delegate active lifecycle', async (t) => {
+test('runtime readiness does not wait for a blocked startup catch-up backlog', async (t) => {
   const directory = await workspace(t);
-  const config = activeConfig(directory);
-  const app = createApp({ config, logger });
-  await app.start();
-  assert.equal((await app.request('/mcp', { method: 'POST' })).status, 401);
-  assert.equal((await app.request('/mcp/ilink', { method: 'POST' })).status, 401);
-  app.stopAccepting();
-  await app.abort();
-  await app.shutdown();
-  await assert.rejects(fs.access(config.state.lockFile), { code: 'ENOENT' });
-  await app.shutdown();
+  const databaseFile = path.join(directory, 'catch-up.sqlite');
+  const seeded = new SqliteStore({ filePath: databaseFile });
+  seeded.ingestSyncPage({
+    openKfId: 'wk-catch-up',
+    nextCursor: 'cursor-before-start',
+    messages: [],
+  });
+  seeded.close();
+
+  let releaseSync!: () => void;
+  const blockedSync = new Promise<void>((resolve) => { releaseSync = resolve; });
+  let markSyncStarted!: () => void;
+  const syncStarted = new Promise<void>((resolve) => { markSyncStarted = resolve; });
+  const provider = http.createServer(async (request, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    if (request.url?.startsWith('/cgi-bin/gettoken')) {
+      response.end(JSON.stringify({
+        errcode: 0,
+        access_token: 'startup-token',
+        expires_in: 7200,
+      }));
+      return;
+    }
+    markSyncStarted();
+    await blockedSync;
+    response.end(JSON.stringify({
+      errcode: 0,
+      next_cursor: 'cursor-after-start',
+      has_more: 0,
+      msg_list: [],
+    }));
+  });
+  await new Promise<void>((resolve, reject) => {
+    provider.once('error', reject);
+    provider.listen(0, '127.0.0.1', resolve);
+  });
+  t.onTestFinished(async () => {
+    releaseSync();
+    await new Promise<void>((resolve) => provider.close(() => resolve()));
+  });
+  const address = provider.address();
+  if (!address || typeof address === 'string') throw new Error('Missing provider port');
+  const config = createConfig({
+    WECOM_CALLBACK_TOKEN: 'RuntimeToken123',
+    WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
+    WECOM_CORP_ID: 'ww-runtime',
+    WECOM_KF_SECRET: 'runtime-secret',
+    WECOM_API_BASE_URL: `http://127.0.0.1:${address.port}`,
+    WECOM_API_TIMEOUT_MS: '5000',
+    KINTIO_MCP_BEARER_TOKEN: 'r'.repeat(32),
+    KINTIO_DB_FILE: databaseFile,
+    CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
+    CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
+  });
+  const runtime = createRuntime({ config, logger });
+  t.onTestFinished(() => runtime.close());
+
+  const started = runtime.start();
+  await syncStarted;
+  await Promise.race([
+    started,
+    delay(500).then(() => {
+      throw new Error('runtime readiness waited for startup catch-up');
+    }),
+  ]);
+  releaseSync();
+  await runtime.close();
 });
