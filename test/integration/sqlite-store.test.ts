@@ -84,8 +84,10 @@ test('SQLite store creates private directory and WAL/FULL/FK schema', (t) => {
     'send_attempts',
     'sync_cursors',
   ]);
-  assert.equal(fs.statSync(path.dirname(filePath)).mode & 0o777, 0o700);
-  assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(path.dirname(filePath)).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+  }
   assert.deepEqual(store.integrityCheck().map(Object.values), [['ok']]);
   assert.deepEqual(store.foreignKeyCheck(), []);
 });
@@ -99,8 +101,13 @@ test('SQLite store preserves an existing shared parent directory mode', (t) => {
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
-  assert.equal(fs.statSync(directory).mode & 0o777, 0o777);
-  assert.equal(fs.statSync(store.filePath).mode & 0o777, 0o600);
+  if (process.platform === 'win32') {
+    assert.equal(fs.statSync(directory).isDirectory(), true);
+    assert.equal(fs.statSync(store.filePath).isFile(), true);
+  } else {
+    assert.equal(fs.statSync(directory).mode & 0o777, 0o777);
+    assert.equal(fs.statSync(store.filePath).mode & 0o777, 0o600);
+  }
 });
 
 test('sync page atomically inserts messages and advances a CAS cursor', (t) => {

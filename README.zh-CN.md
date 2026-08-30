@@ -50,8 +50,9 @@ kintio setup
 codex login status
 ```
 
-`kintio setup` 会在 `~/.kintio` 创建私有实例目录、安装内置 Agent Skill，并生成权限为
-`0600`、已经包含强 MCP Token 的 `.env`。默认不启用任何适配器；请按英文
+`kintio setup` 会在 `~/.kintio` 创建私有实例目录、安装内置 Agent Skill，并生成已经包含
+强 MCP Token 的 `.env`。macOS/Linux 使用 `0600`，Windows 则限定在当前用户目录的 ACL
+边界内。默认不启用任何适配器；请按英文
 [部署指南](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)配置 WeChat KF API，或为已有 Weixin iLink 绑定设置
 `ILINK_ENABLED=true`。
 
@@ -61,8 +62,8 @@ kintio status
 kintio logs --lines 100
 ```
 
-启动成功后会输出 `Hono server is listening on port 8888`；投入使用前仍需按部署
-指南完成回调或绑定验证。需要前台进程时使用 `kintio run`；现有源码目录部署可以在完成
+启动后应确认 `kintio logs` 包含 `Hono server is listening on port 8888`；投入使用前仍需按
+部署指南完成回调或绑定验证。需要前台进程时使用 `kintio run`；现有源码目录部署可以在完成
 部署指南中的一次性进程管理器迁移后，继续使用原数据库和配置。
 
 ## 英文文档

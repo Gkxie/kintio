@@ -1,6 +1,7 @@
 {
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "entry": [
+    "daemon.ts",
     "vitest*.config.ts",
     "test/**/*.test.ts",
     "test/opt-in/**/*.integration.ts"

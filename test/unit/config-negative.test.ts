@@ -1,12 +1,23 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'vitest';
 
-import { createConfig } from '../../src/config.ts';
+import { createConfig, loadConfig } from '../../src/config.ts';
 
 const base: NodeJS.ProcessEnv = {
   WECOM_CALLBACK_TOKEN: 'CallbackToken123',
   WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
 };
+
+test('configuration loading rejects an unreadable environment-file type', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kintio-invalid-env-'));
+  const envFile = path.join(root, '.env');
+  fs.mkdirSync(envFile);
+  t.onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
+  assert.throws(() => loadConfig({ root, envFile, environment: {} }));
+});
 
 test('PORT rejects non-integers and values outside 1..65535', () => {
   for (const value of ['0', '65536', '1.5', '-1', 'abc', 'Infinity']) {

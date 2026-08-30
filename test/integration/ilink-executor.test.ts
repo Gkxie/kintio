@@ -31,7 +31,7 @@ async function fixture(
 ) {
   const temp = await createTempSqlite(t, { prefix: 'ilink-executor-' });
   let now = 1_800_000_000_000;
-  const store = new SqliteStore({ filePath: temp.filePath, clock: () => now });
+  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock: () => now }));
   const ilinkStore = new IlinkSqliteStore({ store, clock: () => now });
   const box = new IlinkSecretBox(key);
   ilinkStore.registerAccount({

@@ -58,7 +58,11 @@ test('runtime keeps project Codex configuration isolated from the user configura
   });
 
   assert.ok(runtime.messageProcessor);
-  assert.equal((await fs.stat(temporary.filePath)).mode & 0o777, 0o600);
+  if (process.platform === 'win32') {
+    assert.equal((await fs.stat(temporary.filePath)).isFile(), true);
+  } else {
+    assert.equal((await fs.stat(temporary.filePath)).mode & 0o777, 0o600);
+  }
   await fs.access(config.state.lockFile);
 
   await runtime.close();

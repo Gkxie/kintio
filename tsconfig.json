@@ -29,6 +29,7 @@
   },
   "include": [
     "cli.ts",
+    "daemon.ts",
     "index.ts",
     "src/**/*.ts"
   ],

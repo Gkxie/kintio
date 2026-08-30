@@ -11,7 +11,7 @@ import {
   SqliteStore,
   stableMessageKey,
 } from '../../src/state/sqlite-store.ts';
-import { startTestChild } from '../support/child-process.ts';
+import { isForcedExit, startTestChild } from '../support/child-process.ts';
 import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
@@ -191,7 +191,7 @@ async function seedDatabase(
     prefix: `wechat-auth-${suffix}-`,
     filename: 'wecom.sqlite',
   });
-  const store = new SqliteStore({ filePath: temporary.filePath });
+  const store = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
   const messageKey = seedAuthorizationPrelude(store, suffix);
   store.close();
   return { filePath: temporary.filePath, messageKey };
@@ -232,10 +232,7 @@ if (workerMode === '--atomic-worker') {
         ],
       });
       await waitForFile(barrierFile);
-      assert.deepEqual(await child.stop('SIGKILL'), {
-        code: null,
-        signal: 'SIGKILL',
-      });
+      assert.equal(isForcedExit(await child.stop('SIGKILL'), 'SIGKILL'), true);
 
       const recovered = new SqliteStore({ filePath: seeded.filePath });
       subtest.onTestFinished(() => recovered.close());
@@ -269,10 +266,7 @@ if (workerMode === '--atomic-worker') {
           'type' in message && message.type === 'authorization-committed',
       );
       assert.equal(committed.status, 'pending');
-      assert.deepEqual(await authorizer.stop('SIGKILL'), {
-        code: null,
-        signal: 'SIGKILL',
-      });
+      assert.equal(isForcedExit(await authorizer.stop('SIGKILL'), 'SIGKILL'), true);
 
       const audit = new SqliteStore({ filePath: seeded.filePath });
       const attempt = inspectAttempts(audit.database, seeded.messageKey)[0];
@@ -312,10 +306,7 @@ if (workerMode === '--atomic-worker') {
           'attemptId' in claimed ? claimed.attemptId : undefined,
         attempt.attemptId,
       );
-      assert.deepEqual(await sender.stop('SIGKILL'), {
-        code: null,
-        signal: 'SIGKILL',
-      });
+      assert.equal(isForcedExit(await sender.stop('SIGKILL'), 'SIGKILL'), true);
 
       const recovered = new SqliteStore({ filePath: seeded.filePath });
       assert.equal(inspectAttempt(recovered.database, attempt.attemptId)?.status, 'sending');
@@ -343,10 +334,7 @@ if (workerMode === '--atomic-worker') {
           'attemptId' in accepted ? accepted.attemptId : undefined,
         attempt.attemptId,
       );
-      assert.deepEqual(await sender.stop('SIGKILL'), {
-        code: null,
-        signal: 'SIGKILL',
-      });
+      assert.equal(isForcedExit(await sender.stop('SIGKILL'), 'SIGKILL'), true);
 
       const recovered = new SqliteStore({ filePath: seeded.filePath });
       assert.equal(recovered.recoverStartup().uncertainSends, 0);

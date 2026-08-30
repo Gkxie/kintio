@@ -242,6 +242,10 @@ test("SQLite state remains private without a host image spool", async (t) => {
   const databaseFile = path.join(directory, "private", "wecom.sqlite");
   const store = new SqliteStore({ filePath: databaseFile });
   t.onTestFinished(() => store.close());
-  assert.equal((await fs.stat(path.dirname(databaseFile))).mode & 0o777, 0o700);
-  assert.equal((await fs.stat(databaseFile)).mode & 0o777, 0o600);
+  if (process.platform === 'win32') {
+    assert.equal((await fs.stat(databaseFile)).isFile(), true);
+  } else {
+    assert.equal((await fs.stat(path.dirname(databaseFile))).mode & 0o777, 0o700);
+    assert.equal((await fs.stat(databaseFile)).mode & 0o777, 0o600);
+  }
 });

@@ -1,17 +1,28 @@
-import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { parseArgs } from 'node:util';
+import crossSpawn from 'cross-spawn';
 
-import { loadConfig, resolveProjectRoot } from './config.ts';
+import {
+  DAEMON_STOP_TIMEOUT_MS,
+  loadConfig,
+  parseStartTimeout,
+  resolveProjectRoot,
+} from './config.ts';
+import { isPathInside, samePath } from './lib/path-identity.ts';
 import { ensurePrivateDirectory } from './lib/private-directory.ts';
-import { matchesReadyMarker } from './runtime/ready-marker.ts';
+import {
+  daemonRecordPath,
+  readDaemonRecord,
+  requestControl,
+  type ControlResponse,
+} from './runtime/daemon-protocol.ts';
 import {
   acquireSingleInstanceLock,
+  processIsAlive,
   SingleInstanceLockError,
 } from './runtime/single-instance-lock.ts';
 import { KINTIO_VERSION } from './version.ts';
@@ -20,14 +31,19 @@ interface ProcessRequest {
   readonly file: string;
   readonly args: readonly string[];
   readonly env: NodeJS.ProcessEnv;
-  readonly capture?: boolean;
-  readonly timeoutMs?: number;
 }
 
-interface ProcessResult {
-  readonly code: number;
-  readonly stdout: string;
-  readonly stderr: string;
+interface DaemonLaunchRequest {
+  readonly file: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly env: NodeJS.ProcessEnv;
+}
+
+interface DaemonProcess {
+  readonly pid: number;
+  readonly exited: Promise<void>;
+  readonly kill: (signal: NodeJS.Signals) => boolean;
 }
 
 interface CliRuntime {
@@ -35,7 +51,8 @@ interface CliRuntime {
   readonly cwd: string;
   readonly homeDirectory: string;
   readonly packageRoot: string;
-  readonly execute: (request: ProcessRequest) => Promise<ProcessResult>;
+  readonly execute: (request: ProcessRequest) => Promise<number>;
+  readonly launchDaemon: (request: DaemonLaunchRequest) => DaemonProcess;
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
 }
@@ -45,30 +62,15 @@ interface InstanceLocation {
   readonly configFile: string;
 }
 
-interface Pm2Process {
-  readonly pid?: number;
-  readonly name?: string;
-  readonly pm2_env?: {
-    readonly status?: string;
-    readonly kill_timeout?: number;
-    readonly pm_exec_path?: string;
-    readonly KINTIO_HOME?: string;
-    readonly KINTIO_CONFIG_FILE?: string;
-    readonly KINTIO_START_TOKEN?: string;
-  };
-}
-
-const PM2_COMMAND_GRACE_MS = 5_000;
-
 const HELP = `Usage: kintio <command> [options]
 
 Commands:
   setup                 Create a private instance directory and configuration
-  start                 Start Kintio in the background with PM2
+  start                 Start Kintio in the background
   run                   Run Kintio in the foreground
   stop                  Stop the background Kintio process
   restart               Restart Kintio with the current installation and config
-  status                Show the PM2 process status
+  status                Show the background process status
   logs                  Follow Kintio logs
 
 Options:
@@ -80,41 +82,37 @@ Options:
   -v, --version          Show the Kintio version
 `;
 
-function defaultExecute(request: ProcessRequest): Promise<ProcessResult> {
+function defaultExecute(request: ProcessRequest): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn(request.file, [...request.args], {
+    const child = crossSpawn(request.file, [...request.args], {
       env: request.env,
-      stdio: request.capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+      stdio: 'inherit',
     });
-    let stdout = '';
-    let stderr = '';
-    let timedOut = false;
-    let forceTimer: NodeJS.Timeout | undefined;
-    const timer = request.timeoutMs === undefined
-      ? undefined
-      : setTimeout(() => {
-          timedOut = true;
-          child.kill('SIGTERM');
-          forceTimer = setTimeout(() => child.kill('SIGKILL'), 1_000);
-          forceTimer.unref?.();
-        }, request.timeoutMs);
-    timer?.unref?.();
-    child.stdout?.on('data', (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString(); });
-    child.once('error', (error) => {
-      clearTimeout(timer);
-      clearTimeout(forceTimer);
-      reject(error);
-    });
+    child.once('error', reject);
     child.once('exit', (code, signal) => {
-      clearTimeout(timer);
-      clearTimeout(forceTimer);
-      resolve({
-        code: timedOut ? 124 : code ?? (signal ? 1 : 0),
-        stdout,
-        stderr,
-      });
+      resolve(code ?? (signal ? 1 : 0));
     });
+  });
+}
+
+function defaultLaunchDaemon(request: DaemonLaunchRequest): DaemonProcess {
+  const child = crossSpawn(request.file, [...request.args], {
+    cwd: request.cwd,
+    env: request.env,
+    detached: true,
+    windowsHide: true,
+    stdio: 'ignore',
+  });
+  child.once('error', () => undefined);
+  if (!child.pid) throw new Error('Kintio daemon did not return a process ID');
+  const exited = new Promise<void>((resolve) => {
+    child.once('close', () => resolve());
+  });
+  child.unref();
+  return Object.freeze({
+    pid: child.pid,
+    exited,
+    kill: (signal: NodeJS.Signals) => child.kill(signal),
   });
 }
 
@@ -125,6 +123,7 @@ function runtimeDefaults(): CliRuntime {
     homeDirectory: os.homedir(),
     packageRoot: resolveProjectRoot(import.meta.url),
     execute: defaultExecute,
+    launchDaemon: defaultLaunchDaemon,
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
   };
@@ -132,37 +131,6 @@ function runtimeDefaults(): CliRuntime {
 
 function resolveInputPath(value: string, cwd: string): string {
   return path.resolve(cwd, value);
-}
-
-function lifecycleEnvironment(
-  location: InstanceLocation,
-  runtime: CliRuntime,
-): NodeJS.ProcessEnv {
-  const environment = { ...runtime.env };
-  if (!environment.PM2_HOME) {
-    assertTrustedDirectory(
-      ensurePrivateDirectory(location.home),
-      'Kintio instance directory',
-      false,
-    );
-    assertTrustedDirectory(
-      ensureContainedDirectory(location.home, path.join(location.home, 'data')),
-      'Kintio data directory',
-      true,
-    );
-    environment.PM2_HOME = ensureContainedDirectory(
-      location.home,
-      path.join(location.home, 'data/pm2'),
-    );
-    assertTrustedDirectory(environment.PM2_HOME, 'Kintio PM2 directory', true);
-  } else {
-    assertTrustedDirectory(
-      ensurePrivateDirectory(environment.PM2_HOME),
-      'PM2 directory',
-      false,
-    );
-  }
-  return environment;
 }
 
 function instanceLocation(
@@ -185,19 +153,26 @@ function instanceLocation(
     : configFile
       ? path.dirname(configFile)
       : path.join(runtime.homeDirectory, '.kintio');
-  return Object.freeze({
+  const location = {
     home: path.resolve(home),
     configFile: configFile || path.join(path.resolve(home), '.env'),
-  });
+  };
+  if (
+    process.platform === 'win32' &&
+    (
+      !isPathInside(runtime.homeDirectory, location.home) ||
+      !isPathInside(runtime.homeDirectory, location.configFile)
+    )
+  ) {
+    throw new Error(
+      'Windows instances and config files must stay inside the current user profile',
+    );
+  }
+  return Object.freeze(location);
 }
 
 function containedDirectory(root: string, directory: string): void {
-  const realRoot = fs.realpathSync(root);
-  const realDirectory = fs.realpathSync(directory);
-  if (
-    realDirectory !== realRoot &&
-    !realDirectory.startsWith(`${realRoot}${path.sep}`)
-  ) {
+  if (!isPathInside(root, directory)) {
     throw new Error(`Instance path escapes through a symbolic link: ${directory}`);
   }
 }
@@ -350,8 +325,7 @@ function setup(location: InstanceLocation, runtime: CliRuntime): number {
     tokenLine,
     `KINTIO_MCP_BEARER_TOKEN=${randomBytes(32).toString('base64url')}`,
   );
-  const configInsideHome =
-    location.configFile.startsWith(`${location.home}${path.sep}`);
+  const configInsideHome = isPathInside(location.home, location.configFile);
   const configCreated = writeNewFile(
     location.configFile,
     configured,
@@ -405,65 +379,12 @@ function processEnvironment(
     KINTIO_CONFIG_FILE: location.configFile,
     NODE_ENV: 'production',
   };
-  const config = loadConfig({
+  loadConfig({
     environment: { ...environment },
     envFile: location.configFile,
     root: location.home,
   });
-  environment.KINTIO_KILL_TIMEOUT_MS = String(
-    config.state.shutdownTimeoutMs + 7_000,
-  );
   return environment;
-}
-
-function backgroundEnvironment(
-  location: InstanceLocation,
-  runtime: CliRuntime,
-): NodeJS.ProcessEnv {
-  return {
-    ...lifecycleEnvironment(location, runtime),
-    ...processEnvironment(location, runtime),
-  };
-}
-
-function pm2Script(): string {
-  return fileURLToPath(import.meta.resolve('pm2/bin/pm2'));
-}
-
-async function pm2(
-  args: readonly string[],
-  environment: NodeJS.ProcessEnv,
-  runtime: CliRuntime,
-  capture = false,
-  timeoutMs?: number,
-): Promise<ProcessResult> {
-  return runtime.execute({
-    file: process.execPath,
-    args: [pm2Script(), ...args],
-    env: environment,
-    capture,
-    ...(timeoutMs === undefined ? {} : { timeoutMs }),
-  });
-}
-
-async function currentProcess(
-  environment: NodeJS.ProcessEnv,
-  runtime: CliRuntime,
-  timeoutMs = 30_000,
-): Promise<Pm2Process | undefined> {
-  const result = await pm2(['jlist'], environment, runtime, true, timeoutMs);
-  if (result.code !== 0) throw new Error('Unable to query the PM2 process list');
-  const lines = result.stdout.split(/\r?\n/u);
-  const start = lines.findLastIndex((line) => line.trimStart().startsWith('['));
-  if (start < 0) throw new Error('PM2 returned an invalid process list');
-  let processes: Pm2Process[];
-  try {
-    processes = JSON.parse(lines.slice(start).join('\n')) as Pm2Process[];
-  } catch {
-    throw new Error('PM2 returned an invalid process list');
-  }
-  if (!Array.isArray(processes)) throw new Error('PM2 returned an invalid process list');
-  return processes.find((process) => process.name === 'kintio');
 }
 
 function remaining(deadline: number): number {
@@ -472,129 +393,54 @@ function remaining(deadline: number): number {
   return value;
 }
 
-function sameInstance(
-  process: Pm2Process,
-  location: InstanceLocation,
-): boolean {
-  return (
-    path.resolve(process.pm2_env?.KINTIO_HOME || '') === location.home &&
-    path.resolve(process.pm2_env?.KINTIO_CONFIG_FILE || '') ===
-      location.configFile
-  );
+function removeDaemonMetadata(location: InstanceLocation): void {
+  fs.rmSync(daemonRecordPath(location.home), { force: true });
 }
 
-function ownsStart(
-  process: Pm2Process,
-  location: InstanceLocation,
-  token: string,
-  script: string,
-): boolean {
-  return (
-    sameInstance(process, location) &&
-    process.pm2_env?.KINTIO_START_TOKEN === token &&
-    path.resolve(process.pm2_env?.pm_exec_path || '') === script
-  );
-}
-
-function assertInstance(
-  process: Pm2Process | undefined,
-  location: InstanceLocation | undefined,
-): void {
-  if (process && location && !sameInstance(process, location)) {
-    throw new Error(
-      'The PM2 process belongs to another Kintio instance; rerun without a selector or use the matching --home/--config',
-    );
+async function probeDaemon(location: InstanceLocation): Promise<ControlResponse | undefined> {
+  const record = readDaemonRecord(location.home);
+  if (!record) {
+    return undefined;
   }
-}
-
-function startTimeout(environment: NodeJS.ProcessEnv): number {
-  const timeout = Number(environment.KINTIO_START_TIMEOUT_MS || 30_000);
-  if (!Number.isInteger(timeout) || timeout < 1_000 || timeout > 120_000) {
-    throw new Error(
-      'KINTIO_START_TIMEOUT_MS must be an integer between 1000 and 120000',
-    );
-  }
-  return timeout;
-}
-
-function pm2StopTimeout(process: Pm2Process): number {
-  const killTimeout = Number(process.pm2_env?.kill_timeout);
-  if (
-    Number.isInteger(killTimeout)
-    && killTimeout >= 1_000
-    && killTimeout <= 127_000
-  ) return killTimeout + PM2_COMMAND_GRACE_MS;
-  return 30_000;
-}
-
-async function cleanupOwnedStart(
-  location: InstanceLocation,
-  token: string,
-  environment: NodeJS.ProcessEnv,
-  runtime: CliRuntime,
-): Promise<void> {
-  const expectedScript = path.join(runtime.packageRoot, 'dist/index.js');
-  const process = await currentProcess(environment, runtime, 5_000)
-    .catch(() => undefined);
-  if (process && ownsStart(process, location, token, expectedScript)) {
-    await pm2(['stop', 'kintio'], environment, runtime, false, 5_000)
-      .catch(() => undefined);
-  }
-}
-
-async function waitUntilReady(
-  location: InstanceLocation,
-  token: string,
-  deadline: number,
-  environment: NodeJS.ProcessEnv,
-  runtime: CliRuntime,
-  cleanupOnFailure: boolean,
-): Promise<Pm2Process> {
-  const expectedScript = path.join(runtime.packageRoot, 'dist/index.js');
-  let lastStatus = 'missing';
   try {
-    while (Date.now() < deadline) {
-      const process = await currentProcess(
-        environment,
-        runtime,
-        remaining(deadline),
-      );
-      lastStatus = process?.pm2_env?.status || 'missing';
-      if (process && !ownsStart(process, location, token, expectedScript)) {
-        throw new Error('The PM2 process changed while Kintio was starting');
-      }
-      if (
-        process?.pid &&
-        lastStatus === 'online' &&
-        matchesReadyMarker(location.home, token, process.pid)
-      ) return process;
-      if (['waiting restart', 'errored', 'stopped'].includes(lastStatus)) break;
-      await delay(200);
-    }
+    return await requestControl(location.home, 'ping');
   } catch (error: unknown) {
-    if (cleanupOnFailure) {
-      await cleanupOwnedStart(location, token, environment, runtime);
+    if (processIsAlive(record.daemonPid)) {
+      throw new Error(`Kintio daemon is running but unreachable: ${error instanceof Error ? error.message : String(error)}`);
     }
-    throw error;
+    removeDaemonMetadata(location);
+    return undefined;
   }
-  if (cleanupOnFailure) {
-    await cleanupOwnedStart(location, token, environment, runtime);
+}
+
+function assertDaemonInstance(
+  location: InstanceLocation,
+  packageRoot: string,
+): void {
+  const daemon = readDaemonRecord(location.home);
+  if (!daemon) throw new Error('Kintio daemon record is missing');
+  if (
+    !samePath(daemon.configFile, location.configFile) ||
+    !samePath(daemon.packageRoot, packageRoot)
+  ) {
+    throw new Error(
+      'Kintio is running with another config or installation; use "kintio restart" to switch deliberately',
+    );
   }
-  throw new Error(
-    `Kintio failed to become ready (PM2 status: ${lastStatus}); inspect "kintio logs --no-follow"`,
-  );
 }
 
 async function withLifecycleLock<T>(
-  environment: NodeJS.ProcessEnv,
+  location: InstanceLocation,
   task: () => Promise<T>,
 ): Promise<T> {
-  const pm2Home = environment.PM2_HOME;
-  if (!pm2Home) throw new Error('PM2_HOME is required for lifecycle commands');
+  const dataDirectory = ensureContainedDirectory(
+    location.home,
+    path.join(location.home, 'data'),
+  );
   let lock;
   try {
     lock = acquireSingleInstanceLock({
-      filePath: path.join(pm2Home, 'kintio-cli.lock'),
+      filePath: path.join(dataDirectory, 'lifecycle.lock'),
       hasActiveDatabaseOwner: () => false,
     });
   } catch (error: unknown) {
@@ -610,111 +456,225 @@ async function withLifecycleLock<T>(
   }
 }
 
+async function waitForDaemonExit(
+  daemon: DaemonProcess,
+  timeoutMs: number,
+): Promise<boolean> {
+  return await Promise.race([
+    daemon.exited.then(() => true),
+    delay(timeoutMs).then(() => false),
+  ]);
+}
+
+function removeLaunchMetadata(location: InstanceLocation, daemonPid: number): void {
+  if (readDaemonRecord(location.home)?.daemonPid === daemonPid) {
+    fs.rmSync(daemonRecordPath(location.home), { force: true });
+  }
+}
+
+async function rollbackLaunch(
+  location: InstanceLocation,
+  daemon: DaemonProcess,
+): Promise<void> {
+  const record = readDaemonRecord(location.home);
+  if (record?.daemonPid === daemon.pid) {
+    await requestControl(location.home, 'stop').catch(() => undefined);
+    if (await waitForDaemonExit(daemon, 5_000)) {
+      removeLaunchMetadata(location, daemon.pid);
+      return;
+    }
+  }
+  if (await waitForDaemonExit(daemon, 1)) {
+    removeLaunchMetadata(location, daemon.pid);
+    return;
+  }
+  daemon.kill('SIGTERM');
+  if (!(await waitForDaemonExit(daemon, 1_000))) daemon.kill('SIGKILL');
+  if (!(await waitForDaemonExit(daemon, 5_000))) {
+    throw new Error(`Kintio startup rollback could not terminate daemon PID ${daemon.pid}`);
+  }
+  removeLaunchMetadata(location, daemon.pid);
+}
+
 async function start(
   location: InstanceLocation,
   runtime: CliRuntime,
   restart: boolean,
 ): Promise<number> {
-  const environment = backgroundEnvironment(location, runtime);
-  const timeout = startTimeout(environment);
-  const startToken = randomBytes(32).toString('base64url');
-  environment.KINTIO_START_TOKEN = startToken;
-  return withLifecycleLock(environment, async () => {
-    const existing = await currentProcess(
-      environment,
-      runtime,
-      timeout,
-    );
-    if (!restart && existing && existing.pm2_env?.status !== 'stopped') {
-      const existingEnvironment = existing.pm2_env;
-      if (!existingEnvironment) {
-        throw new Error('The existing PM2 process has no Kintio environment');
+  const environment = processEnvironment(location, runtime);
+  const timeout = parseStartTimeout(environment.KINTIO_START_TIMEOUT_MS);
+  return withLifecycleLock(location, async () => {
+    const existing = await probeDaemon(location);
+    if (existing && !restart) {
+      assertDaemonInstance(location, runtime.packageRoot);
+      if (existing.phase !== 'running') {
+        await waitUntilRunning(location, Date.now() + timeout);
       }
-      const expectedScript = path.join(runtime.packageRoot, 'dist/index.js');
-      const matchesInstance =
-        sameInstance(existing, location) &&
-        path.resolve(existingEnvironment.pm_exec_path || '') === expectedScript;
-      if (!matchesInstance) {
-        throw new Error(
-          `Kintio is already registered with another installation or instance (PID ${existing.pid || 'unknown'}); use "kintio restart" to switch deliberately`,
-        );
-      }
-      const existingToken = existingEnvironment.KINTIO_START_TOKEN;
-      if (!existingToken) {
-        throw new Error(
-          'The existing Kintio process has no readiness identity; use "kintio restart" to replace it',
-        );
-      }
-      const ready = await waitUntilReady(
-        location,
-        existingToken,
-        Date.now() + timeout,
-        environment,
-        runtime,
-        false,
-      );
-      runtime.stdout(`Kintio is already running (PID ${ready.pid || existing.pid}).\n`);
+      runtime.stdout(`Kintio is already running (PID ${existing.workerPid || existing.daemonPid}).\n`);
       return 0;
     }
     if (existing) {
-      const removed = await pm2(
-        ['delete', 'kintio'],
-        environment,
-        runtime,
-        false,
-        pm2StopTimeout(existing),
-      );
-      if (removed.code !== 0) return removed.code;
+      await stopDaemon(location, DAEMON_STOP_TIMEOUT_MS);
     }
     const deadline = Date.now() + timeout;
-    const configFile = path.join(runtime.packageRoot, 'ecosystem.config.cjs');
-    const result = await pm2(
-      ['start', configFile, '--only', 'kintio'],
-      environment,
-      runtime,
-      false,
-      remaining(deadline),
-    );
-    if (result.code !== 0) {
-      await cleanupOwnedStart(location, startToken, environment, runtime);
-      return result.code;
+    const daemon = runtime.launchDaemon({
+      file: process.execPath,
+      args: [path.join(runtime.packageRoot, 'dist/daemon.js')],
+      cwd: location.home,
+      env: environment,
+    });
+    try {
+      await waitUntilRunning(location, deadline);
+    } catch (error: unknown) {
+      await rollbackLaunch(location, daemon);
+      throw error;
     }
-    await waitUntilReady(
-      location,
-      startToken,
-      deadline,
-      environment,
-      runtime,
-      true,
-    );
     return 0;
   });
+}
+
+async function waitUntilRunning(
+  location: InstanceLocation,
+  deadline: number,
+): Promise<void> {
+  let lastError = 'daemon did not publish control state';
+  while (Date.now() < deadline) {
+    let response: ControlResponse | undefined;
+    try {
+      response = await requestControl(location.home, 'ping', 500);
+    } catch (error: unknown) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    if (response?.phase === 'running' && response.workerPid) return;
+    if (response?.phase === 'failed') {
+      throw new Error(response.message || 'Kintio worker failed to start');
+    }
+    if (response) lastError = response.message || `daemon phase is ${response.phase}`;
+    await delay(Math.min(100, remaining(deadline)));
+  }
+  throw new Error(
+    `Kintio failed to become ready: ${lastError}; inspect "kintio logs --no-follow"`,
+  );
+}
+
+async function stopDaemon(
+  location: InstanceLocation,
+  timeoutMs: number,
+  onNotRunning?: () => void,
+): Promise<number> {
+  const record = readDaemonRecord(location.home);
+  if (!record) {
+    onNotRunning?.();
+    return 0;
+  }
+  await requestControl(location.home, 'stop');
+  const deadline = Date.now() + timeoutMs;
+  const daemonLock = path.join(location.home, 'data/daemon.lock');
+  while (
+    Date.now() < deadline &&
+    (readDaemonRecord(location.home) || fs.existsSync(daemonLock))
+  ) {
+    await delay(50);
+  }
+  if (readDaemonRecord(location.home) || fs.existsSync(daemonLock)) {
+    throw new Error('Kintio daemon did not stop within the shutdown budget');
+  }
+  removeDaemonMetadata(location);
+  return 0;
 }
 
 async function stop(
   runtime: CliRuntime,
   location: InstanceLocation,
 ): Promise<number> {
-  const environment = lifecycleEnvironment(location, runtime);
-  return withLifecycleLock(environment, async () => {
-    const existing = await currentProcess(environment, runtime);
-    assertInstance(existing, location);
-    if (!existing || existing.pm2_env?.status === 'stopped') {
-      runtime.stdout('Kintio is not running.\n');
-      return 0;
-    }
-    return (await pm2(
-      ['stop', 'kintio'], environment, runtime, false, pm2StopTimeout(existing),
-    )).code;
+  return withLifecycleLock(location, async () => {
+    return await stopDaemon(
+      location,
+      DAEMON_STOP_TIMEOUT_MS,
+      () => runtime.stdout('Kintio is not running.\n'),
+    );
   });
 }
 
-function positiveLineCount(value: string | undefined): string {
+function positiveLineCount(value: string | undefined): number {
   const count = Number(value ?? 100);
   if (!Number.isInteger(count) || count < 1 || count > 10_000) {
     throw new Error('--lines must be an integer between 1 and 10000');
   }
-  return String(count);
+  return count;
+}
+
+function logFilePath(location: InstanceLocation): string {
+  return path.join(location.home, 'data/logs/kintio.log');
+}
+
+function readLogTail(filePath: string, lines: number): {
+  text: string;
+  size: number;
+  device: number;
+  inode: number;
+} {
+  let descriptor: number | undefined;
+  try {
+    descriptor = fs.openSync(filePath, 'r');
+    const stat = fs.fstatSync(descriptor);
+    const source = fs.readFileSync(descriptor, 'utf8');
+    const values = source.split(/(?<=\n)/u);
+    return {
+      text: values.slice(Math.max(0, values.length - lines)).join(''),
+      size: Buffer.byteLength(source),
+      device: stat.dev,
+      inode: stat.ino,
+    };
+  } catch (error: unknown) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+      throw new Error('Kintio has no background logs');
+    }
+    throw error;
+  } finally {
+    if (descriptor !== undefined) fs.closeSync(descriptor);
+  }
+}
+
+async function followLog(
+  filePath: string,
+  lines: number,
+  output: (text: string) => void,
+): Promise<never> {
+  const initial = readLogTail(filePath, lines);
+  if (initial.text) output(initial.text);
+  let position = initial.size;
+  let device: number | undefined = initial.device;
+  let inode: number | undefined = initial.inode;
+  while (true) {
+    await delay(250);
+    let descriptor: number | undefined;
+    try {
+      descriptor = fs.openSync(filePath, 'r');
+      const stat = fs.fstatSync(descriptor);
+      if (stat.dev !== device || stat.ino !== inode) {
+        device = stat.dev;
+        inode = stat.ino;
+        position = 0;
+      }
+      if (stat.size < position) position = 0;
+      if (stat.size === position) continue;
+      const buffer = Buffer.alloc(stat.size - position);
+      const bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, position);
+      if (bytesRead > 0) output(buffer.subarray(0, bytesRead).toString('utf8'));
+      position += bytesRead;
+    } catch (error: unknown) {
+      if (error instanceof Error && 'code' in error && error.code === 'ENOENT') {
+        position = 0;
+        device = undefined;
+        inode = undefined;
+        continue;
+      }
+      throw error;
+    } finally {
+      if (descriptor !== undefined) fs.closeSync(descriptor);
+    }
+  }
 }
 
 export async function runCli(
@@ -760,33 +720,37 @@ export async function runCli(
     if (command === 'restart') return await start(location, runtime, true);
     if (command === 'run') {
       const environment = processEnvironment(location, runtime);
-      return (await runtime.execute({
+      return await runtime.execute({
         file: process.execPath,
         args: [path.join(runtime.packageRoot, 'dist/index.js')],
         env: environment,
-      })).code;
+      });
     }
     if (command === 'stop') return await stop(runtime, location);
     if (command === 'status') {
-      const environment = lifecycleEnvironment(location, runtime);
-      const existing = await currentProcess(environment, runtime);
-      assertInstance(existing, location);
+      const existing = await probeDaemon(location);
       if (!existing) {
         runtime.stdout('Kintio is not running.\n');
         return 0;
       }
-      return (await pm2(
-        ['status', 'kintio'], environment, runtime, false, 30_000,
-      )).code;
+      assertDaemonInstance(location, runtime.packageRoot);
+      runtime.stdout(
+        `Kintio is ${existing.phase} ` +
+        `(daemon PID ${existing.daemonPid}` +
+        `${existing.workerPid ? `, worker PID ${existing.workerPid}` : ''}).` +
+        `${existing.message ? ` ${existing.message}` : ''}\n`,
+      );
+      return existing.phase === 'failed' ? 1 : 0;
     }
     if (command === 'logs') {
-      const environment = lifecycleEnvironment(location, runtime);
-      const existing = await currentProcess(environment, runtime);
-      assertInstance(existing, location);
-      if (!existing) throw new Error('Kintio has no PM2 process or logs');
-      const logArgs = ['logs', 'kintio', '--lines', positiveLineCount(parsed.values.lines)];
-      if (parsed.values['no-follow']) logArgs.push('--nostream');
-      return (await pm2(logArgs, environment, runtime)).code;
+      const filePath = logFilePath(location);
+      const lines = positiveLineCount(parsed.values.lines);
+      if (parsed.values['no-follow']) {
+        const tail = readLogTail(filePath, lines);
+        if (tail.text) runtime.stdout(tail.text);
+        return 0;
+      }
+      return await followLog(filePath, lines, runtime.stdout);
     }
     throw new Error(`Unknown command: ${command}`);
   } catch (error: unknown) {

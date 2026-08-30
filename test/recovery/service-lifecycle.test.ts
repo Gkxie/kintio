@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
 import net from 'node:net';
 import path from 'node:path';
 import { test } from 'vitest';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import crossSpawn from 'cross-spawn';
 
-import { startTestChild } from '../support/child-process.ts';
+import { isForcedExit, startTestChild } from '../support/child-process.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 const indexFile = fileURLToPath(new URL('../../index.ts', import.meta.url));
@@ -76,20 +76,6 @@ async function waitForPortReleased(port: number, timeoutMs = 5_000): Promise<voi
   throw lastError;
 }
 
-function signalProcessTree(
-  child: ReturnType<typeof spawn>,
-  signal: NodeJS.Signals,
-): void {
-  try {
-    if (process.platform === 'win32') child.kill(signal);
-    else process.kill(-child.pid!, signal);
-  } catch (error: unknown) {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) {
-      throw error;
-    }
-  }
-}
-
 test('outer service answers hello then SIGTERM releases its port and lock', async (t) => {
   const servicePort = await availablePort();
   await waitForPortReleased(servicePort);
@@ -118,14 +104,48 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
   assert.equal(await root.text(), 'hello world');
   await assert.rejects(fs.access(lockFile), { code: 'ENOENT' });
 
-  assert.deepEqual(await child.stop('SIGTERM'), { code: 0, signal: null });
+  const exit = await child.stop('SIGTERM');
+  if (process.platform === 'win32') {
+    assert.equal(isForcedExit(exit, 'SIGTERM'), true);
+  } else {
+    assert.deepEqual(exit, { code: 0, signal: null });
+  }
   await waitForPortReleased(servicePort);
   await assert.rejects(fs.access(lockFile), { code: 'ENOENT' });
   assert.match(child.output().stdout, new RegExp(`Hono server is listening on port ${servicePort}`, 'u'));
-  assert.match(child.output().stdout, /Received SIGTERM; shutting down/u);
+  if (process.platform !== 'win32') {
+    assert.match(child.output().stdout, /Received SIGTERM; shutting down/u);
+  }
 });
 
-test('pnpm start builds and runs dist/index.js', async (t) => {
+test('parent shutdown message uses the same graceful close path', async (t) => {
+  const servicePort = await availablePort();
+  const temporary = await createTempSqlite(t, {
+    prefix: 'kintio-parent-shutdown-',
+    filename: 'state.sqlite',
+  });
+  const child = startTestChild(t, indexFile, {
+    timeoutMs: 8_000,
+    env: {
+      PORT: String(servicePort),
+      WECOM_CALLBACK_TOKEN: '',
+      WECOM_ENCODING_AES_KEY: '',
+      WECOM_CORP_ID: '',
+      WECOM_KF_SECRET: '',
+      ILINK_ENABLED: 'false',
+      KINTIO_DB_FILE: temporary.filePath,
+      SHUTDOWN_TIMEOUT_MS: '2000',
+    },
+  });
+
+  assert.equal((await waitForResponse(servicePort, '/')).status, 200);
+  assert.equal(child.child.send?.('shutdown'), true);
+  assert.deepEqual(await child.waitForExit(), { code: 0, signal: null });
+  await waitForPortReleased(servicePort);
+  assert.match(child.output().stdout, /Received parent shutdown; shutting down/u);
+});
+
+test('production script builds and runs dist/index.js', async (t) => {
   const servicePort = await availablePort();
   await assertPortReleased(servicePort);
   const temporary = await createTempSqlite(t, {
@@ -144,31 +164,29 @@ test('pnpm start builds and runs dist/index.js', async (t) => {
     CODEX_ENABLED: 'false',
     SHUTDOWN_TIMEOUT_MS: '2000',
   };
-  const child = spawn('pnpm', ['start'], {
+  const build = crossSpawn('pnpm', ['run', 'build'], {
     cwd: path.resolve('.'),
-    env: environment,
+    env: process.env,
     stdio: ['ignore', 'pipe', 'pipe'],
-    detached: process.platform !== 'win32',
   });
-  let output = '';
-  child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
-  child.stderr.on('data', (chunk: Buffer) => { output += chunk.toString(); });
-  t.onTestFinished(() => {
-    if (child.exitCode !== null) return;
-    signalProcessTree(child, 'SIGKILL');
+  if (!build.stdout || !build.stderr) {
+    throw new Error('Build was started without captured output');
+  }
+  let buildOutput = '';
+  build.stdout.on('data', (chunk: Buffer) => { buildOutput += chunk.toString(); });
+  build.stderr.on('data', (chunk: Buffer) => { buildOutput += chunk.toString(); });
+  const buildExit = await new Promise<number | null>((resolve) => {
+    build.once('exit', (code) => resolve(code));
+  });
+  assert.equal(buildExit, 0, buildOutput);
+
+  const child = startTestChild(t, path.resolve('dist/index.js'), {
+    timeoutMs: 8_000,
+    env: environment,
   });
 
   assert.equal((await waitForResponse(servicePort, '/')).status, 200);
-  assert.match(output, /node dist\/index\.js/u);
-  signalProcessTree(child, 'SIGTERM');
-  const exit = await new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
-    (resolve) => child.once('exit', (code, signal) => resolve({ code, signal })),
-  );
-  assert.equal(
-    (exit.code === 0 && exit.signal === null) ||
-      (exit.code === null && exit.signal === 'SIGTERM'),
-    true,
-    `unexpected pnpm wrapper exit: ${JSON.stringify(exit)}`,
-  );
+  assert.equal(child.child.send?.('shutdown'), true);
+  assert.deepEqual(await child.waitForExit(), { code: 0, signal: null });
   await waitForPortReleased(servicePort);
 });

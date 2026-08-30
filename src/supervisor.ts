@@ -161,7 +161,7 @@ export class KintioSupervisor {
 
   #listen(server: ServerType): Promise<number> {
     return new Promise((resolve, reject) => {
-      server.listen(this.#config.port, () => {
+      server.listen(this.#config.port, '0.0.0.0', () => {
         const address = server.address();
         if (!address || typeof address === 'string') {
           reject(new Error('Hono listener has no TCP address'));

@@ -13,6 +13,22 @@ export function resolveProjectRoot(moduleUrl: string): string {
 
 const projectRoot = resolveProjectRoot(import.meta.url);
 
+export const FORCE_ABORT_TIMEOUT_MS = 5_000;
+const MAX_SHUTDOWN_TIMEOUT_MS = 120_000;
+export const WORKER_GRACEFUL_TIMEOUT_MS =
+  MAX_SHUTDOWN_TIMEOUT_MS + FORCE_ABORT_TIMEOUT_MS + 2_000;
+export const DAEMON_STOP_TIMEOUT_MS = WORKER_GRACEFUL_TIMEOUT_MS + 5_000 + 3_000;
+
+export function parseStartTimeout(value: string | undefined): number {
+  const timeout = Number(value || 30_000);
+  if (!Number.isInteger(timeout) || timeout < 1_000 || timeout > 120_000) {
+    throw new Error(
+      'KINTIO_START_TIMEOUT_MS must be an integer between 1000 and 120000',
+    );
+  }
+  return timeout;
+}
+
 function resolveInstanceRoot(
   environment: NodeJS.ProcessEnv = process.env,
   fallback = projectRoot,
@@ -159,13 +175,21 @@ function loadEnvironmentFile(
   try {
     const parsed = parseEnv(fs.readFileSync(filePath, 'utf8'));
     for (const [name, value] of Object.entries(parsed)) {
-      if (environment[name] === undefined) environment[name] = value;
+      const key = process.platform === 'win32' ? name.toUpperCase() : name;
+      if (environment[key] === undefined) environment[key] = value;
     }
   } catch (error: unknown) {
     if (!(error instanceof Error) || !('code' in error) || error.code !== 'ENOENT') {
       throw error;
     }
   }
+}
+
+function copyEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (process.platform !== 'win32') return { ...environment };
+  return Object.fromEntries(
+    Object.entries(environment).map(([name, value]) => [name.toUpperCase(), value]),
+  );
 }
 
 function parsePort(value: string | undefined): number {
@@ -254,8 +278,10 @@ function parseBoundedText(
 
 export function createConfig(
   environment: NodeJS.ProcessEnv = process.env,
-  root = resolveInstanceRoot(environment),
+  root?: string,
 ): AppConfig {
+  environment = copyEnvironment(environment);
+  const instanceRoot = path.resolve(root || resolveInstanceRoot(environment));
   const port = parsePort(environment.PORT);
   const callbackToken = environment.WECOM_CALLBACK_TOKEN || '';
   const encodingAesKey = environment.WECOM_ENCODING_AES_KEY || '';
@@ -345,9 +371,9 @@ export function createConfig(
     'CODEX_WEB_SEARCH_MODE',
     'live',
   );
-  const { databaseFile, lockFile } = resolveStateFiles(environment, root);
+  const { databaseFile, lockFile } = resolveStateFiles(environment, instanceRoot);
   const codexWorkingDirectory = path.resolve(
-    root,
+    instanceRoot,
     environment.CODEX_WORKING_DIRECTORY ||
       'codex-workspace',
   );
@@ -361,7 +387,7 @@ export function createConfig(
     environment.SHUTDOWN_TIMEOUT_MS,
     10_000,
     'SHUTDOWN_TIMEOUT_MS',
-    120_000,
+    MAX_SHUTDOWN_TIMEOUT_MS,
   );
   if (shutdownTimeoutMs < 1_000) {
     throw new Error('SHUTDOWN_TIMEOUT_MS must be at least 1000');
@@ -416,7 +442,7 @@ export function createConfig(
       enabled: ilinkEnabled,
       storageKey: ilinkStorageKey,
       storageKeyFile: path.resolve(
-        root,
+        instanceRoot,
         environment.ILINK_STORAGE_KEY_FILE ||
           path.join(path.dirname(databaseFile), 'ilink-storage.key'),
       ),
@@ -458,7 +484,7 @@ export function createConfig(
       ),
       webSearchMode: webSearchMode ?? 'live',
       imageTempDirectory: path.resolve(
-        root,
+        instanceRoot,
         environment.CODEX_IMAGE_TMP_DIR ||
           'data/codex-input',
       ),
@@ -475,7 +501,7 @@ export function loadConfig(
     root?: string;
   } = {},
 ): AppConfig {
-  const environment = { ...(options.environment || process.env) };
+  const environment = copyEnvironment(options.environment || process.env);
   const configuredEnvFile = options.envFile || environment.KINTIO_CONFIG_FILE;
   const initialRoot = path.resolve(
     options.root ||

@@ -1,6 +1,6 @@
-import { spawn } from 'node:child_process';
 import readline from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
+import crossSpawn from 'cross-spawn';
 
 import { KINTIO_VERSION } from '../version.ts';
 
@@ -151,7 +151,7 @@ function normalizeInput(input: CodexInput): JsonRecord[] {
   );
 }
 
-const defaultSpawn = spawn as unknown as SpawnProcess;
+const defaultSpawn = crossSpawn as unknown as SpawnProcess;
 
 export class CodexAppServer implements CodexBoundary {
   readonly #options: ResolvedOptions;

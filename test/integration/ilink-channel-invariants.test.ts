@@ -51,7 +51,7 @@ async function fixture(t: TestContext): Promise<StoreFixture> {
   });
   let currentTime = 1_900_000_000_000;
   const clock = () => currentTime;
-  const store = new SqliteStore({ filePath: temp.filePath, clock });
+  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock }));
   const ilink = new IlinkSqliteStore({ store, clock });
   const box = new IlinkSecretBox(configuredSecretKey);
   t.onTestFinished(() => store.close());

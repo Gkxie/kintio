@@ -59,6 +59,15 @@ async function until(condition: () => boolean | Promise<boolean>): Promise<void>
   assert.fail('Timed out waiting for active iLink runtime state');
 }
 
+async function bounded<T>(label: string, promise: Promise<T>): Promise<T> {
+  return await Promise.race([
+    promise,
+    new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error(`Timed out during ${label}`)), 5_000).unref?.();
+    }),
+  ]);
+}
+
 function account(name: string): RuntimeAccountFixture {
   const providerAccountId = `runtime-${name}@im.bot`;
   return {
@@ -93,11 +102,11 @@ async function fixture(t: TestContext) {
     ILINK_ENABLED: 'true',
     ILINK_STORAGE_KEY: storageKey,
     ILINK_API_TIMEOUT_MS: '5000',
-    ILINK_LONG_POLL_TIMEOUT_MS: '5000',
+    ILINK_LONG_POLL_TIMEOUT_MS: '120000',
     ILINK_MAX_ACCOUNTS: '2',
   });
   const accounts = [account('one'), account('two')];
-  const store = new SqliteStore({ filePath: temp.filePath });
+  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath }));
   const ilink = new IlinkSqliteStore({ store });
   const secrets = new IlinkSecretBox(storageKey);
   const now = Date.now() - 1_000;
@@ -225,9 +234,19 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
           }],
         });
       }
-      const signal = request.signal;
-      return await new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal || request.signal;
+      return await new Promise<Response>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          signal.removeEventListener('abort', abort);
+          resolve(Response.json({
+            ret: 0,
+            get_updates_buf: runtimeAccount.nextCursor,
+            msgs: [],
+          }));
+        }, 50);
         const abort = () => {
+          clearTimeout(timeout);
+          signal.removeEventListener('abort', abort);
           abortedPolls.add(runtimeAccount.botToken);
           reject(signal.reason || new DOMException('aborted', 'AbortError'));
         };
@@ -272,9 +291,9 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     (await app.request('/mcp/ilink', { method: 'POST' })).status,
     401,
   );
-  await runtime.start();
-  await until(() => submissions.length === 2 &&
-    accounts.every((value) => pollCount.get(value.botToken) === 2));
+  await bounded('runtime start', runtime.start());
+  await bounded('second long poll', until(() => submissions.length === 2 &&
+    accounts.every((value) => (pollCount.get(value.botToken) || 0) >= 2)));
 
   for (const value of accounts) {
     assert.deepEqual(pollCursors.get(value.botToken), [
@@ -336,7 +355,10 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     },
   );
   const mcp = new Client({ name: 'active-ilink-runtime-test', version: '1.0.0' });
-  await mcp.connect(transport as unknown as Parameters<Client['connect']>[0]);
+  await bounded(
+    'MCP connect',
+    mcp.connect(transport as unknown as Parameters<Client['connect']>[0]),
+  );
   assert.deepEqual(
     (await mcp.listTools()).tools.map((tool) => tool.name),
     ['send_text', 'send_image'],
@@ -348,13 +370,16 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
       ({ input }) => input.message.text === `hello from ${value.name}`,
     );
     assert.ok(submission);
-    const result = await mcp.callTool({
-      name: 'send_text',
-      arguments: {
-        session: submission.input.toolSessionToken,
-        content: `reply to ${value.name}`,
-      },
-    });
+    const result = await bounded(
+      `MCP send for ${value.name}`,
+      mcp.callTool({
+        name: 'send_text',
+        arguments: {
+          session: submission.input.toolSessionToken,
+          content: `reply to ${value.name}`,
+        },
+      }),
+    );
     const receipt = result.structuredContent as {
       status?: unknown;
       attemptId?: unknown;
@@ -366,7 +391,7 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
       executedAttemptIds: [String(receipt.attemptId)],
     });
   }
-  await mcp.close();
+  await bounded('MCP close', mcp.close());
 
   assert.equal(sends.length, 2);
   for (const value of accounts) {
@@ -384,12 +409,12 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     );
   }
 
-  await until(() => {
+  await bounded('inbound completion', until(() => {
     const statuses = reader.prepare(`
       SELECT status FROM inbound_messages WHERE channel = 'weixin_ilink'
     `).all() as unknown as Array<{ status: string }>;
     return statuses.length === 2 && statuses.every((row) => row.status === 'completed');
-  });
+  }));
   const storedAttempts = reader.prepare(`
     SELECT attempt_key, status, channel FROM send_attempts
     ORDER BY attempt_key
@@ -412,7 +437,7 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     (await app.request('/mcp/ilink', { method: 'POST' })).status,
     401,
   );
-  await runtime.close();
+  await bounded('runtime close', runtime.close());
   assert.equal(
     (await app.request('/mcp/ilink', { method: 'POST' })).status,
     503,
