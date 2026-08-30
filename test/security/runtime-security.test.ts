@@ -58,6 +58,7 @@ test('Codex Adapter passes only the HTTP MCP bearer and never exposes WeChat sec
     WECOM_TOOL_DEFER_SEND: 'defer-switch-canary',
     TALKFERRY_MCP_BEARER_TOKEN: 'talkferry-bearer-canary-value-12345',
     KINTIO_MCP_BEARER_TOKEN: 'mcp-bearer-canary-value-1234567890',
+    KINTIO_CI_API_KEY: 'ci-provider-key-canary-value',
   } as const;
   const previous = new Map<string, string | undefined>();
   for (const [name, value] of Object.entries(environmentCanaries)) {
@@ -144,6 +145,7 @@ test('Codex Adapter passes only the HTTP MCP bearer and never exposes WeChat sec
     'WECOM_TOOL_MEDIA_CATALOG_FILE',
     'WECOM_TOOL_DEFER_SEND',
     'TALKFERRY_MCP_BEARER_TOKEN',
+    'KINTIO_CI_API_KEY',
   ]) {
     assert.equal(forbiddenName in captured.environment, false, forbiddenName);
   }

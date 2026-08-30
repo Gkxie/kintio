@@ -96,6 +96,10 @@ type ServerConfig = Pick<
   | 'webSearchMode'
   | 'workingDirectory'
 >;
+interface ModelProviderOptions {
+  readonly baseUrl: string;
+  readonly apiKeyEnv: string;
+}
 interface AgentOptions {
   readonly codex: CodexBoundary;
   readonly config: AgentConfig;
@@ -158,6 +162,57 @@ function codexEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   return { ...environment, ...extra };
 }
 
+function modelProvider(
+  provider: ModelProviderOptions | undefined,
+): {
+  readonly environment: NodeJS.ProcessEnv;
+  readonly overrides: readonly string[];
+} {
+  if (!provider) return { environment: {}, overrides: [] };
+  const apiKeyEnv = provider.apiKeyEnv.trim();
+  if (!/^KINTIO_[A-Z0-9_]*_API_KEY$/u.test(apiKeyEnv)) {
+    throw new Error('Model provider API key environment name is invalid');
+  }
+  const apiKey = process.env[apiKeyEnv]?.trim();
+  if (!apiKey) {
+    throw new Error(`Model provider API key is missing from ${apiKeyEnv}`);
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(provider.baseUrl.trim());
+  } catch {
+    throw new Error('Model provider base URL must be a valid HTTPS URL');
+  }
+  if (
+    parsed.protocol !== 'https:' ||
+    parsed.username ||
+    parsed.password ||
+    parsed.search ||
+    parsed.hash
+  ) {
+    throw new Error(
+      'Model provider base URL must use HTTPS without credentials, query, or fragment',
+    );
+  }
+  const baseUrl = parsed.href.replace(/\/+$/u, '');
+  return {
+    environment: { [apiKeyEnv]: apiKey },
+    overrides: [
+      'model_provider="kintio_proxy"',
+      'model_providers.kintio_proxy={}',
+      'model_providers.kintio_proxy.name="Kintio Proxy"',
+      `model_providers.kintio_proxy.base_url=${JSON.stringify(baseUrl)}`,
+      `model_providers.kintio_proxy.env_key=${JSON.stringify(apiKeyEnv)}`,
+      'model_providers.kintio_proxy.wire_api="responses"',
+      'model_providers.kintio_proxy.requires_openai_auth=false',
+      'model_providers.kintio_proxy.supports_websockets=false',
+      'model_providers.kintio_proxy.request_max_retries=1',
+      'model_providers.kintio_proxy.stream_max_retries=1',
+      'model_providers.kintio_proxy.stream_idle_timeout_ms=60000',
+    ],
+  };
+}
+
 export function createCodexAppServer(
   config: ServerConfig,
   options: {
@@ -169,13 +224,16 @@ export function createCodexAppServer(
     readonly mcpBearerToken: string;
     readonly mcpToolTimeoutSec?: number;
     readonly ilinkMcpToolTimeoutSec?: number;
+    readonly modelProvider?: ModelProviderOptions;
   },
 ): CodexAppServer {
   const memoryMcpUrl = options.memoryMcpUrl || (options.mcpUrl
     ? `${options.mcpUrl.replace(/\/+$/u, '')}/memory`
     : '');
   if (!memoryMcpUrl) throw new Error('conversation memory MCP URL is required');
+  const provider = modelProvider(options.modelProvider);
   const overrides = [
+    ...provider.overrides,
     'mcp_servers={}',
     ...(options.mcpUrl ? [
       `mcp_servers.wechat_kf.url=${JSON.stringify(options.mcpUrl)}`,
@@ -213,6 +271,7 @@ export function createCodexAppServer(
   return new CodexAppServer({
     ...(config.pathOverride ? { codexPathOverride: config.pathOverride } : {}),
     env: codexEnvironment({
+      ...provider.environment,
       KINTIO_MCP_BEARER_TOKEN: options.mcpBearerToken,
     }),
     configOverrides: overrides,

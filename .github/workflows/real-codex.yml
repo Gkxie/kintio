@@ -1,0 +1,76 @@
+name: Real Codex validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-codex-validation
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Approved synthetic smoke test
+    if: >-
+      github.repository == 'Gkxie/kintio' &&
+      github.ref == 'refs/heads/master' &&
+      github.actor == 'Gkxie' &&
+      github.triggering_actor == 'Gkxie' &&
+      github.run_attempt == 1
+    environment: codex-eval
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Install locked project dependencies
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Download and verify the pinned Codex CLI
+        env:
+          CODEX_ARCHIVE: codex-package-x86_64-unknown-linux-musl.tar.gz
+          CODEX_SHA256: 6e35ac60b86c0e8c7f8bcf797be8b92206199f6253200b66ff0547276f8cfa5c
+        run: |
+          archive="$RUNNER_TEMP/$CODEX_ARCHIVE"
+          install -d -m 700 "$RUNNER_TEMP/kintio-codex"
+          curl --fail --location --proto '=https' --proto-redir '=https' --retry 3 \
+            --output "$archive" \
+            "https://github.com/openai/codex/releases/download/rust-v0.151.0/$CODEX_ARCHIVE"
+          printf '%s  %s\n' "$CODEX_SHA256" "$archive" | sha256sum --check --strict
+          tar -xzf "$archive" -C "$RUNNER_TEMP/kintio-codex"
+          test -x "$RUNNER_TEMP/kintio-codex/bin/codex"
+          test "$("$RUNNER_TEMP/kintio-codex/bin/codex" --version)" = "codex-cli 0.151.0"
+      - name: Prepare isolated Codex state
+        run: install -d -m 700 "$RUNNER_TEMP/kintio-codex-home"
+      - name: Run the fixed real Codex smoke test
+        env:
+          CODEX_HOME: ${{ runner.temp }}/kintio-codex-home
+          CODEX_MODEL: gpt-5.6-luna
+          CODEX_PATH: ${{ runner.temp }}/kintio-codex/bin/codex
+          CODEX_REASONING_EFFORT: none
+          CODEX_WEB_SEARCH_MODE: disabled
+          KINTIO_CI_API_KEY: ${{ secrets.KINTIO_CI_API_KEY }}
+          KINTIO_CI_BASE_URL: ${{ vars.KINTIO_CI_BASE_URL }}
+          REAL_CODEX_CONCURRENCY: 1
+          RUN_REAL_CODEX: 1
+        run: >-
+          pnpm exec vitest run
+          --project agent-eval
+          --coverage.enabled=false
+          -t '^real Codex executes one text reply through MCP and fake WeChat accepts it$'
+      - name: Remove isolated Codex state
+        if: always()
+        run: >-
+          node --input-type=module -e
+          "import { rmSync } from 'node:fs';
+          for (const path of ['kintio-codex-home', 'kintio-codex',
+          'codex-package-x86_64-unknown-linux-musl.tar.gz'])
+          rmSync(process.env.RUNNER_TEMP + '/' + path,
+          { recursive: true, force: true });"
