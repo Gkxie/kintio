@@ -230,6 +230,7 @@ test('GitHub automation covers CI, security, dependency policy, and releases', a
     vitest,
     claWorkflow,
     claScript,
+    realCodex,
   ] = await Promise.all([
     read('.github/workflows/ci.yml'),
     read('.github/workflows/pr-title.yml'),
@@ -241,6 +242,7 @@ test('GitHub automation covers CI, security, dependency policy, and releases', a
     read('vitest.config.ts'),
     read('.github/workflows/cla.yml'),
     read('scripts/cla.ts'),
+    read('.github/workflows/real-codex.yml'),
   ]);
   assert.match(ci, /pull_request:/u);
   assert.match(prTitle, /types: \[opened, edited, reopened, synchronize\]/u);
@@ -302,6 +304,64 @@ test('GitHub automation covers CI, security, dependency policy, and releases', a
   );
   assert.match(secretScan, /docker run --rm --network none/u);
   assert.match(secretScan, /\$GITHUB_WORKSPACE:\/repo:ro/u);
+  assert.match(realCodex, /^  workflow_dispatch:$/mu);
+  assert.doesNotMatch(
+    realCodex,
+    /^  (?:push|pull_request|pull_request_target|workflow_call|workflow_run|repository_dispatch|schedule):/mu,
+  );
+  assert.doesNotMatch(realCodex, /\binputs:/u);
+  assert.match(realCodex, /github\.repository == 'Gkxie\/kintio'/u);
+  assert.match(realCodex, /github\.ref == 'refs\/heads\/master'/u);
+  assert.match(realCodex, /github\.actor == 'Gkxie'/u);
+  assert.match(realCodex, /github\.triggering_actor == 'Gkxie'/u);
+  assert.match(realCodex, /github\.run_attempt == 1/u);
+  assert.match(realCodex, /^    environment: codex-eval$/mu);
+  assert.match(realCodex, /^permissions:\n  contents: read$/mu);
+  assert.match(realCodex, /group: real-codex-validation[\s\S]+cancel-in-progress: false/u);
+  assert.match(realCodex, /^    timeout-minutes: 15$/mu);
+  assert.match(realCodex, /ref: \$\{\{ github\.sha \}\}/u);
+  assert.match(realCodex, /persist-credentials: false/u);
+  assert.match(realCodex, /pnpm install --frozen-lockfile --ignore-scripts/u);
+  assert.doesNotMatch(realCodex, /^\s+cache:/mu);
+  assert.doesNotMatch(realCodex, /continue-on-error/u);
+  assert.match(
+    realCodex,
+    /openai\/codex\/releases\/download\/rust-v0\.151\.0\/\$CODEX_ARCHIVE/u,
+  );
+  assert.match(
+    realCodex,
+    /CODEX_SHA256: 6e35ac60b86c0e8c7f8bcf797be8b92206199f6253200b66ff0547276f8cfa5c/u,
+  );
+  assert.match(realCodex, /sha256sum --check --strict/u);
+  assert.doesNotMatch(realCodex, /npm install --global/u);
+  assert.match(realCodex, /CODEX_MODEL: gpt-5\.6-luna/u);
+  assert.match(realCodex, /CODEX_PATH: \$\{\{ runner\.temp \}\}\/kintio-codex\/bin\/codex/u);
+  assert.match(realCodex, /CODEX_REASONING_EFFORT: none/u);
+  assert.match(realCodex, /CODEX_WEB_SEARCH_MODE: disabled/u);
+  assert.match(realCodex, /REAL_CODEX_CONCURRENCY: 1/u);
+  assert.match(realCodex, /RUN_REAL_CODEX: 1/u);
+  assert.match(
+    realCodex,
+    /KINTIO_CI_API_KEY: \$\{\{ secrets\.KINTIO_CI_API_KEY \}\}/u,
+  );
+  assert.equal(realCodex.match(/secrets\.KINTIO_CI_API_KEY/gu)?.length, 1);
+  assert.match(
+    realCodex,
+    /name: Run the fixed real Codex smoke test[\s\S]+KINTIO_CI_API_KEY: \$\{\{ secrets\.KINTIO_CI_API_KEY \}\}[\s\S]+pnpm exec vitest run/u,
+  );
+  assert.match(
+    realCodex,
+    /KINTIO_CI_BASE_URL: \$\{\{ vars\.KINTIO_CI_BASE_URL \}\}/u,
+  );
+  assert.match(
+    realCodex,
+    /\^real Codex executes one text reply through MCP and fake WeChat accepts it\$/u,
+  );
+  assert.doesNotMatch(realCodex, /upload-artifact|download-artifact/u);
+  assert.match(
+    realCodex,
+    /name: Remove isolated Codex state\n\s+if: always\(\)/u,
+  );
   assert.match(release, /tags: \['v\*\.\*\.\*'\]/u);
   assert.match(release, /tag .* does not match package version/u);
   assert.match(release, /git merge-base --is-ancestor/u);
@@ -333,6 +393,7 @@ test('GitHub automation covers CI, security, dependency policy, and releases', a
     secretScan,
     release,
     claWorkflow,
+    realCodex,
   ]) {
     for (const uses of workflow.matchAll(/^\s*-?\s*uses:\s*(\S+)/gmu)) {
       assert.match(

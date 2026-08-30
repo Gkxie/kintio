@@ -79,7 +79,42 @@ function reasoningEffort(value: string | undefined): ReasoningEffort {
   return effort as ReasoningEffort;
 }
 
+function webSearchMode(
+  value: string | undefined,
+): 'disabled' | 'cached' | 'live' {
+  const mode = value || 'live';
+  if (mode !== 'disabled' && mode !== 'cached' && mode !== 'live') {
+    throw new Error(`Unsupported CODEX_WEB_SEARCH_MODE: ${mode}`);
+  }
+  return mode;
+}
+
+function ciModelProvider(): {
+  readonly baseUrl: string;
+  readonly apiKeyEnv: string;
+} | undefined {
+  const baseUrl = process.env.KINTIO_CI_BASE_URL?.trim() || '';
+  const hasApiKey = Boolean(process.env.KINTIO_CI_API_KEY?.trim());
+  if (!baseUrl && !hasApiKey) return undefined;
+  if (!baseUrl || !hasApiKey) {
+    throw new Error(
+      'KINTIO_CI_BASE_URL and KINTIO_CI_API_KEY must be configured together',
+    );
+  }
+  let providerUrl: URL;
+  try {
+    providerUrl = new URL(baseUrl);
+  } catch {
+    throw new Error('KINTIO_CI_BASE_URL must be a valid URL');
+  }
+  if (providerUrl.origin !== 'https://www.xieyu.chat') {
+    throw new Error('KINTIO_CI_BASE_URL must use https://www.xieyu.chat');
+  }
+  return { baseUrl, apiKeyEnv: 'KINTIO_CI_API_KEY' };
+}
+
 async function createRealHarness(): Promise<RealHarness> {
+  const modelProvider = ciModelProvider();
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-real-codex-'));
   const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
   const imageTempDirectory = path.join(directory, 'input');
@@ -163,7 +198,7 @@ async function createRealHarness(): Promise<RealHarness> {
     pathOverride: process.env.CODEX_PATH || 'codex',
     model: process.env.CODEX_MODEL || 'gpt-5.6-luna',
     reasoningEffort: reasoningEffort(process.env.CODEX_REASONING_EFFORT),
-    webSearchMode: 'live' as const,
+    webSearchMode: webSearchMode(process.env.CODEX_WEB_SEARCH_MODE),
     workingDirectory: path.resolve('codex-workspace'),
     imageTempDirectory,
     generatedImageDirectory,
@@ -176,6 +211,7 @@ async function createRealHarness(): Promise<RealHarness> {
       mcpUrl: `http://127.0.0.1:${mcpAddress.port}/mcp`,
       memoryMcpUrl: `http://127.0.0.1:${mcpAddress.port}/mcp/memory`,
       mcpBearerToken,
+      ...(modelProvider ? { modelProvider } : {}),
     });
   const memoryReads: string[] = [];
   memoryExecutor = new ConversationMemoryExecutor({
