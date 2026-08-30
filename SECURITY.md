@@ -38,8 +38,9 @@ before disclosure.
 
 | Version | Security fixes |
 | --- | --- |
-| Latest `0.4.x` Patch | Supported |
+| Latest `0.5.x` Patch | Supported |
 | `master` | In development; security fixes accepted |
+| `0.4.x` | Unsupported |
 | `< 0.4.0` | Unsupported |
 
 Operators should upgrade to the latest Patch in a supported release line. When

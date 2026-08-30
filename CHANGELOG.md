@@ -4,14 +4,18 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.5.0 - 2026-08-30
+
 - Added a global `kintio` command with secure setup, foreground execution, and
-  PM2-backed start, stop, restart, status, and log operations.
+  PM2-backed start, stop, restart, status, and log operations
+  ([#5](https://github.com/Gkxie/kintio/pull/5)).
 - Separated installed program files from instance configuration, SQLite state,
   temporary media, and the Agent workspace under `~/.kintio` by default.
 - Made an application Supervisor the process composition root; Hono now remains
   an HTTP callback and MCP channel beside polling and future WebSocket inputs.
 - Rendered optional iLink login invitations as branded QR cards with an explicit
-  five-minute validity notice.
+  five-minute validity notice
+  ([#6](https://github.com/Gkxie/kintio/pull/6)).
 
 ## 0.4.1 - 2026-08-30
 
