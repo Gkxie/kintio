@@ -137,7 +137,7 @@ test('public collaboration files keep stable forms, one test entry point, and re
   assert.match(contributing, /Do not create a retrospective issue/u);
   assert.match(contributing, /at most one\s+pull request open, including drafts/u);
   assert.match(maintaining, /`status: needs reproduction`/u);
-  assert.match(maintaining, /successful `CLA` status/u);
+  assert.match(maintaining, /successful `CLA`\s+status/u);
   assert.match(maintaining, /all external contributors/u);
   assert.match(maintaining, /concurrent open pull request cap at one/u);
   assert.match(maintaining, /Issue-driven: Issue → PR → commit → release/u);
@@ -158,7 +158,12 @@ test('public collaboration files keep stable forms, one test entry point, and re
   assert.match(license, /Apache License\s+Version 2\.0/iu);
   assert.match(notices, /Tencent[\s\S]+MIT License/iu);
   assert.match(cla, /Project Owner[^\n]+XIE YU/su);
-  assert.match(cla, /I have read the CLA Document and I hereby sign the CLA/u);
+  const claVersion = /Agreement \(v(\d+\.\d+)\)/u.exec(cla)?.[1];
+  assert.ok(claVersion, 'CLA must declare a major.minor version');
+  assert.match(
+    cla,
+    new RegExp(`I have read the Kintio CLA v${claVersion.replace('.', '\\.')} and I hereby sign it`, 'u'),
+  );
   const packageJson = JSON.parse(packageSource) as {
     name?: string;
     version?: string;
@@ -229,7 +234,7 @@ test('GitHub automation covers CI, security, dependency policy, and releases', a
     release,
     vitest,
     claWorkflow,
-    claScript,
+    claDocument,
     realCodex,
   ] = await Promise.all([
     read('.github/workflows/ci.yml'),
@@ -241,9 +246,12 @@ test('GitHub automation covers CI, security, dependency policy, and releases', a
     read('.github/workflows/release.yml'),
     read('vitest.config.ts'),
     read('.github/workflows/cla.yml'),
-    read('scripts/cla.ts'),
+    read('CLA.md'),
     read('.github/workflows/real-codex.yml'),
   ]);
+  const claVersion = /Agreement \(v(\d+\.\d+)\)/u.exec(claDocument)?.[1];
+  assert.ok(claVersion, 'CLA must declare a major.minor version');
+  const escapedClaVersion = claVersion.replace('.', '\\.');
   assert.match(ci, /pull_request:/u);
   assert.match(prTitle, /types: \[opened, edited, reopened, synchronize\]/u);
   assert.match(prTitle, /name: PR title/u);
@@ -257,33 +265,50 @@ test('GitHub automation covers CI, security, dependency policy, and releases', a
   assert.match(ci, /kintio-coverage-round-trip\/coverage-summary\.json/u);
   assert.match(vitest, /GITHUB_ACTIONS[\s\S]+github-actions/u);
   assert.match(claWorkflow, /pull_request_target:/u);
-  assert.match(claWorkflow, /types: \[opened, reopened, synchronize, ready_for_review\]/u);
-  assert.match(claWorkflow, /pull_request\.draft == false/u);
+  assert.match(
+    claWorkflow,
+    /types: \[opened, reopened, synchronize, ready_for_review, closed\]/u,
+  );
   assert.match(claWorkflow, /issue_comment:/u);
-  assert.doesNotMatch(claWorkflow.split(/^jobs:$/mu)[0] || '', /concurrency:/u);
-  assert.match(claWorkflow, /comment-preflight:[\s\S]+outputs:[\s\S]+mode:/u);
+  assert.match(claWorkflow, /github\.repository == 'Gkxie\/kintio'/u);
+  assert.match(
+    claWorkflow,
+    new RegExp(`I have read the Kintio CLA v${escapedClaVersion} and I hereby sign it`, 'u'),
+  );
   assert.match(
     claWorkflow,
     /comment\.body == 'recheck'[\s\S]+comment\.author_association == 'OWNER'/u,
   );
   assert.match(
     claWorkflow,
-    /group: cla-preflight-[^\n]+[\s\S]+cancel-in-progress: true/u,
+    /contributor-assistant\/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2\.6\.1/u,
   );
-  assert.match(claWorkflow, /scripts\/cla\.ts preflight/u);
-  assert.match(claWorkflow, /needs: comment-preflight/u);
-  assert.match(claWorkflow, /group: cla-evaluate-[^\n]+[\s\S]+cancel-in-progress: true/u);
-  assert.match(claWorkflow, /group: cla-sign-\$\{\{ github\.repository_id \}\}[\s\S]+queue: max/u);
   assert.match(claWorkflow, /contents: write/u);
+  assert.match(claWorkflow, /actions: write/u);
   assert.match(claWorkflow, /pull-requests: write/u);
-  assert.match(claWorkflow, /statuses: write/u);
-  assert.match(claWorkflow, /ref: \$\{\{ github\.event\.repository\.default_branch \}\}/u);
-  assert.doesNotMatch(claWorkflow, /pull_request\.head|github\.head_ref/u);
-  assert.doesNotMatch(claWorkflow, /contributor-assistant/u);
-  assert.match(claScript, /claSha256/u);
-  assert.match(claScript, /githubUserId/u);
-  assert.match(claScript, /CLA_LEDGER_BRANCH = 'cla-signatures'/u);
-  assert.doesNotMatch(claWorkflow, /edited|deleted|revalidate-comment/u);
+  assert.doesNotMatch(claWorkflow, /statuses: write/u);
+  assert.match(
+    claWorkflow,
+    /commits\(first:100\)[\s\S]+totalCount[\s\S]+databaseId/u,
+  );
+  assert.match(claWorkflow, /Every commit author must be linked/u);
+  assert.match(claWorkflow, /Co-authored-by:/u);
+  assert.match(
+    claWorkflow,
+    new RegExp(`path-to-document: https://github\\.com/Gkxie/kintio/blob/cla-v${escapedClaVersion}/CLA\\.md`, 'u'),
+  );
+  assert.match(
+    claWorkflow,
+    new RegExp(`path-to-signatures: signatures/v${escapedClaVersion}/cla\\.json`, 'u'),
+  );
+  assert.match(claWorkflow, /branch: cla-signatures/u);
+  assert.match(claWorkflow, /allowlist: dependabot\[bot\],renovate\[bot\]/u);
+  assert.match(
+    claWorkflow,
+    new RegExp(`custom-pr-sign-comment: I have read the Kintio CLA v${escapedClaVersion} and I hereby sign it`, 'u'),
+  );
+  assert.match(claWorkflow, /lock-pullrequest-aftermerge: true/u);
+  assert.doesNotMatch(claWorkflow, /actions\/checkout|pull_request\.head|github\.head_ref|bot\*/u);
   assert.match(codeql, /security-events: write/u);
   assert.match(codeql, /repository\.visibility == 'public'/u);
   assert.match(codeql, /github\/codeql-action\/analyze@[0-9a-f]{40} # v4/u);

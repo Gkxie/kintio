@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Replaced the custom CLA parser and ledger writer with the immutable,
+  SHA-pinned CLA Assistant Lite workflow used by OpenAI Codex, while retaining
+  public signature records in the protected `cla-signatures` branch
+  ([#11](https://github.com/Gkxie/kintio/issues/11)).
+
 ## 0.5.0 - 2026-08-30
 
 - Added a global `kintio` command with secure setup, foreground execution, and

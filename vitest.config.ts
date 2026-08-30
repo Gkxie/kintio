@@ -86,7 +86,7 @@ export default defineConfig({
     coverage: {
       enabled: true,
       provider: 'v8',
-      include: ['src/**/*.ts', 'scripts/cla.ts'],
+      include: ['src/**/*.ts'],
       exclude: ['dist/**', 'test/**'],
       reporter: ['text', 'json-summary', 'html', 'lcov'],
       reportsDirectory: 'coverage',
