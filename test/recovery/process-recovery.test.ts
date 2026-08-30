@@ -10,7 +10,7 @@ import {
   SqliteStore,
   stableMessageKey,
 } from '../../src/state/sqlite-store.ts';
-import { startTestChild } from '../support/child-process.ts';
+import { isForcedExit, startTestChild } from '../support/child-process.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 import { seedPendingAttempts } from '../support/pending-attempt.ts';
 import { inspectAttempt } from '../support/sqlite-inspect.ts';
@@ -98,7 +98,7 @@ test('two real processes reject a live owner and recover its stale lock after SI
       filename: 'wecom.sqlite',
     });
     const lockFile = path.join(temporary.directory, 'wecom.lock');
-    const seed = new SqliteStore({ filePath: temporary.filePath });
+    const seed = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
     seed.ingestSyncPage({
       openKfId: 'wk-lock-sentinel',
       nextCursor: 'intact',
@@ -127,10 +127,7 @@ test('two real processes reject a live owner and recover its stale lock after SI
     assert.match(String(rejected.message), new RegExp(String(firstOwner.pid), 'u'));
     assert.deepEqual(await second.waitForExit(), { code: 0, signal: null });
 
-    assert.deepEqual(await first.stop('SIGKILL'), {
-      code: null,
-      signal: 'SIGKILL',
-    });
+    assert.equal(isForcedExit(await first.stop('SIGKILL'), 'SIGKILL'), true);
     await fs.access(lockFile);
 
     const recovered = startTestChild(t, currentFile, {
@@ -149,7 +146,7 @@ test('two real processes reject a live owner and recover its stale lock after SI
     assert.deepEqual(await recovered.waitForExit(), { code: 0, signal: null });
     await assert.rejects(() => fs.access(lockFile), { code: 'ENOENT' });
 
-    const verified = new SqliteStore({ filePath: temporary.filePath });
+    const verified = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
     t.onTestFinished(() => verified.close());
     assert.equal(verified.getCursor('wk-lock-sentinel'), 'intact');
     assert.deepEqual(verified.integrityCheck().map(Object.values), [['ok']]);
@@ -161,7 +158,7 @@ test('SIGKILL after claiming a send changes sending to uncertain on startup with
       prefix: 'wechat-process-send-',
       filename: 'wecom.sqlite',
     });
-    const first = new SqliteStore({ filePath: temporary.filePath });
+    const first = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
     first.ingestSyncPage({
       openKfId: 'wk-recovery',
       nextCursor: 'cursor-one',
@@ -194,12 +191,9 @@ test('SIGKILL after claiming a send changes sending to uncertain on startup with
       attemptId,
       status: 'sending',
     });
-    assert.deepEqual(await sender.stop('SIGKILL'), {
-      code: null,
-      signal: 'SIGKILL',
-    });
+    assert.equal(isForcedExit(await sender.stop('SIGKILL'), 'SIGKILL'), true);
 
-    const recovered = new SqliteStore({ filePath: temporary.filePath });
+    const recovered = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
     t.onTestFinished(() => recovered.close());
     assert.equal(inspectAttempt(recovered.database, attemptId)?.status, 'sending');
     const summary = recovered.recoverStartup();

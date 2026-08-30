@@ -110,7 +110,7 @@ async function fixture(testContext: Parameters<typeof createTempSqlite>[0]) {
   });
   let now = 1_800_000_000_000;
   const clock = () => now;
-  const store = new SqliteStore({ filePath: temp.filePath, clock });
+  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock }));
   const ilink = new IlinkSqliteStore({ store, clock });
   const box = new IlinkSecretBox(configuredSecretKey);
   const advance = (milliseconds = 1) => {

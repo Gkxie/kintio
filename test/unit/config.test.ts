@@ -32,14 +32,16 @@ test('.env.example is safe to copy before choosing a channel', async () => {
 
 describe('independent channel activation', () => {
   it('allows iLink with no WeChat callback or KF API credentials', () => {
+    const kintioDatabase = path.join(os.tmpdir(), 'kintio-test.sqlite');
+    const talkFerryDatabase = path.join(os.tmpdir(), 'talkferry-test.sqlite');
     const config = createConfig({
       ILINK_ENABLED: 'true',
       KINTIO_MCP_BEARER_TOKEN: 'i'.repeat(32),
       KINTIO_MCP_URL: 'https://chat.example.com/mcp',
-      KINTIO_DB_FILE: '/tmp/kintio-test.sqlite',
+      KINTIO_DB_FILE: kintioDatabase,
       TALKFERRY_MCP_BEARER_TOKEN: 't'.repeat(32),
       TALKFERRY_MCP_URL: 'https://legacy-talkferry.example.com/mcp',
-      TALKFERRY_DB_FILE: '/tmp/talkferry-test.sqlite',
+      TALKFERRY_DB_FILE: talkFerryDatabase,
     });
 
     assert.equal(config.wecom.api.enabled, false);
@@ -48,8 +50,8 @@ describe('independent channel activation', () => {
     assert.equal(config.ilink.enabled, true);
     assert.equal(config.codex.enabled, true);
     assert.equal(config.wecom.mcp.url, 'https://chat.example.com/mcp');
-    assert.equal(config.state.databaseFile, '/tmp/kintio-test.sqlite');
-    assert.equal(config.state.lockFile, '/tmp/kintio.lock');
+    assert.equal(config.state.databaseFile, kintioDatabase);
+    assert.equal(config.state.lockFile, path.join(os.tmpdir(), 'kintio.lock'));
   });
 
   it('does not infer iLink activation from WeChat KF credentials', () => {
@@ -147,35 +149,48 @@ test('default config loading does not copy file values into process.env', async 
   assert.equal(process.env[name], undefined);
 });
 
+test('Windows environment names remain case-insensitive before file fallback', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-env-case-'));
+  const envFile = path.join(root, '.env');
+  await fs.writeFile(envFile, 'PORT=9001\n');
+  t.onTestFinished(() => fs.rm(root, { recursive: true, force: true }));
+
+  const config = loadConfig({ environment: { port: '9000' }, envFile, root });
+  assert.equal(config.port, process.platform === 'win32' ? 9000 : 9001);
+});
+
 test('fresh state uses Kintio names while an existing legacy database stays in place', () => {
-  const root = '/srv/kintio';
+  const root = path.join(os.tmpdir(), 'kintio-state-root');
+  const data = path.join(root, 'data');
+  const explicitKintio = path.join(os.tmpdir(), 'kintio-explicit', 'state.sqlite');
+  const explicitTalkFerry = path.join(os.tmpdir(), 'talkferry-explicit', 'state.sqlite');
   assert.deepEqual(resolveStateFiles({}, root, () => false), {
-    databaseFile: '/srv/kintio/data/kintio.sqlite',
-    lockFile: '/srv/kintio/data/kintio.lock',
+    databaseFile: path.join(data, 'kintio.sqlite'),
+    lockFile: path.join(data, 'kintio.lock'),
   });
   assert.deepEqual(resolveStateFiles({}, root, (filePath) =>
-    filePath === '/srv/kintio/data/talkferry.sqlite'
+    filePath === path.join(data, 'talkferry.sqlite')
   ), {
-    databaseFile: '/srv/kintio/data/talkferry.sqlite',
-    lockFile: '/srv/kintio/data/talkferry.lock',
+    databaseFile: path.join(data, 'talkferry.sqlite'),
+    lockFile: path.join(data, 'talkferry.lock'),
   });
   assert.deepEqual(resolveStateFiles({}, root, (filePath) =>
-    filePath === '/srv/kintio/data/wecom.sqlite'
+    filePath === path.join(data, 'wecom.sqlite')
   ), {
-    databaseFile: '/srv/kintio/data/wecom.sqlite',
-    lockFile: '/srv/kintio/data/wecom.lock',
+    databaseFile: path.join(data, 'wecom.sqlite'),
+    lockFile: path.join(data, 'wecom.lock'),
   });
   assert.deepEqual(resolveStateFiles({
-    KINTIO_DB_FILE: '/var/lib/kintio/state.sqlite',
+    KINTIO_DB_FILE: explicitKintio,
   }, root, () => true), {
-    databaseFile: '/var/lib/kintio/state.sqlite',
-    lockFile: '/var/lib/kintio/kintio.lock',
+    databaseFile: explicitKintio,
+    lockFile: path.join(path.dirname(explicitKintio), 'kintio.lock'),
   });
   assert.deepEqual(resolveStateFiles({
-    TALKFERRY_DB_FILE: '/var/lib/talkferry/state.sqlite',
+    TALKFERRY_DB_FILE: explicitTalkFerry,
   }, root, () => false), {
-    databaseFile: '/var/lib/talkferry/state.sqlite',
-    lockFile: '/var/lib/talkferry/talkferry.lock',
+    databaseFile: explicitTalkFerry,
+    lockFile: path.join(path.dirname(explicitTalkFerry), 'talkferry.lock'),
   });
 });
 
@@ -190,7 +205,7 @@ test('state selection rejects ambiguous new and legacy databases', async (t) => 
   ]);
   assert.throws(
     () => resolveStateFiles({}, root),
-    /Multiple default state databases exist \(data\/kintio\.sqlite, data\/talkferry\.sqlite, data\/wecom\.sqlite\)/u,
+    /Multiple default state databases exist/u,
   );
   assert.deepEqual(resolveStateFiles({
     KINTIO_DB_FILE: path.join(root, 'data/wecom.sqlite'),
@@ -210,7 +225,8 @@ test('message processing remains disabled until CorpID and Secret are present', 
   assert.equal(config.ilink.baseUrl, 'https://ilinkai.weixin.qq.com/');
   assert.equal(config.ilink.mcpUrl, 'http://127.0.0.1:8888/mcp/ilink');
   assert.equal(config.codex.webSearchMode, 'live');
-  assert.match(config.codex.imageTempDirectory, /data\/codex-input$/u);
+  assert.equal(path.basename(config.codex.imageTempDirectory), 'codex-input');
+  assert.equal(path.basename(path.dirname(config.codex.imageTempDirectory)), 'data');
   assert.equal(
     config.codex.generatedImageDirectory,
     path.join(config.codex.workingDirectory, 'generated_images'),
@@ -276,29 +292,31 @@ test('allowed users and safe Codex defaults are parsed', () => {
 });
 
 test('legacy harness MCP and database aliases remain compatible', () => {
+  const databaseFile = path.join(os.tmpdir(), 'legacy-kintio.sqlite');
   const config = createConfig({
     ILINK_ENABLED: 'true',
     HARNESS_MCP_BEARER_TOKEN: 'l'.repeat(32),
     HARNESS_MCP_URL: 'https://legacy.example.com/mcp',
-    HARNESS_DB_FILE: '/tmp/legacy-kintio.sqlite',
+    HARNESS_DB_FILE: databaseFile,
   });
 
   assert.equal(config.wecom.mcp.bearerToken, 'l'.repeat(32));
   assert.equal(config.wecom.mcp.url, 'https://legacy.example.com/mcp');
-  assert.equal(config.state.databaseFile, '/tmp/legacy-kintio.sqlite');
-  assert.equal(config.state.lockFile, '/tmp/wecom.lock');
+  assert.equal(config.state.databaseFile, databaseFile);
+  assert.equal(config.state.lockFile, path.join(os.tmpdir(), 'wecom.lock'));
 });
 
 test('TalkFerry configuration aliases remain compatible for upgrades', () => {
+  const databaseFile = path.join(os.tmpdir(), 'talkferry-state.sqlite');
   const config = createConfig({
     ILINK_ENABLED: 'true',
     TALKFERRY_MCP_BEARER_TOKEN: 't'.repeat(32),
     TALKFERRY_MCP_URL: 'https://talkferry.example.com/mcp',
-    TALKFERRY_DB_FILE: '/tmp/talkferry-state.sqlite',
+    TALKFERRY_DB_FILE: databaseFile,
   });
 
   assert.equal(config.wecom.mcp.bearerToken, 't'.repeat(32));
   assert.equal(config.wecom.mcp.url, 'https://talkferry.example.com/mcp');
-  assert.equal(config.state.databaseFile, '/tmp/talkferry-state.sqlite');
-  assert.equal(config.state.lockFile, '/tmp/talkferry.lock');
+  assert.equal(config.state.databaseFile, databaseFile);
+  assert.equal(config.state.lockFile, path.join(os.tmpdir(), 'talkferry.lock'));
 });

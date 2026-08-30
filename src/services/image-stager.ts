@@ -3,6 +3,7 @@ import {
   readdirSync,
   rmSync,
 } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import type { ResolvedImage } from '../types.ts';
@@ -31,7 +32,7 @@ export function cleanupStagedImageOrphans(temporaryRoot: string): void {
 
 export async function withStagedImages<T>(
   images: readonly Pick<ResolvedImage, 'bytes'>[],
-  { temporaryRoot = '/dev/shm' }: { temporaryRoot?: string } = {},
+  { temporaryRoot = os.tmpdir() }: { temporaryRoot?: string } = {},
   operation: (paths: string[]) => T | Promise<T>,
 ): Promise<T> {
   if (images.length === 0) {

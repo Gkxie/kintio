@@ -97,7 +97,9 @@ describe.each(historySizes)('%i history rows', (size) => {
         prefix: `wechat-sql-scale-${size}-`,
         filename: 'wecom.sqlite',
       });
-      const store = new SqliteStore({ filePath: temporary.filePath });
+      const store = temporary.trackSqlite(
+        new SqliteStore({ filePath: temporary.filePath }),
+      );
       t.onTestFinished(() => store.close());
       seedHistory(store.database, size);
 

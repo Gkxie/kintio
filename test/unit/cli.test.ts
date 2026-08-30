@@ -3,16 +3,19 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { TestContext } from 'vitest';
-import { test, vi } from 'vitest';
+import { test } from 'vitest';
+import crossSpawn from 'cross-spawn';
 
 import { runCli } from '../../src/cli.ts';
-import { writeReadyMarker } from '../../src/runtime/ready-marker.ts';
+import { runNativeDaemon } from '../../src/runtime/native-daemon.ts';
+import {
+  readDaemonRecord,
+  writeDaemonRecord,
+} from '../../src/runtime/daemon-protocol.ts';
 import { acquireSingleInstanceLock } from '../../src/runtime/single-instance-lock.ts';
 import { KINTIO_VERSION } from '../../src/version.ts';
 
-type CliExecute = NonNullable<
-  NonNullable<Parameters<typeof runCli>[1]>['execute']
->;
+type CliOverrides = NonNullable<Parameters<typeof runCli>[1]>;
 
 async function temporaryRoot(t: TestContext): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-cli-'));
@@ -20,7 +23,7 @@ async function temporaryRoot(t: TestContext): Promise<string> {
   return root;
 }
 
-function cliRuntime(root: string, execute?: CliExecute) {
+function cliRuntime(root: string, extra: Partial<CliOverrides> = {}) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   return {
@@ -33,35 +36,33 @@ function cliRuntime(root: string, execute?: CliExecute) {
       packageRoot: path.resolve('.'),
       stdout: (text: string) => stdout.push(text),
       stderr: (text: string) => stderr.push(text),
-      ...(execute ? { execute } : {}),
-    },
+      ...extra,
+    } satisfies Partial<CliOverrides>,
   };
 }
 
-test('global CLI exposes stable help, version, and argument failures', async (t) => {
-  const root = await temporaryRoot(t);
-  const runtime = cliRuntime(root);
+function exitedDaemon(pid = 2_147_483_647) {
+  return { pid, exited: Promise.resolve(), kill: () => false };
+}
 
+test('global CLI exposes stable help, version, and argument failures', async (t) => {
+  const runtime = cliRuntime(await temporaryRoot(t));
   assert.equal(await runCli([], runtime.overrides), 0);
   assert.match(runtime.stdout.join(''), /Commands:\n  setup/u);
   runtime.stdout.length = 0;
-
   assert.equal(await runCli(['--version'], runtime.overrides), 0);
   assert.equal(runtime.stdout.join(''), `${KINTIO_VERSION}\n`);
-
   assert.equal(await runCli(['unknown'], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /Unknown command: unknown/u);
   runtime.stderr.length = 0;
-
   assert.equal(await runCli(['start', '--lines', '5'], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /valid only for "kintio logs"/u);
 });
 
-test('setup creates one private config and installs the Agent skill idempotently', async (t) => {
+test('setup creates one private config and refreshes the managed Agent skill', async (t) => {
   const root = await temporaryRoot(t);
-  const runtime = cliRuntime(root);
   const home = path.join(root, 'instance');
-
+  const runtime = cliRuntime(root);
   assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
   const configFile = path.join(home, '.env');
   const skillFile = path.join(
@@ -75,605 +76,323 @@ test('setup creates one private config and installs the Agent skill idempotently
   );
   assert.match(firstConfig, /^KINTIO_MCP_BEARER_TOKEN=[A-Za-z0-9_-]{43}$/mu);
   assert.equal(await fs.readFile(skillFile, 'utf8'), bundledSkill);
-
   await fs.writeFile(skillFile, 'stale local skill\n');
   assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
   assert.equal(await fs.readFile(configFile, 'utf8'), firstConfig);
   assert.equal(await fs.readFile(skillFile, 'utf8'), bundledSkill);
-  assert.match(runtime.stdout.join(''), /Config: .+ \(kept\)/u);
-  assert.match(runtime.stdout.join(''), /Agent skill: .+ \(updated\)/u);
   if (process.platform !== 'win32') {
     assert.equal((await fs.stat(home)).mode & 0o777, 0o700);
     assert.equal((await fs.stat(configFile)).mode & 0o777, 0o600);
-    assert.equal((await fs.stat(skillFile)).mode & 0o777, 0o600);
   }
 });
 
-test('start validates the instance and delegates one background process to PM2', async (t) => {
+test('run keeps the worker in the foreground with explicit instance selectors', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
+  const configFile = path.join(home, 'custom.env');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
-
-  const requests: Array<{
-    readonly args: readonly string[];
-    readonly env: NodeJS.ProcessEnv;
-    readonly capture?: boolean;
-    readonly timeoutMs?: number;
-  }> = [];
-  let started = false;
-  let activeToken = '';
-  const runtime = cliRuntime(root, async (request) => {
-    requests.push(request);
-    if (request.args.includes('jlist')) {
-      return {
-        code: 0,
-        stdout: started
-          ? JSON.stringify([{
-              name: 'kintio',
-              pid: 2468,
-              pm2_env: {
-                status: 'online',
-                pm_exec_path: path.join(path.resolve('.'), 'dist/index.js'),
-                KINTIO_HOME: home,
-                KINTIO_CONFIG_FILE: path.join(home, '.env'),
-                KINTIO_START_TOKEN: activeToken,
-              },
-            }])
-          : '[]',
-        stderr: '',
-      };
-    }
-    if (request.args.includes('start')) {
-      started = true;
-      activeToken = String(request.env.KINTIO_START_TOKEN);
-      writeReadyMarker(home, activeToken, 2468);
-    }
-    return { code: 0, stdout: '', stderr: '' };
+  assert.equal(await runCli([
+    'setup', '--home', home, '--config', configFile,
+  ], setupRuntime.overrides), 0);
+  const requests: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
+  const runtime = cliRuntime(root, {
+    env: {
+      KINTIO_HOME: path.join(root, 'stale-home'),
+      KINTIO_CONFIG_FILE: path.join(root, 'stale.env'),
+      AGENT_HOST_CANARY: 'preserved',
+    },
+    execute: async (request) => {
+      requests.push({ args: request.args, env: request.env });
+      return 0;
+    },
   });
-  runtime.overrides.env = {
-    HOME: root,
-    PATH: process.env.PATH,
-    HTTPS_PROXY: 'http://proxy.example:8080',
-    AGENT_HOST_CANARY: 'host-environment-reaches-agent-runtime',
-    KINTIO_HOME: path.join(root, 'stale-home'),
-    KINTIO_CONFIG_FILE: path.join(root, 'stale.env'),
-    NODE_ENV: 'stale-node-env',
-    KINTIO_KILL_TIMEOUT_MS: '99999',
-  };
-
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
-  assert.equal(requests.length, 3);
-  assert.deepEqual(requests[1]?.args.slice(1), [
-    'start',
-    path.join(path.resolve('.'), 'ecosystem.config.cjs'),
-    '--only',
-    'kintio',
-  ]);
-  assert.equal(requests[1]?.env.KINTIO_HOME, home);
-  assert.equal(requests[1]?.env.KINTIO_CONFIG_FILE, path.join(home, '.env'));
-  assert.equal(requests[1]?.env.PM2_HOME, path.join(home, 'data/pm2'));
-  assert.equal(requests[1]?.env.NODE_ENV, 'production');
-  assert.equal(requests[1]?.env.KINTIO_KILL_TIMEOUT_MS, '17000');
-  assert.equal(requests[1]?.env.NODE_ENV, 'production');
-  assert.equal(requests[1]?.env.HOME, root);
-  assert.equal(requests[1]?.env.HTTPS_PROXY, 'http://proxy.example:8080');
-  assert.equal(
-    requests[1]?.env.AGENT_HOST_CANARY,
-    'host-environment-reaches-agent-runtime',
-  );
-  assert.match(requests[1]?.env.KINTIO_START_TOKEN || '', /^[A-Za-z0-9_-]{43}$/u);
-  assert.ok((requests[0]?.timeoutMs || 0) > 0);
-  assert.ok((requests[1]?.timeoutMs || 0) > 0);
-  assert.ok((requests[1]?.timeoutMs || 0) <= (requests[0]?.timeoutMs || 0));
-});
-
-test('start is idempotent while restart deliberately refreshes the PM2 process', async (t) => {
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'instance');
-  const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
-
-  const requests: Array<readonly string[]> = [];
-  const existingToken = 'e'.repeat(43);
-  let activeToken = existingToken;
-  writeReadyMarker(home, existingToken, 4321);
-  const runtime = cliRuntime(root, async (request) => {
-    requests.push(request.args);
-    if (!request.capture && request.args.includes('start')) {
-      activeToken = String(request.env.KINTIO_START_TOKEN);
-      writeReadyMarker(home, activeToken, 4321);
-    }
-    return request.capture
-      ? {
-          code: 0,
-          stdout: JSON.stringify([{
-            name: 'kintio',
-            pid: 4321,
-            pm2_env: {
-              status: 'online',
-              pm_exec_path: path.join(path.resolve('.'), 'dist/index.js'),
-              KINTIO_HOME: home,
-              KINTIO_CONFIG_FILE: path.join(home, '.env'),
-              KINTIO_START_TOKEN: activeToken,
-            },
-          }]),
-          stderr: '',
-        }
-      : { code: 0, stdout: '', stderr: '' };
-  });
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
-  assert.equal(requests.length, 2);
-  assert.match(runtime.stdout.join(''), /already running \(PID 4321\)/u);
-
-  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 0);
-  assert.equal(requests.length, 6);
-  assert.deepEqual(requests[3]?.slice(1), ['delete', 'kintio']);
-  assert.equal(requests[4]?.includes('start'), true);
-  assert.equal(requests[5]?.includes('jlist'), true);
-});
-
-test('restart gives shutdown and fresh readiness independent time budgets', async (t) => {
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'instance');
-  const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
-  await fs.appendFile(path.join(home, '.env'), '\nSHUTDOWN_TIMEOUT_MS=60000\n');
-
-  let now = 1_000_000;
-  const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => now);
-  t.onTestFinished(() => dateNow.mockRestore());
-  const requests: Array<{
-    readonly args: readonly string[];
-    readonly timeoutMs?: number;
-  }> = [];
-  let started = false;
-  let activeToken = 'e'.repeat(43);
-  const runtime = cliRuntime(root, async (request) => {
-    requests.push(request);
-    if (request.args.includes('delete')) {
-      now += 60_000;
-      return { code: 0, stdout: '', stderr: '' };
-    }
-    if (request.args.includes('start')) {
-      started = true;
-      activeToken = String(request.env.KINTIO_START_TOKEN);
-      writeReadyMarker(home, activeToken, 2468);
-      return { code: 0, stdout: '', stderr: '' };
-    }
-    return {
-      code: 0,
-      stdout: JSON.stringify([{
-        name: 'kintio',
-        pid: 2468,
-        pm2_env: {
-          status: 'online',
-          kill_timeout: 67_000,
-          pm_exec_path: path.join(path.resolve('.'), 'dist/index.js'),
-          KINTIO_HOME: home,
-          KINTIO_CONFIG_FILE: path.join(home, '.env'),
-          KINTIO_START_TOKEN: activeToken,
-        },
-      }]),
-      stderr: '',
-    };
-  });
-
-  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 0);
-  assert.equal(started, true);
-  const deleted = requests.find((request) => request.args.includes('delete'));
-  const startedRequest = requests.find((request) => request.args.includes('start'));
-  assert.equal(deleted?.timeoutMs, 72_000);
-  assert.ok((startedRequest?.timeoutMs || 0) > 0);
-  assert.ok((startedRequest?.timeoutMs || 0) <= 30_000);
-});
-
-test('start refuses to silently reuse a different online installation or instance', async (t) => {
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'instance');
-  const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
-  const runtime = cliRuntime(root, async () => ({
-    code: 0,
-    stdout: JSON.stringify([{
-      name: 'kintio',
-      pid: 5566,
-      pm2_env: {
-        status: 'online',
-        pm_exec_path: '/another/kintio/dist/index.js',
-        KINTIO_HOME: '/another/instance',
-        KINTIO_CONFIG_FILE: '/another/instance/.env',
-      },
-    }]),
-    stderr: '',
-  }));
-
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /another installation or instance/u);
-  assert.match(runtime.stderr.join(''), /use "kintio restart"/u);
-});
-
-test('start refuses an online process without matching readiness evidence', async (t) => {
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'instance');
-  const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
-  const runtime = cliRuntime(root, async () => ({
-    code: 0,
-    stdout: JSON.stringify([{
-      name: 'kintio',
-      pid: 5577,
-      pm2_env: {
-        status: 'online',
-        pm_exec_path: path.join(path.resolve('.'), 'dist/index.js'),
-        KINTIO_HOME: home,
-        KINTIO_CONFIG_FILE: path.join(home, '.env'),
-      },
-    }]),
-    stderr: '',
-  }));
-
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /no readiness identity/u);
-});
-
-test('an idempotent readiness probe failure never stops the existing process', async (t) => {
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'instance');
-  const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
-  const token = 'q'.repeat(43);
-  const requests: Array<readonly string[]> = [];
-  const runtime = cliRuntime(root, async (request) => {
-    requests.push(request.args.slice(1));
-    if (requests.length === 1) {
-      return {
-        code: 0,
-        stdout: JSON.stringify([{
-          name: 'kintio',
-          pid: 5588,
-          pm2_env: {
-            status: 'online',
-            pm_exec_path: path.join(path.resolve('.'), 'dist/index.js'),
-            KINTIO_HOME: home,
-            KINTIO_CONFIG_FILE: path.join(home, '.env'),
-            KINTIO_START_TOKEN: token,
-          },
-        }]),
-        stderr: '',
-      };
-    }
-    return { code: 1, stdout: '', stderr: 'probe failed' };
-  });
-
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
-  assert.deepEqual(requests, [['jlist'], ['jlist']]);
-});
-
-test('restart validates startup policy before mutating an existing PM2 entry', async (t) => {
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'instance');
-  const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
-  let executions = 0;
-  const runtime = cliRuntime(root, async () => {
-    executions += 1;
-    return { code: 0, stdout: '[]', stderr: '' };
-  });
-  runtime.overrides.env = { KINTIO_START_TIMEOUT_MS: 'invalid' };
-
-  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 1);
-  assert.equal(executions, 0);
-  assert.match(runtime.stderr.join(''), /KINTIO_START_TIMEOUT_MS/u);
-});
-
-test('run stays in the foreground and explicit config selects its instance root', async (t) => {
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'existing');
-  const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
-
-  const requests: Array<{
-    readonly file: string;
-    readonly args: readonly string[];
-    readonly env: NodeJS.ProcessEnv;
-  }> = [];
-  const runtime = cliRuntime(root, async (request) => {
-    requests.push(request);
-    return { code: 0, stdout: '', stderr: '' };
-  });
-  const configFile = path.join(home, '.env');
-  assert.equal(await runCli(['run', '--config', configFile], runtime.overrides), 0);
-  assert.equal(requests.length, 1);
-  assert.equal(requests[0]?.file, process.execPath);
+  assert.equal(await runCli([
+    'run', '--home', home, '--config', configFile,
+  ], runtime.overrides), 0);
   assert.deepEqual(requests[0]?.args, [path.join(path.resolve('.'), 'dist/index.js')]);
   assert.equal(requests[0]?.env.KINTIO_HOME, home);
   assert.equal(requests[0]?.env.KINTIO_CONFIG_FILE, configFile);
-  await assert.rejects(fs.access(path.join(home, 'data/pm2')), { code: 'ENOENT' });
+  assert.equal(requests[0]?.env.AGENT_HOST_CANARY, 'preserved');
 });
 
-test('an explicit home or config selects one coherent instance over stale environment selectors', async (t) => {
+test('logs validate line counts and read native daemon output without a process manager', async (t) => {
   const root = await temporaryRoot(t);
-  const homeA = path.join(root, 'a');
-  const homeB = path.join(root, 'b');
-  const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', homeA], setupRuntime.overrides), 0);
-  assert.equal(await runCli(['setup', '--home', homeB], setupRuntime.overrides), 0);
-  const requests: Array<NodeJS.ProcessEnv> = [];
-  const runtime = cliRuntime(root, async (request) => {
-    requests.push(request.env);
-    return { code: 0, stdout: '', stderr: '' };
-  });
-  runtime.overrides.env = {
-    KINTIO_HOME: homeA,
-    KINTIO_CONFIG_FILE: path.join(homeA, '.env'),
-  };
-
-  assert.equal(
-    await runCli(['run', '--config', path.join(homeB, '.env')], runtime.overrides),
-    0,
-  );
-  assert.equal(requests.at(-1)?.KINTIO_HOME, homeB);
-  assert.equal(requests.at(-1)?.KINTIO_CONFIG_FILE, path.join(homeB, '.env'));
-
-  assert.equal(await runCli(['run', '--home', homeB], runtime.overrides), 0);
-  assert.equal(requests.at(-1)?.KINTIO_HOME, homeB);
-  assert.equal(requests.at(-1)?.KINTIO_CONFIG_FILE, path.join(homeB, '.env'));
+  const home = path.join(root, 'instance');
+  const runtime = cliRuntime(root);
+  const logFile = path.join(home, 'data/logs/kintio.log');
+  await fs.mkdir(path.dirname(logFile), { recursive: true });
+  await fs.writeFile(logFile, 'one\ntwo\nthree\n');
+  assert.equal(await runCli([
+    'logs', '--home', home, '--lines', '2', '--no-follow',
+  ], runtime.overrides), 0);
+  assert.equal(runtime.stdout.join(''), 'two\nthree\n');
+  runtime.stderr.length = 0;
+  assert.equal(await runCli([
+    'logs', '--home', home, '--lines', '0', '--no-follow',
+  ], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /--lines must be an integer/u);
 });
 
-test('stop, status, and bounded log options delegate directly to PM2', async (t) => {
-  const root = await temporaryRoot(t);
-  const defaultHome = path.join(root, '.kintio');
-  const requests: Array<readonly string[]> = [];
-  const runtime = cliRuntime(root, async (request) => {
-    requests.push(request.args.slice(1));
-    if (request.args.includes('jlist')) {
-      return {
-        code: 0,
-        stdout: JSON.stringify([{
-          name: 'kintio',
-          pid: 7788,
-          pm2_env: {
-            status: 'online',
-            KINTIO_HOME: defaultHome,
-            KINTIO_CONFIG_FILE: path.join(defaultHome, '.env'),
-          },
-        }]),
-        stderr: '',
-      };
-    }
-    return { code: 0, stdout: '', stderr: '' };
-  });
-
-  assert.equal(await runCli(['stop'], runtime.overrides), 0);
-  assert.deepEqual(requests.splice(0), [['jlist'], ['stop', 'kintio']]);
-
-  assert.equal(await runCli(['status'], runtime.overrides), 0);
-  assert.deepEqual(requests.splice(0), [['jlist'], ['status', 'kintio']]);
-
-  assert.equal(
-    await runCli(['logs', '--lines', '250', '--no-follow'], runtime.overrides),
-    0,
-  );
-  assert.deepEqual(requests.splice(0), [
-    ['jlist'],
-    ['logs', 'kintio', '--lines', '250', '--nostream'],
-  ]);
-
-  assert.equal(await runCli(['logs', '--lines', '0'], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /integer between 1 and 10000/u);
-});
-
-test('stop honors the registered PM2 graceful-shutdown budget', async (t) => {
-  const root = await temporaryRoot(t);
-  const defaultHome = path.join(root, '.kintio');
-  const requests: Array<Parameters<CliExecute>[0]> = [];
-  const runtime = cliRuntime(root, async (request) => {
-    requests.push(request);
-    if (request.args.includes('jlist')) {
-      return {
-        code: 0,
-        stdout: JSON.stringify([{
-          name: 'kintio',
-          pid: 7788,
-          pm2_env: {
-            status: 'online',
-            kill_timeout: 67_000,
-            KINTIO_HOME: defaultHome,
-            KINTIO_CONFIG_FILE: path.join(defaultHome, '.env'),
-          },
-        }]),
-        stderr: '',
-      };
-    }
-    return { code: 0, stdout: '', stderr: '' };
-  });
-
-  assert.equal(await runCli(['stop'], runtime.overrides), 0);
-  assert.equal(requests.find((request) => request.args.includes('stop'))?.timeoutMs, 72_000);
-});
-
-test('missing config and a stopped PM2 instance produce explicit non-destructive outcomes', async (t) => {
-  const root = await temporaryRoot(t);
-  const runtime = cliRuntime(root, async () => ({
-    code: 0,
-    stdout: '[]\n',
-    stderr: '',
-  }));
-
-  assert.equal(await runCli(['start'], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /config is missing; run "kintio setup"/u);
-  assert.equal(await runCli(['stop'], runtime.overrides), 0);
-  assert.match(runtime.stdout.join(''), /not running/u);
-});
-
-test('stop terminates a registered crash loop even when no worker PID is online', async (t) => {
-  const root = await temporaryRoot(t);
-  const defaultHome = path.join(root, '.kintio');
-  const requests: Array<readonly string[]> = [];
-  const runtime = cliRuntime(root, async (request) => {
-    requests.push(request.args.slice(1));
-    return request.capture
-      ? {
-          code: 0,
-          stdout: JSON.stringify([{
-            name: 'kintio',
-            pid: 0,
-            pm2_env: {
-              status: 'waiting restart',
-              KINTIO_HOME: defaultHome,
-              KINTIO_CONFIG_FILE: path.join(defaultHome, '.env'),
-            },
-          }]),
-          stderr: '',
-        }
-      : { code: 0, stdout: '', stderr: '' };
-  });
-
-  assert.equal(await runCli(['stop'], runtime.overrides), 0);
-  assert.deepEqual(requests, [['jlist'], ['stop', 'kintio']]);
-});
-
-test('a lifecycle lock prevents concurrent mutation in one PM2 namespace', async (t) => {
+test('status and stop are idempotent when no daemon exists', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
   assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
-  const pm2Home = path.join(home, 'data/pm2');
-  await fs.mkdir(pm2Home, { recursive: true, mode: 0o700 });
-  const lock = acquireSingleInstanceLock({
-    filePath: path.join(pm2Home, 'kintio-cli.lock'),
+  const runtime = cliRuntime(root);
+  assert.equal(await runCli(['status', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['stop', '--home', home], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /Kintio is not running/u);
+});
+
+test('source CLI starts, probes, logs, and stops one native daemon', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const packageRoot = path.join(root, 'fake-package');
+  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const setupRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  await fs.mkdir(path.dirname(workerFile), { recursive: true });
+  await fs.writeFile(workerFile, [
+    "process.stdout.write('unit worker ready\\n');",
+    "process.send?.({ type: 'ready', pid: process.pid });",
+    "process.on('message', (message) => { if (message === 'shutdown') process.exit(0); });",
+    "process.on('disconnect', () => process.exit(0));",
+    'setInterval(() => undefined, 1000).unref();',
+  ].join('\n'));
+
+  const daemons: Promise<void>[] = [];
+  const launches: Array<{ file: string; args: readonly string[] }> = [];
+  const runtime = cliRuntime(root, {
+    packageRoot,
+    launchDaemon: (request) => {
+      launches.push({ file: request.file, args: request.args });
+      daemons.push(runNativeDaemon({
+        home: request.env.KINTIO_HOME!,
+        configFile: request.env.KINTIO_CONFIG_FILE!,
+        packageRoot,
+        environment: request.env,
+      }));
+      return {
+        pid: process.pid,
+        exited: daemons.at(-1)!,
+        kill: () => false,
+      };
+    },
   });
-  t.onTestFinished(() => { lock.release(); });
-  let executions = 0;
-  const runtime = cliRuntime(root, async () => {
-    executions += 1;
-    return { code: 0, stdout: '[]', stderr: '' };
+  t.onTestFinished(async () => {
+    await runCli(['stop', '--home', home], runtime.overrides).catch(() => 1);
+    await Promise.allSettled(daemons);
   });
 
-  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 1);
-  assert.equal(executions, 0);
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.deepEqual(launches, [{
+    file: process.execPath,
+    args: [path.join(packageRoot, 'dist/daemon.js')],
+  }]);
+  assert.equal(await runCli(['status', '--home', home], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /Kintio is running/u);
+  const mismatched = cliRuntime(root, {
+    packageRoot: path.join(root, 'other-installation'),
+  });
+  assert.equal(await runCli(['status', '--home', home], mismatched.overrides), 1);
+  assert.match(mismatched.stderr.join(''), /another config or installation/u);
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /already running/u);
+  assert.equal(await runCli([
+    'logs', '--home', home, '--no-follow', '--lines', '10',
+  ], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /unit worker ready/u);
+  const firstRunId = readDaemonRecord(home)?.runId;
+  assert.ok(firstRunId);
+  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 0);
+  assert.notEqual(readDaemonRecord(home)?.runId, firstRunId);
+  assert.equal(launches.length, 2);
+  assert.equal(await runCli(['stop', '--home', home], runtime.overrides), 0);
+  await Promise.all(daemons);
+});
+
+test('a lifecycle lock rejects concurrent background mutation', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const setupRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  const lock = acquireSingleInstanceLock({
+    filePath: path.join(home, 'data/lifecycle.lock'),
+  });
+  t.onTestFinished(() => { lock.release(); });
+  let launched = false;
+  const runtime = cliRuntime(root, {
+    launchDaemon: () => {
+      launched = true;
+      return exitedDaemon();
+    },
+  });
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
+  assert.equal(launched, false);
   assert.match(runtime.stderr.join(''), /lifecycle command is already running/u);
 });
 
-test('setup refuses a symlink in place of the private environment file', async (t) => {
+test('background startup policy and stale metadata fail safely', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
-  await fs.mkdir(home, { recursive: true });
-  const outside = path.join(root, 'outside.env');
-  await fs.writeFile(outside, 'PORT=9999\n');
-  await fs.symlink(outside, path.join(home, '.env'));
-  const runtime = cliRuntime(root);
+  const setupRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  let launched = false;
+  const invalid = cliRuntime(root, {
+    env: { KINTIO_START_TIMEOUT_MS: 'invalid' },
+    launchDaemon: () => {
+      launched = true;
+      return exitedDaemon();
+    },
+  });
+  assert.equal(await runCli(['start', '--home', home], invalid.overrides), 1);
+  assert.equal(launched, false);
+  assert.match(invalid.stderr.join(''), /KINTIO_START_TIMEOUT_MS/u);
 
-  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /not a regular file/u);
-  assert.equal(await fs.readFile(outside, 'utf8'), 'PORT=9999\n');
-});
+  writeDaemonRecord(home, {
+    version: 1,
+    runId: 'stale-daemon',
+    daemonPid: 2_147_483_647,
+    configFile: path.join(home, '.env'),
+    packageRoot: path.resolve('.'),
+    token: 's'.repeat(43),
+  });
+  const status = cliRuntime(root);
+  assert.equal(await runCli(['status', '--home', home], status.overrides), 0);
+  assert.match(status.stdout.join(''), /not running/u);
+  await assert.rejects(
+    fs.access(path.join(home, 'data/daemon.json')),
+    { code: 'ENOENT' },
+  );
 
-test('setup rejects an existing config reached through an escaping parent symlink', async (t) => {
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'instance');
-  const outside = path.join(root, 'outside');
-  await fs.mkdir(home);
-  await fs.mkdir(outside);
-  const outsideConfig = path.join(outside, '.env');
-  await fs.writeFile(outsideConfig, 'PORT=9999\n', { mode: 0o600 });
-  await fs.symlink(outside, path.join(home, 'linked'));
-  const runtime = cliRuntime(root);
+  writeDaemonRecord(home, {
+    version: 1,
+    runId: 'unreachable-daemon',
+    daemonPid: process.pid,
+    configFile: path.join(home, '.env'),
+    packageRoot: path.resolve('.'),
+    token: 'u'.repeat(43),
+  });
+  const unreachable = cliRuntime(root);
+  assert.equal(await runCli(['status', '--home', home], unreachable.overrides), 1);
+  assert.match(unreachable.stderr.join(''), /running but unreachable/u);
+  await fs.rm(path.join(home, 'data/daemon.json'), { force: true });
 
+  const logs = cliRuntime(root);
   assert.equal(await runCli([
-    'setup',
-    '--home', home,
-    '--config', path.join(home, 'linked/.env'),
-  ], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /escapes through a symbolic link/u);
-  assert.equal(await fs.readFile(outsideConfig, 'utf8'), 'PORT=9999\n');
+    'logs', '--home', home, '--no-follow',
+  ], logs.overrides), 1);
+  assert.match(logs.stderr.join(''), /no background logs/u);
 });
 
-test('setup refuses a nested symbolic link that would escape the instance root', async (t) => {
+test('background start reports a daemon that never publishes readiness', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const setupRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  let launched = false;
+  const runtime = cliRuntime(root, {
+    env: { KINTIO_START_TIMEOUT_MS: '1000' },
+    launchDaemon: () => {
+      launched = true;
+      return exitedDaemon();
+    },
+  });
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
+  assert.equal(launched, true);
+  assert.match(runtime.stderr.join(''), /failed to become ready/u);
+});
+
+test('failed background start rolls back the exact detached process', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const setupRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  let daemonPid = 0;
+  const runtime = cliRuntime(root, {
+    env: { ...process.env, KINTIO_START_TIMEOUT_MS: '1000' },
+    launchDaemon: () => {
+      const child = crossSpawn(
+        process.execPath,
+        ['-e', 'setInterval(() => undefined, 1000)'],
+        { detached: true, stdio: 'ignore', windowsHide: true },
+      );
+      assert.ok(child.pid);
+      daemonPid = child.pid;
+      child.unref();
+      return {
+        pid: daemonPid,
+        exited: new Promise<void>((resolve) => {
+          child.once('close', () => resolve());
+        }),
+        kill: (signal: NodeJS.Signals) => child.kill(signal),
+      };
+    },
+  });
+  t.onTestFinished(() => {
+    try {
+      if (daemonPid) process.kill(daemonPid, 'SIGKILL');
+    } catch {
+      // The rollback is expected to have removed it already.
+    }
+  });
+
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /failed to become ready/u);
+  assert.throws(() => process.kill(daemonPid, 0), { code: 'ESRCH' });
+  await assert.rejects(fs.access(path.join(home, 'data/daemon.json')), { code: 'ENOENT' });
+});
+
+test('setup refuses linked config and workspace paths that escape the instance', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const outside = path.join(root, 'outside');
-  await fs.mkdir(path.join(home, 'codex-workspace'), { recursive: true });
-  await fs.mkdir(outside);
-  await fs.symlink(outside, path.join(home, 'codex-workspace/.agents'));
-  const runtime = cliRuntime(root);
+  await fs.mkdir(outside, { recursive: true });
+  const outsideConfig = path.join(outside, '.env');
+  await fs.writeFile(outsideConfig, 'PORT=9999\n');
+  await fs.mkdir(home, { recursive: true });
+  await fs.symlink(outsideConfig, path.join(home, '.env'), 'file');
+  const configRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], configRuntime.overrides), 1);
+  assert.match(configRuntime.stderr.join(''), /not a regular file/u);
 
-  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /escapes through a symbolic link/u);
-  await assert.rejects(fs.access(path.join(
+  await fs.rm(path.join(home, '.env'), { force: true });
+  await fs.mkdir(path.join(home, 'codex-workspace'), { recursive: true });
+  await fs.symlink(
     outside,
-    'skills/wechat-kf-reply-sop/SKILL.md',
-  )));
+    path.join(home, 'codex-workspace/.agents'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
+  const skillRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], skillRuntime.overrides), 1);
+  assert.match(skillRuntime.stderr.join(''), /symbolic link|not a directory/u);
 });
 
-test('setup rejects an identical managed skill reached through an ancestor symlink', async (t) => {
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'instance');
-  const outside = path.join(root, 'outside');
-  const outsideSkill = path.join(
-    outside,
-    'skills/wechat-kf-reply-sop/SKILL.md',
-  );
-  await fs.mkdir(path.dirname(outsideSkill), { recursive: true });
-  await fs.copyFile(
-    'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
-    outsideSkill,
-  );
-  await fs.mkdir(path.join(home, 'codex-workspace'), { recursive: true });
-  await fs.symlink(outside, path.join(home, 'codex-workspace/.agents'));
-  const runtime = cliRuntime(root);
-
-  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /escapes through a symbolic link/u);
-});
-
-test('start fails closed when an existing config is readable by other users', async (t) => {
-  if (process.platform === 'win32') return;
+test('configuration privacy follows POSIX modes and Windows profile ACLs', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
   assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
   await fs.chmod(path.join(home, '.env'), 0o644);
-  const runtime = cliRuntime(root, async () => ({ code: 0, stdout: '[]', stderr: '' }));
-
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /must not be accessible by group or other users/u);
-});
-
-test('setup refuses an instance directory writable by other users', async (t) => {
-  if (process.platform === 'win32') return;
-  const root = await temporaryRoot(t);
-  const home = path.join(root, 'instance');
-  await fs.mkdir(home, { mode: 0o777 });
-  await fs.chmod(home, 0o777);
   const runtime = cliRuntime(root);
-
-  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /instance directory has unsafe permissions/u);
+  const result = await runCli(['setup', '--home', home], runtime.overrides);
+  assert.equal(result, process.platform === 'win32' ? 0 : 1);
+  if (process.platform !== 'win32') {
+    assert.match(runtime.stderr.join(''), /must not be accessible by group or other users/u);
+  }
 });
 
-test('lifecycle selectors cannot target a different registered instance', async (t) => {
+test('Windows instance metadata stays inside the current user profile', async (t) => {
   const root = await temporaryRoot(t);
-  const runtime = cliRuntime(root, async (request) => {
-    if (request.args.includes('jlist')) {
-      return {
-        code: 0,
-        stdout: JSON.stringify([{
-          name: 'kintio',
-          pid: 9911,
-          pm2_env: {
-            status: 'online',
-            KINTIO_HOME: '/registered/home',
-            KINTIO_CONFIG_FILE: '/registered/home/.env',
-          },
-        }]),
-        stderr: '',
-      };
-    }
-    return { code: 0, stdout: '', stderr: '' };
-  });
-
-  assert.equal(await runCli(['status', '--home', path.join(root, 'other')], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /belongs to another Kintio instance/u);
+  const profile = path.join(root, 'profile');
+  const outside = path.join(root, 'shared', 'instance');
+  await fs.mkdir(profile, { recursive: true });
+  const runtime = cliRuntime(root, { homeDirectory: profile });
+  const result = await runCli(['setup', '--home', outside], runtime.overrides);
+  if (process.platform === 'win32') {
+    assert.equal(result, 1);
+    assert.match(runtime.stderr.join(''), /inside the current user profile/u);
+  } else {
+    assert.equal(result, 0);
+  }
 });

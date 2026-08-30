@@ -14,7 +14,11 @@ import { ConversationProcessor } from '../../src/services/conversation-processor
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { SqliteStore } from '../../src/state/sqlite-store.ts';
 import type { NormalizedMessage } from '../../src/types.ts';
-import { startTestChild, type TestChild } from '../support/child-process.ts';
+import {
+  isForcedExit,
+  startTestChild,
+  type TestChild,
+} from '../support/child-process.ts';
 import {
   SimulatedToolAgent,
   type SimulatedAgentCompletion,
@@ -141,10 +145,7 @@ if (mode === '--seed') {
       args: ['--seed', databaseFile, scenario],
     });
     const seeded = await child.waitForMessage(isSeeded);
-    assert.deepEqual(await child.stop('SIGKILL'), {
-      code: null,
-      signal: 'SIGKILL',
-    });
+    assert.equal(isForcedExit(await child.stop('SIGKILL'), 'SIGKILL'), true);
     return seeded;
   }
 

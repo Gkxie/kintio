@@ -8,9 +8,18 @@ import type { TestContext } from 'vitest';
 
 const MAX_CAPTURED_OUTPUT = 64 * 1024;
 
-interface ChildExit {
+export interface ChildExit {
   code: number | null;
   signal: NodeJS.Signals | null;
+}
+
+export function isForcedExit(
+  exit: ChildExit,
+  signal: NodeJS.Signals,
+): boolean {
+  if (exit.signal === signal && exit.code === null) return true;
+  return process.platform === 'win32' && exit.signal === null &&
+    exit.code !== null && exit.code !== 0;
 }
 
 export interface StartTestChildOptions {

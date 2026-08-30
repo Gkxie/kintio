@@ -17,7 +17,7 @@ const key = Buffer.alloc(32, 23).toString('base64url');
 async function fixture(t: Parameters<typeof createTempSqlite>[0]) {
   const temp = await createTempSqlite(t, { prefix: 'ilink-login-' });
   let now = 1_800_000_000_000;
-  const store = new SqliteStore({ filePath: temp.filePath, clock: () => now });
+  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock: () => now }));
   const accounts = new IlinkSqliteStore({ store, clock: () => now });
   const secretBox = new IlinkSecretBox(key);
   const offers = new IlinkLoginStore({ store, secretBox, clock: () => now });

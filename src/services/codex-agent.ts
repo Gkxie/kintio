@@ -19,6 +19,7 @@ import {
   MAX_WECHAT_IMAGE_BYTES,
   detectImageFormat,
 } from '../lib/image-format.ts';
+import { isPathInside } from '../lib/path-identity.ts';
 import { withStagedImages } from './image-stager.ts';
 import {
   CodexAppServer,
@@ -350,7 +351,7 @@ async function removeTrustedGeneratedFile(
   if (typeof savedPath !== 'string' || !path.isAbsolute(savedPath)) return;
   const root = path.resolve(trustedRoot);
   const target = path.resolve(savedPath);
-  if (!target.startsWith(`${root}${path.sep}`)) return;
+  if (!isPathInside(root, target)) return;
   try {
     const [rootStat, targetStat] = await Promise.all([
       fs.lstat(root),
@@ -364,7 +365,7 @@ async function removeTrustedGeneratedFile(
       fs.realpath(root),
       fs.realpath(target),
     ]);
-    if (!realTarget.startsWith(`${realRoot}${path.sep}`)) return;
+    if (!isPathInside(realRoot, realTarget)) return;
     await fs.rm(realTarget, { force: true });
   } catch (error: unknown) {
     if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {

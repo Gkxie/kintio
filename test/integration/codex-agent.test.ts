@@ -140,7 +140,7 @@ function createAgent(
       model: 'gpt-project',
       reasoningEffort: 'low',
       workingDirectory: '/isolated-codex-workspace',
-      imageTempDirectory: config.imageTempDirectory || '/dev/shm',
+      imageTempDirectory: config.imageTempDirectory || os.tmpdir(),
       generatedImageDirectory: config.generatedImageDirectory || '',
     },
   });
@@ -351,7 +351,11 @@ test('generated cleanup rejects symlinked roots and escape components', async (t
 
   const escapedFile = path.join(outside, 'escaped.png');
   await fs.writeFile(escapedFile, png);
-  await fs.symlink(outside, path.join(trusted, 'escape'));
+  await fs.symlink(
+    outside,
+    path.join(trusted, 'escape'),
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
   const escapedBoundary = new FakeBoundary([
     {
       items: [{
@@ -375,7 +379,11 @@ test('generated cleanup rejects symlinked roots and escape components', async (t
   const linkedRoot = path.join(directory, 'linked-root');
   const linkedFile = path.join(outside, 'linked-root.png');
   await fs.writeFile(linkedFile, png);
-  await fs.symlink(outside, linkedRoot);
+  await fs.symlink(
+    outside,
+    linkedRoot,
+    process.platform === 'win32' ? 'junction' : 'dir',
+  );
   const linkedBoundary = new FakeBoundary([
     {
       items: [{

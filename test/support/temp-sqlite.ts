@@ -12,6 +12,7 @@ export interface TempSqliteOptions {
 export interface TempSqlite {
   directory: string;
   filePath: string;
+  trackSqlite<T extends { close(): void }>(resource: T): T;
   open(options?: DatabaseSyncOptions): DatabaseSync;
   cleanup(): Promise<void>;
 }
@@ -34,8 +35,14 @@ export async function createTempSqlite(
 ): Promise<TempSqlite> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
   const filePath = path.join(directory, filename);
-  const connections = new Set<DatabaseSync>();
+  const connections = new Set<{ close(): void }>();
   let cleaned = false;
+
+  function trackSqlite<T extends { close(): void }>(resource: T): T {
+    if (cleaned) throw new Error('Temporary SQLite workspace is already cleaned');
+    connections.add(resource);
+    return resource;
+  }
 
   function open(options?: DatabaseSyncOptions): DatabaseSync {
     if (cleaned) throw new Error('Temporary SQLite workspace is already cleaned');
@@ -43,8 +50,7 @@ export async function createTempSqlite(
       options === undefined
         ? new DatabaseSync(filePath)
         : new DatabaseSync(filePath, options);
-    connections.add(database);
-    return database;
+    return trackSqlite(database);
   }
 
   async function cleanup(): Promise<void> {
@@ -62,5 +68,5 @@ export async function createTempSqlite(
   }
 
   testContext.onTestFinished(() => cleanup());
-  return { directory, filePath, open, cleanup };
+  return { directory, filePath, trackSqlite, open, cleanup };
 }

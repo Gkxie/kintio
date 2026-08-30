@@ -76,9 +76,10 @@ codex login status
 ```
 
 `kintio setup` creates a private instance under `~/.kintio`, installs the bundled Agent
-skill, and writes a `0600` environment file with a generated MCP token. No adapter is
-enabled by default. Follow the [setup guide](https://github.com/Gkxie/kintio/blob/master/docs/setup.md) and edit
-`~/.kintio/.env` to configure one adapter:
+skill, and writes an environment file with a generated MCP token. POSIX systems use mode
+`0600`; Windows keeps the instance inside the current user's profile. No adapter is enabled
+by default. Follow the [setup guide](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)
+and edit `~/.kintio/.env` to configure one adapter:
 
 - For WeChat KF API, set its callback token, EncodingAESKey, CorpID, and secret. A temporary
   `WECOM_AUTH_TRIGGER` can authorize the first user without knowing their
@@ -94,11 +95,11 @@ kintio status
 kintio logs --lines 100
 ```
 
-Successful startup prints `Hono server is listening on port 8888`. Complete the callback
-or binding checks described in the setup guide before sending production traffic.
-Use `kintio run` when a foreground process is preferable to PM2. Existing source-based
-deployments can keep their current state after the one-time process-manager migration
-described in the setup guide.
+After startup, confirm that `kintio logs` contains `Hono server is listening on port 8888`.
+Complete the callback or binding checks described in the setup guide before sending traffic.
+Use `kintio run` when a foreground process is preferable to the native daemon.
+Existing source-based deployments can keep their current state after the one-time
+process-manager migration described in the setup guide.
 
 ## Security boundaries
 

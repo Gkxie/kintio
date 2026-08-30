@@ -29,7 +29,9 @@ test('O_EXCL lock rejects a second live process and releases by owner token', (t
     clock: () => 1000,
     isProcessAlive: alive,
   });
-  assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(filePath).mode & 0o777, 0o600);
+  }
   assert.throws(
     () =>
       acquireSingleInstanceLock({

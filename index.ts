@@ -1,5 +1,4 @@
-import { loadConfig } from './src/config.ts';
-import { writeReadyMarker } from './src/runtime/ready-marker.ts';
+import { FORCE_ABORT_TIMEOUT_MS, loadConfig } from './src/config.ts';
 import { KintioSupervisor } from './src/supervisor.ts';
 
 const config = loadConfig();
@@ -13,17 +12,19 @@ async function forceAbort(): Promise<void> {
   await Promise.race([
     supervisor.abortForExit().catch(() => undefined),
     new Promise<void>((resolve) => {
-      timeout = setTimeout(resolve, 5_000);
+      timeout = setTimeout(resolve, FORCE_ABORT_TIMEOUT_MS);
       timeout.unref?.();
     }),
   ]);
   clearTimeout(timeout);
 }
 
-async function shutdown(signal: NodeJS.Signals): Promise<void> {
+async function shutdown(
+  reason: NodeJS.Signals | 'parent shutdown' | 'parent disconnect',
+): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`Received ${signal}; shutting down`);
+  console.log(`Received ${reason}; shutting down`);
   let timeout: NodeJS.Timeout | undefined;
   const timedOut = new Promise<never>((_, reject) => {
     timeout = setTimeout(
@@ -47,18 +48,17 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
 
 process.once('SIGINT', () => shutdown('SIGINT'));
 process.once('SIGTERM', () => shutdown('SIGTERM'));
+process.on('message', (message) => {
+  if (message === 'shutdown') void shutdown('parent shutdown');
+});
+process.once('disconnect', () => shutdown('parent disconnect'));
 
 try {
   await supervisor.start();
   if (supervisor.state !== 'running' || shuttingDown) {
     throw new Error('Kintio supervisor stopped before readiness publication');
   }
-  const startToken = process.env.KINTIO_START_TOKEN;
-  if (startToken) {
-    const instanceRoot = process.env.KINTIO_HOME;
-    if (!instanceRoot) throw new Error('KINTIO_HOME is required for PM2 readiness');
-    writeReadyMarker(instanceRoot, startToken);
-  }
+  process.send?.({ type: 'ready', pid: process.pid });
   await fatal;
 } catch (error: unknown) {
   if (!shuttingDown) {

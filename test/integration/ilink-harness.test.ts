@@ -23,7 +23,7 @@ test('iLink inbound traverses the shared Harness and replies through its bound M
   const botId = 'harness-bot@im.bot';
   const peerId = 'harness-user@im.wechat';
   const accountKey = createIlinkAccountKey(botId);
-  const store = new SqliteStore({ filePath: temp.filePath, clock: () => now });
+  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock: () => now }));
   const ilinkStore = new IlinkSqliteStore({ store, clock: () => now });
   const box = new IlinkSecretBox(Buffer.alloc(32, 29).toString('base64url'));
   ilinkStore.registerAccount({
@@ -173,7 +173,7 @@ test('a newer iLink direction atomically absorbs older unprocessed input', async
   const botId = 'recovery-bot@im.bot';
   const peerId = 'recovery-user@im.wechat';
   const accountKey = createIlinkAccountKey(botId);
-  const store = new SqliteStore({ filePath: temp.filePath, clock: () => now });
+  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock: () => now }));
   const ilinkStore = new IlinkSqliteStore({ store, clock: () => now });
   const box = new IlinkSecretBox(Buffer.alloc(32, 18).toString('base64url'));
   ilinkStore.registerAccount({

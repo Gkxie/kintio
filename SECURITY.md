@@ -54,6 +54,9 @@ maintain every `0.x` line at the same time.
   or chat.
 - Never commit `.env`, `data/`, the Codex login state, or reverse-proxy private
   keys.
+- Keep the Kintio instance and config below directories that untrusted local
+  users cannot replace or modify. Custom Windows paths need an owner-only DACL;
+  custom POSIX paths need trusted parents or sticky shared parents.
 - Protect `/mcp`, `/mcp/ilink`, and `/mcp/memory` with a strong Bearer Token.
   Any non-loopback connection must use HTTPS.
 - Bind archived memory through the current short-lived session; never let the

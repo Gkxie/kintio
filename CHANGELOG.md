@@ -4,6 +4,10 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Added macOS, Linux, and Windows lifecycle support with an authenticated native
+  daemon, bounded worker restarts, rotated logs, portable path and temporary-file
+  handling, and a three-system CI matrix
+  ([#19](https://github.com/Gkxie/kintio/issues/19)).
 - Removed duplicate post-merge CI, coverage artifact round trips, redundant
   registry audits, and brittle repository-policy snapshots; retained the
   executable security boundaries and made Agent subprocesses inherit the host

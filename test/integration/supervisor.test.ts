@@ -178,7 +178,7 @@ test('HTTP bind failure releases core resources without starting message ingress
   const blocker = net.createServer();
   await new Promise<void>((resolve, reject) => {
     blocker.once('error', reject);
-    blocker.listen(0, '127.0.0.1', resolve);
+    blocker.listen(0, '0.0.0.0', resolve);
   });
   t.onTestFinished(() => new Promise<void>((resolve) => blocker.close(() => resolve())));
   const address = blocker.address();

@@ -56,8 +56,10 @@ test('staged image inputs use private files and always clean their directory', a
       const imagePath = imagePaths[0];
       assert.ok(imagePath);
       stagedPath = imagePath;
-      assert.equal((await fs.stat(path.dirname(imagePath))).mode & 0o777, 0o700);
-      assert.equal((await fs.stat(imagePath)).mode & 0o777, 0o600);
+      if (process.platform !== 'win32') {
+        assert.equal((await fs.stat(path.dirname(imagePath))).mode & 0o777, 0o700);
+        assert.equal((await fs.stat(imagePath)).mode & 0o777, 0o600);
+      }
       assert.deepEqual(await fs.readFile(imagePath), png);
       return 'done';
     },
@@ -94,7 +96,9 @@ test('staged image inputs use private files and always clean their directory', a
   await assert.rejects(fs.access(talkFerryOrphan), { code: 'ENOENT' });
   await assert.rejects(fs.access(originalOrphan), { code: 'ENOENT' });
   await fs.access(unrelated);
-  assert.equal((await fs.stat(root)).mode & 0o777, 0o755);
+  if (process.platform !== 'win32') {
+    assert.equal((await fs.stat(root)).mode & 0o777, 0o755);
+  }
   await fs.rm(root, { recursive: true, force: true });
 });
 

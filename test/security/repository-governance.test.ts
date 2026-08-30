@@ -4,7 +4,7 @@ import path from 'node:path';
 import { test } from 'vitest';
 
 async function read(file: string): Promise<string> {
-  return fs.readFile(file, 'utf8');
+  return (await fs.readFile(file, 'utf8')).replaceAll('\r\n', '\n');
 }
 
 async function filesBelow(directory: string, suffix = '.ts'): Promise<string[]> {
@@ -95,7 +95,6 @@ test('package, release version, and public entry points stay aligned', async () 
     'bin/kintio.js',
     'assets/ilink-login-card.png',
     '.env.example',
-    'ecosystem.config.cjs',
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
   ]) {
     assert.equal(packageJson.files?.includes(file), true, `missing package file ${file}`);
@@ -161,6 +160,13 @@ test('repository workflows preserve executable security boundaries', async () =>
     'pnpm run build',
     'pnpm test',
   ]) assert.ok(ci.includes(command), command);
+  for (const operatingSystem of [
+    'ubuntu-latest',
+    'macos-latest',
+    'windows-latest',
+  ]) assert.ok(ci.includes(operatingSystem), operatingSystem);
+  assert.match(ci, /name: Unit, integration, recovery, security/u);
+  assert.match(ci, /needs: platform-tests/u);
   assert.doesNotMatch(ci, /pnpm audit|upload-artifact|download-artifact/u);
 
   const secretScan = workflows.get('.github/workflows/secret-scan.yml') || '';

@@ -206,7 +206,9 @@ async function createHarness(
   const temporary = await createTempSqlite(t, {
     prefix: 'ilink-priority-runtime-',
   });
-  const store = new SqliteStore({ filePath: temporary.filePath, clock: () => NOW });
+  const store = temporary.trackSqlite(
+    new SqliteStore({ filePath: temporary.filePath, clock: () => NOW }),
+  );
   const ilinkStore = new IlinkSqliteStore({ store, clock: () => NOW });
   const secretBox = new IlinkSecretBox(Buffer.alloc(32, 37).toString('base64url'));
   let wecomSendSequence = 0;

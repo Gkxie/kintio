@@ -15,7 +15,6 @@
     "assets/ilink-login-card.png",
     "codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md",
     ".env.example",
-    "ecosystem.config.cjs",
     "README.md",
     "README.zh-CN.md",
     "CHANGELOG.md",
@@ -50,13 +49,14 @@
   "dependencies": {
     "@hono/node-server": "^2.0.12",
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "cross-spawn": "7.0.6",
     "hono": "^4.13.5",
-    "pm2": "7.0.4",
     "pngjs": "5.0.0",
     "qrcode": "1.5.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/cross-spawn": "6.0.6",
     "@types/node": "24.13.3",
     "@types/pngjs": "^6.0.5",
     "@types/qrcode": "1.5.6",

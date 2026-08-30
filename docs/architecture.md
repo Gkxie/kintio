@@ -19,14 +19,21 @@ instance root and never from global `node_modules` or an arbitrary caller
 directory.
 
 [cli.ts](../cli.ts) is the executable entry and [src/cli.ts](../src/cli.ts)
-implements setup and lifecycle commands. Background execution delegates one
-process to the pinned PM2 dependency; [index.ts](../index.ts) is only the thin
-process bootstrap for [KintioSupervisor](../src/supervisor.ts). The CLI does not
-duplicate the SQLite single-instance lock or compile TypeScript during start.
-Background start succeeds only after the process atomically records a fresh
-nonce-and-PID readiness marker following Hono listen and runtime initialization;
-PM2 status alone is not treated as readiness evidence. Downtime backlog is a
-low-priority background responsibility and is not part of the readiness gate.
+implements setup and lifecycle commands. Background execution launches a small
+native daemon, which owns logs, local control, and bounded worker restarts. The
+worker entry [index.ts](../index.ts) remains the thin process bootstrap for
+[KintioSupervisor](../src/supervisor.ts). The CLI does not duplicate the SQLite
+single-instance lock or compile TypeScript during start. Background start
+succeeds only after the worker publishes readiness following Hono listen and
+runtime initialization. Downtime backlog is a low-priority responsibility and
+is not part of the readiness gate.
+
+```text
+Kintio CLI
+└── Native daemon
+    └── Worker
+        └── KintioSupervisor
+```
 
 The Supervisor—not Hono—is the process composition root:
 
@@ -173,7 +180,7 @@ The exact recovery, race, and idempotency transitions are specified by these tes
 | Change agent context or steering | `src/services/codex-agent.ts`, `conversation-processor.ts` | `test/integration/codex-*`, `conversation-*` |
 | Change provider send capabilities | `src/mcp/`, `src/domain/send-contract.ts` | `test/integration/*-mcp.test.ts` |
 | Change authorization, queues, or recovery | `src/state/sqlite-store.ts`, `conversation-processor.ts` | `test/recovery/`, `sqlite-*` |
-| Change installation or process lifecycle | `cli.ts`, `src/cli.ts`, `src/supervisor.ts`, `src/config.ts`, `ecosystem.config.cjs` | `test/unit/cli.test.ts`, `test/integration/supervisor.test.ts`, `test/recovery/cli-daemon.test.ts` |
+| Change installation or process lifecycle | `cli.ts`, `daemon.ts`, `src/cli.ts`, `src/runtime/native-daemon.ts`, `src/supervisor.ts` | `test/unit/cli.test.ts`, `test/unit/daemon-protocol.test.ts`, `test/recovery/cli-daemon.test.ts` |
 | Change HTTP callbacks or runtime shutdown | `src/app.ts`, `src/runtime.ts`, `index.ts` | `test/integration/callback.test.ts`, `runtime-*` |
 
 To add a messaging adapter, first implement its listener, identity model, and provider reply window. Then reuse the common Inbox, agent runtime, and MCP receipt contract. Do not leak its payloads or error codes into another adapter, and do not build a generalized framework for hypothetical integrations.
