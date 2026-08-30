@@ -37,11 +37,12 @@ Never store a broad GitHub owner token on the production Kintio host. Prefer the
 per-run `GITHUB_TOKEN` inside Actions, and audit active sessions and tokens after
 any suspected account compromise.
 
-Architecture, protocol, and incompatible changes must first reach a verifiable
-proposal in a public issue or discussion. Prefer evidence and tests when
-building consensus. If consensus is not possible, the responsible Maintainer
-documents the trade-off and decides. Security incidents remain private until a
-fix is ready.
+Changes that require consensus, span multiple PRs, or leave important scope
+questions open must first reach a verifiable proposal in a public issue or
+Discussion. A bounded change whose problem and solution are already reviewable
+may start as a direct PR. Prefer evidence and tests when building consensus. If
+consensus is not possible, the responsible Maintainer documents the trade-off
+and decides. Security incidents remain private until a fix is ready.
 
 ## Issue triage
 
@@ -76,6 +77,18 @@ Milestone.
 
 ## Merging pull requests
 
+Kintio accepts two complete traceability paths:
+
+```text
+Issue-driven: Issue → PR → commit → release
+Direct:       PR → commit → release
+```
+
+Use an issue for coordination, claims, roadmap tracking, or work spanning more
+than one PR. Use a direct PR when one review can contain the full problem,
+solution, and verification record. Never create an empty or retrospective issue
+only to make a direct PR look issue-driven.
+
 - Keep fork workflow approval set to **all external contributors**, including
   contributors whose earlier work was merged. Inspect the diff before approving
   any workflow run. Verify the issue-confirmation link and the completed
@@ -84,11 +97,12 @@ Milestone.
   without write access, and manually close excess draft PRs from the same user.
   The cap is queue hygiene, not a security boundary. Add only known,
   accountable contributors to the bypass list.
-- External feature, behavior, protocol, data, and architecture changes require
-  an issue claim and explicit maintainer scope confirmation before
-  implementation. `help wanted` and `good first issue` work also requires
-  confirmation. Maintainer-authored work, small obvious documentation or test
-  fixes, and work explicitly requested in an existing review are exempt.
+- For issue-driven work, verify the issue claim and explicit maintainer scope
+  confirmation before implementation. `help wanted` and `good first issue`
+  work always requires confirmation. For a direct PR, verify that its `Why`,
+  result, verification, and impact sections contain enough context to replace
+  a separate issue. Apply the same standard to maintainer-authored and local
+  Agent-assisted changes.
 - Enforce the policy through observable accountability, not AI detection: a
   complete disclosure, a repository-specific technical explanation, and
   substantive review responses. If accountability is unclear, ask one concrete
