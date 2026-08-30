@@ -127,13 +127,6 @@ export function createRuntime({
     };
   }
 
-  if (
-    config.wecom.api.enabled && config.wecom.allowedUserIds.includes('*') &&
-    typeof process.getuid === 'function' &&
-    process.getuid() === 0
-  ) {
-    throw new Error('Refusing WECOM_ALLOWED_USER_IDS=* while running as root');
-  }
   const enabledChannels: readonly ChatChannel[] = [
     ...(config.wecom.api.enabled ? ['wechat_kf' as const] : []),
     ...(config.ilink.enabled ? ['weixin_ilink' as const] : []),

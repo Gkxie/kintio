@@ -57,8 +57,9 @@ maintain every `0.x` line at the same time.
   Any non-loopback connection must use HTTPS.
 - Bind archived memory through the current short-lived session; never let the
   model select an arbitrary Thread ID.
-- Prefer a dedicated operating-system user in production. The root user cannot
-  enable wildcard user authorization.
+- Prefer a dedicated operating-system user in production. WeChat authorization
+  supports only explicit IDs or the configured passphrase flow; wildcard
+  authorization is rejected for every runtime user.
 - An `accepted` provider response means only that the platform accepted the
   request; it does not prove that a client displayed or received the message.
 

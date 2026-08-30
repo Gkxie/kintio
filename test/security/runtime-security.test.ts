@@ -3,8 +3,6 @@ import { EventEmitter } from 'node:events';
 import { PassThrough, Writable } from 'node:stream';
 import { test } from 'vitest';
 
-import { createConfig } from '../../src/config.ts';
-import { createRuntime } from '../../src/runtime.ts';
 import { createCodexAppServer } from '../../src/services/codex-agent.ts';
 import type { SpawnProcess } from '../../src/services/codex-app-server.ts';
 
@@ -155,35 +153,4 @@ test('Codex Adapter passes only the HTTP MCP bearer and never exposes WeChat sec
     assert.equal(serializedArguments.includes(canary), false, canary);
   }
 
-});
-
-test('root startup rejects a wildcard customer allowlist before creating runtime state', (t) => {
-  const descriptor = Object.getOwnPropertyDescriptor(process, 'getuid');
-  Object.defineProperty(process, 'getuid', {
-    configurable: true,
-    enumerable: true,
-    writable: true,
-    value: () => 0,
-  });
-  t.onTestFinished(() => {
-    if (descriptor) Object.defineProperty(process, 'getuid', descriptor);
-    else Reflect.deleteProperty(process, 'getuid');
-  });
-
-  const config = createConfig({
-    WECOM_CALLBACK_TOKEN: 'CallbackToken123',
-    WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
-    WECOM_CORP_ID: 'ww-root-test',
-    WECOM_KF_SECRET: 'root-test-secret',
-    KINTIO_MCP_BEARER_TOKEN: 'r'.repeat(32),
-    WECOM_ALLOWED_USER_IDS: '*',
-  });
-  assert.throws(
-    () =>
-      createRuntime({
-        config,
-        logger: { info() {}, warn() {}, error() {} },
-      }),
-    /Refusing WECOM_ALLOWED_USER_IDS=\* while running as root/u,
-  );
 });

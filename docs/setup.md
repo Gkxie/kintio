@@ -92,7 +92,9 @@ If you already know the `external_userid` values through the WeCom API, configur
 WECOM_ALLOWED_USER_IDS=wm_user_a,wm_user_b
 ```
 
-Unauthorized users receive no reply, do not wake Codex, and cannot trigger image downloads. Do not set `WECOM_ALLOWED_USER_IDS=*` while running as root; Kintio refuses to start with that combination.
+Unauthorized users receive no reply, do not wake Codex, and cannot trigger
+image downloads. Wildcards are unsupported: `WECOM_ALLOWED_USER_IDS` accepts
+only explicit `external_userid` values.
 
 ### 3.3 Configure the callback
 

@@ -211,12 +211,15 @@ function parseOptionalEnum<T extends string>(
 }
 
 function parseAllowedUserIds(value: string | undefined): readonly string[] {
-  return Object.freeze(
+  const parsed =
     String(value || '')
       .split(',')
       .map((item) => item.trim())
-      .filter(Boolean),
-  );
+      .filter(Boolean);
+  if (parsed.includes('*')) {
+    throw new Error('WECOM_ALLOWED_USER_IDS does not support wildcard entries');
+  }
+  return Object.freeze(parsed);
 }
 
 function parseBoundedText(

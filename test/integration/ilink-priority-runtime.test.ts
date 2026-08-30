@@ -253,7 +253,12 @@ async function createHarness(
     agent,
     mediaGateway: { async resolveForCodex() { return []; } },
     channel,
-    allowedUserIds: ['*'],
+    allowedUserIds: [
+      ...Array.from({ length: 9 }, (_, index) => `wm-occupied-${index}`),
+      'wm-working-one',
+      'wm-working-two',
+      'wm-downtime-backlog',
+    ],
     maxConcurrentConversations: 10,
     logger: { info() {}, warn() {}, error() {} },
   });

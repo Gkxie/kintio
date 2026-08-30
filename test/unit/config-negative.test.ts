@@ -34,6 +34,15 @@ test('boolean parsing accepts documented spellings and rejects ambiguity', () =>
   }
 });
 
+test('WeChat authorization rejects wildcard allowlist entries', () => {
+  for (const value of ['*', 'wm-one,*', '*,wm-two']) {
+    assert.throws(
+      () => createConfig({ ...base, WECOM_ALLOWED_USER_IDS: value }),
+      /WECOM_ALLOWED_USER_IDS does not support wildcard entries/u,
+    );
+  }
+});
+
 test('positive integer settings reject zero fractions and non-numbers', () => {
   for (const [name, value] of [
     ['WECOM_API_TIMEOUT_MS', '0'],

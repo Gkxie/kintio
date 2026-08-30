@@ -565,7 +565,6 @@ export class ConversationProcessor {
     }
     if (
       channel === 'wechat_kf' &&
-      !this.#allowedUsers.has('*') &&
       !this.#allowedUsers.has(externalUserId) &&
       this.#store.getAuthorization(externalUserId)?.authorized !== true
     ) {
