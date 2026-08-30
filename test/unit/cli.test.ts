@@ -70,11 +70,16 @@ test('setup creates one private config and refreshes the managed Agent skill', a
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
   );
   const firstConfig = await fs.readFile(configFile, 'utf8');
+  const configTemplate = await fs.readFile('.env.example', 'utf8');
   const bundledSkill = await fs.readFile(
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
     'utf8',
   );
-  assert.match(firstConfig, /^KINTIO_MCP_BEARER_TOKEN=[A-Za-z0-9_-]{43}$/mu);
+  assert.equal(firstConfig, configTemplate);
+  assert.doesNotMatch(
+    firstConfig,
+    /^(?:KINTIO|TALKFERRY|HARNESS|WECOM)_MCP_(?:URL|BEARER_TOKEN)=/mu,
+  );
   assert.equal(await fs.readFile(skillFile, 'utf8'), bundledSkill);
   await fs.writeFile(skillFile, 'stale local skill\n');
   assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);

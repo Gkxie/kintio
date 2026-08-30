@@ -11,6 +11,7 @@ import type {
   HistoryInspection,
 } from '../agent/runtime.ts';
 import type { CodexConfig } from '../config.ts';
+import type { LocalMcpEndpoints } from '../mcp/local-host.ts';
 import type { ChatChannel } from '../types.ts';
 import {
   SEND_TOOL_NAMES,
@@ -85,22 +86,10 @@ export interface GeneratedCandidate extends AgentImageArtifact {
 
 type AgentConfig = Pick<
   CodexConfig,
-  | 'model'
-  | 'reasoningEffort'
   | 'workingDirectory'
   | 'imageTempDirectory'
   | 'generatedImageDirectory'
 >;
-type ServerConfig = Pick<
-  CodexConfig,
-  | 'pathOverride'
-  | 'webSearchMode'
-  | 'workingDirectory'
->;
-interface ModelProviderOptions {
-  readonly baseUrl: string;
-  readonly apiKeyEnv: string;
-}
 interface AgentOptions {
   readonly codex: CodexBoundary;
   readonly config: AgentConfig;
@@ -147,119 +136,48 @@ function asRecord(value: unknown): JsonRecord | undefined {
     : undefined;
 }
 
-function modelProvider(
-  provider: ModelProviderOptions | undefined,
-): {
-  readonly environment: NodeJS.ProcessEnv;
-  readonly overrides: readonly string[];
-} {
-  if (!provider) return { environment: {}, overrides: [] };
-  const apiKeyEnv = provider.apiKeyEnv.trim();
-  if (!/^KINTIO_[A-Z0-9_]*_API_KEY$/u.test(apiKeyEnv)) {
-    throw new Error('Model provider API key environment name is invalid');
-  }
-  const apiKey = process.env[apiKeyEnv]?.trim();
-  if (!apiKey) {
-    throw new Error(`Model provider API key is missing from ${apiKeyEnv}`);
-  }
-  let parsed: URL;
-  try {
-    parsed = new URL(provider.baseUrl.trim());
-  } catch {
-    throw new Error('Model provider base URL must be a valid HTTPS URL');
-  }
-  if (
-    parsed.protocol !== 'https:' ||
-    parsed.username ||
-    parsed.password ||
-    parsed.search ||
-    parsed.hash
-  ) {
-    throw new Error(
-      'Model provider base URL must use HTTPS without credentials, query, or fragment',
-    );
-  }
-  const baseUrl = parsed.href.replace(/\/+$/u, '');
-  return {
-    environment: { [apiKeyEnv]: apiKey },
-    overrides: [
-      'model_provider="kintio_proxy"',
-      'model_providers.kintio_proxy={}',
-      'model_providers.kintio_proxy.name="Kintio Proxy"',
-      `model_providers.kintio_proxy.base_url=${JSON.stringify(baseUrl)}`,
-      `model_providers.kintio_proxy.env_key=${JSON.stringify(apiKeyEnv)}`,
-      'model_providers.kintio_proxy.wire_api="responses"',
-      'model_providers.kintio_proxy.requires_openai_auth=false',
-      'model_providers.kintio_proxy.supports_websockets=false',
-      'model_providers.kintio_proxy.request_max_retries=1',
-      'model_providers.kintio_proxy.stream_max_retries=1',
-      'model_providers.kintio_proxy.stream_idle_timeout_ms=60000',
-    ],
-  };
-}
-
 export function createCodexAppServer(
-  config: ServerConfig,
   options: {
     readonly logger?: { warn?(message: string): void };
     readonly spawnProcess?: SpawnProcess;
-    readonly mcpUrl?: string;
-    readonly memoryMcpUrl?: string;
-    readonly ilinkMcpUrl?: string;
-    readonly mcpBearerToken: string;
+    readonly mcpEndpoints: LocalMcpEndpoints;
     readonly mcpToolTimeoutSec?: number;
     readonly ilinkMcpToolTimeoutSec?: number;
-    readonly modelProvider?: ModelProviderOptions;
   },
 ): CodexAppServer {
-  const memoryMcpUrl = options.memoryMcpUrl || (options.mcpUrl
-    ? `${options.mcpUrl.replace(/\/+$/u, '')}/memory`
-    : '');
-  if (!memoryMcpUrl) throw new Error('conversation memory MCP URL is required');
-  const provider = modelProvider(options.modelProvider);
   const overrides = [
-    ...provider.overrides,
     'mcp_servers={}',
-    ...(options.mcpUrl ? [
-      `mcp_servers.wechat_kf.url=${JSON.stringify(options.mcpUrl)}`,
-      'mcp_servers.wechat_kf.bearer_token_env_var="KINTIO_MCP_BEARER_TOKEN"',
+    ...(options.mcpEndpoints.wechatKf ? [
+      `mcp_servers.wechat_kf.url=${JSON.stringify(options.mcpEndpoints.wechatKf)}`,
       `mcp_servers.wechat_kf.enabled_tools=${JSON.stringify(CHANNEL_AGENT_PROFILES.wechat_kf.tools)}`,
       'mcp_servers.wechat_kf.required=true',
-      'mcp_servers.wechat_kf.startup_timeout_sec=10',
       `mcp_servers.wechat_kf.tool_timeout_sec=${Math.max(30, Number(options.mcpToolTimeoutSec) || 30)}`,
       'mcp_servers.wechat_kf.default_tools_approval_mode="approve"',
     ] : []),
-    ...(options.ilinkMcpUrl ? [
-      `mcp_servers.weixin_ilink.url=${JSON.stringify(options.ilinkMcpUrl)}`,
-      'mcp_servers.weixin_ilink.bearer_token_env_var="KINTIO_MCP_BEARER_TOKEN"',
+    ...(options.mcpEndpoints.ilink ? [
+      `mcp_servers.weixin_ilink.url=${JSON.stringify(options.mcpEndpoints.ilink)}`,
       `mcp_servers.weixin_ilink.enabled_tools=${JSON.stringify(CHANNEL_AGENT_PROFILES.weixin_ilink.tools)}`,
       'mcp_servers.weixin_ilink.required=true',
-      'mcp_servers.weixin_ilink.startup_timeout_sec=10',
       `mcp_servers.weixin_ilink.tool_timeout_sec=${Math.max(30, Number(options.ilinkMcpToolTimeoutSec) || 30)}`,
       'mcp_servers.weixin_ilink.default_tools_approval_mode="approve"',
     ] : []),
-    `mcp_servers.conversation_memory.url=${JSON.stringify(memoryMcpUrl)}`,
-    'mcp_servers.conversation_memory.bearer_token_env_var="KINTIO_MCP_BEARER_TOKEN"',
+    `mcp_servers.conversation_memory.url=${JSON.stringify(options.mcpEndpoints.memory)}`,
     'mcp_servers.conversation_memory.enabled_tools=["read_archived_thread"]',
     'mcp_servers.conversation_memory.required=true',
-    'mcp_servers.conversation_memory.startup_timeout_sec=10',
     'mcp_servers.conversation_memory.tool_timeout_sec=30',
     'mcp_servers.conversation_memory.default_tools_approval_mode="approve"',
     'agents.enabled=false',
     'allow_login_shell=false',
-    'features={apps=false, browser_use=false, browser_use_external=false, browser_use_full_cdp_access=false, code_mode=false, code_mode_host=true, computer_use=false, hooks=false, memories=false, multi_agent=false, plugins=false, remote_plugin=false, shell_tool=false, skill_mcp_dependency_install=false, unified_exec=false, workspace_dependencies=false}',
+    ...[
+      'apps', 'hooks', 'memories', 'remote_plugin', 'shell_tool',
+      'skill_mcp_dependency_install', 'unified_exec',
+    ].map((feature) => `features.${feature}=false`),
+    'features.code_mode.enabled=false',
     'shell_environment_policy={inherit="none"}',
     'sandbox_workspace_write.network_access=false',
-    'tools={view_image=false, web_search=true}',
-    `web_search=${JSON.stringify(config.webSearchMode || 'disabled')}`,
+    'tools.view_image=false',
   ];
   return new CodexAppServer({
-    ...(config.pathOverride ? { codexPathOverride: config.pathOverride } : {}),
-    env: {
-      ...process.env,
-      ...provider.environment,
-      KINTIO_MCP_BEARER_TOKEN: options.mcpBearerToken,
-    },
     configOverrides: overrides,
     ...(options.spawnProcess ? { spawnProcess: options.spawnProcess } : {}),
     ...(options.logger ? { logger: options.logger } : {}),
@@ -475,10 +393,6 @@ export class CodexAgent {
       workingDirectory: this.#config.workingDirectory,
       approvalPolicy: 'never',
       developerInstructions: CHANNEL_INSTRUCTIONS,
-      ...(this.#config.model ? { model: this.#config.model } : {}),
-      ...(this.#config.reasoningEffort
-        ? { modelReasoningEffort: this.#config.reasoningEffort }
-        : {}),
     };
     const thread = this.#prepared.get(key) || (input.threadId && !startFresh
       ? this.#codex.resumeThread(input.threadId, options)

@@ -43,35 +43,25 @@ The default directory under the current user profile is the recommended choice.
 
 ## 2. Configure shared settings
 
-`kintio setup` generates the MCP bearer token. To rotate it later, generate a
-replacement with:
-
-```bash
-node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
-```
-
 Configure the shared settings in `~/.kintio/.env`:
 
 ```dotenv
 PORT=8888
-KINTIO_MCP_URL=http://127.0.0.1:8888/mcp
-KINTIO_MCP_BEARER_TOKEN=keep_the_value_generated_by_setup
 CODEX_ENABLED=true
-CODEX_WEB_SEARCH_MODE=live
 ```
 
-When the agent and Kintio run on the same machine, keep `KINTIO_MCP_URL` on the loopback interface. Use a public HTTPS URL only when MCP is deployed on another machine.
+Kintio creates its MCP listener in process on an ephemeral IPv4 loopback port;
+it is never served by the public Hono listener and requires no configured URL or
+Bearer Token. Remove obsolete `KINTIO_MCP_URL`, `KINTIO_MCP_BEARER_TOKEN`, and
+the equivalent `TALKFERRY_`, `HARNESS_`, or `WECOM_` URL/Bearer aliases from
+upgraded deployments.
 
-Existing deployments may keep `TALKFERRY_MCP_URL`,
-`TALKFERRY_MCP_BEARER_TOKEN`, and `TALKFERRY_DB_FILE` during a staged upgrade.
-New configuration should use the `KINTIO_*` names.
-
-The model and reasoning effort inherit the local Codex configuration by default. Set service-specific values only when needed:
-
-```dotenv
-# CODEX_MODEL=gpt-5.6-luna
-# CODEX_REASONING_EFFORT=none
-```
+Model, provider, reasoning effort, public search, login, and global Codex
+settings come entirely from the host Codex CLI. Configure them through the
+[official Codex configuration](https://developers.openai.com/codex/config-reference);
+Kintio does not mirror them in `.env` or modify `$CODEX_HOME/config.toml`.
+Existing deployments may keep `TALKFERRY_DB_FILE` during a staged database-name
+migration; new configuration should use `KINTIO_DB_FILE`.
 
 ## 3. Configure the WeChat KF adapter
 

@@ -6,14 +6,10 @@ import { describe, it, test } from 'vitest';
 import type { TestContext } from 'vitest';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 
 import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
-import {
-  createWechatKfMcpServer,
-  handleWechatKfMcpRequest,
-} from '../../src/mcp/wechat-kf-server.ts';
+import { createWechatKfMcpServer } from '../../src/mcp/wechat-kf-server.ts';
 import {
   WechatKfToolExecutor,
   type WechatToolReceipt,
@@ -311,55 +307,6 @@ test('WeChat MCP exposes delivery tools without participant or credential fields
     assert.equal(serialized.includes(forbidden), false, forbidden);
   }
   assert.match(serialized, /session/u);
-});
-
-test('Streamable HTTP MCP requires the configured bearer token', async (t) => {
-  const created = await harness(t);
-  const request = new Request('https://robot.example/mcp', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
-  });
-  const missing = await handleWechatKfMcpRequest({
-    request,
-    executor: created.executor,
-    bearerToken: 'correct-token',
-  });
-  assert.equal(missing.status, 401);
-  assert.equal(missing.headers.get('www-authenticate'), 'Bearer');
-});
-
-test('standard HTTP MCP Client executes through the Hono handler', async (t) => {
-  const created = await harness(t);
-  const bearerToken = 'http-mcp-test-bearer-token';
-  const transport = new StreamableHTTPClientTransport(
-    new URL('https://robot.example/mcp'),
-    {
-      requestInit: {
-        headers: { Authorization: `Bearer ${bearerToken}` },
-      },
-      fetch: async (input, init) => handleWechatKfMcpRequest({
-        request: new Request(input, init),
-        executor: created.executor,
-        bearerToken,
-      }),
-    },
-  );
-  const client = new Client({ name: 'wechat-http-mcp-test', version: '1.0.0' });
-  await client.connect(
-    transport as unknown as Parameters<Client['connect']>[0],
-  );
-  t.onTestFinished(() => client.close());
-  const result = await client.callTool({
-    name: 'send_text',
-    arguments: { session: created.session.token, content: 'HTTP MCP' },
-  });
-  assert.equal(result.isError, undefined);
-  assert.equal(
-    (result.structuredContent as { status?: unknown } | undefined)?.status,
-    'accepted',
-  );
-  assert.equal(created.sends.length, 1);
 });
 
 test('a standard MCP Client executes send_text and receives accepted facts', async (t) => {

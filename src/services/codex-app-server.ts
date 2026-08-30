@@ -11,6 +11,17 @@ const THREAD_SOURCE_KINDS = [
   'cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
   'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown',
 ] as const;
+const CODEX_ERROR_CATEGORIES = new Set([
+  'contextWindowExceeded', 'sessionBudgetExceeded', 'usageLimitExceeded',
+  'rateLimitExceeded', 'serverOverloaded', 'cyberPolicy', 'misalignmentPolicyViolation',
+  'internalServerError', 'unauthorized', 'badRequest', 'threadRollbackFailed',
+  'sandboxError', 'other',
+]);
+const CODEX_OBJECT_ERROR_CATEGORIES = new Set([
+  'httpConnectionFailed', 'responseStreamConnectionFailed',
+  'responseStreamDisconnected', 'responseTooManyFailedAttempts',
+  'activeTurnNotSteerable',
+]);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -42,8 +53,6 @@ export interface CodexThreadOptions {
   readonly workingDirectory: string;
   readonly approvalPolicy: 'never';
   readonly developerInstructions?: string;
-  readonly model?: string;
-  readonly modelReasoningEffort?: string;
 }
 
 export interface CodexThread {
@@ -89,14 +98,11 @@ export type SpawnProcess = (
   command: string,
   argumentsList: readonly string[],
   options: {
-    readonly env: NodeJS.ProcessEnv;
     readonly stdio: readonly ['pipe', 'pipe', 'pipe'];
   },
 ) => ProcessLike;
 
 export interface CodexAppServerOptions {
-  readonly codexPathOverride?: string;
-  readonly env?: NodeJS.ProcessEnv;
   readonly configOverrides?: readonly string[];
   readonly requestTimeoutMs?: number;
   readonly spawnProcess?: SpawnProcess;
@@ -118,6 +124,7 @@ interface TurnState {
   readonly items: CodexItem[];
   readonly itemStarts: Map<string, number>;
   readonly waiter: Deferred<CodexTurnResult>;
+  failure?: string;
 }
 
 type ResolvedOptions = CodexAppServerOptions & {
@@ -140,6 +147,23 @@ function asRecord(value: unknown): JsonRecord | undefined {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
     ? (value as JsonRecord)
     : undefined;
+}
+
+function codexFailureLabel(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === 'string') {
+    return CODEX_ERROR_CATEGORIES.has(value) ? value : 'other';
+  }
+  const record = asRecord(value);
+  const keys = record ? Object.keys(record) : [];
+  const category = keys.length === 1 ? keys[0] || '' : '';
+  if (!CODEX_OBJECT_ERROR_CATEGORIES.has(category)) return 'other';
+  const detail = asRecord(record?.[category]);
+  const status = detail?.httpStatusCode;
+  return category + (typeof status === 'number' && Number.isInteger(status) &&
+    status >= 100 && status <= 599
+    ? ` (HTTP ${status})`
+    : '');
 }
 
 function normalizeInput(input: CodexInput): JsonRecord[] {
@@ -232,13 +256,9 @@ export class CodexAppServer implements CodexBoundary {
   async #initialize(): Promise<void> {
     const configArguments = (this.#options.configOverrides || [])
       .flatMap((value) => ['--config', value]);
-    const command = this.#options.codexPathOverride || 'codex';
+    const command = 'codex';
     const argumentsList = ['app-server', '--stdio', ...configArguments];
-    const childEnvironment: NodeJS.ProcessEnv = {
-      ...(this.#options.env || process.env),
-    };
     const child = this.#options.spawnProcess(command, argumentsList, {
-      env: childEnvironment,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     this.#process = child;
@@ -308,8 +328,8 @@ export class CodexAppServer implements CodexBoundary {
     let parsed: unknown;
     try {
       parsed = JSON.parse(line);
-    } catch (error) {
-      this.#fail(new Error(`Invalid JSON from Codex app-server: ${error instanceof Error ? error.message : String(error)}`));
+    } catch {
+      this.#fail(new Error('Invalid JSON from Codex app-server'));
       return;
     }
     const message = asRecord(parsed);
@@ -326,8 +346,10 @@ export class CodexAppServer implements CodexBoundary {
       if (rpcError) {
         const error = new Error(
           `Codex app-server request failed: ${pending.method}`,
-        ) as Error & { code?: unknown };
-        error.code = rpcError.code;
+        ) as Error & { code?: number };
+        if (typeof rpcError.code === 'number' && Number.isSafeInteger(rpcError.code)) {
+          error.code = rpcError.code;
+        }
         pending.reject(error);
       } else {
         pending.resolve(message.result);
@@ -392,15 +414,29 @@ export class CodexAppServer implements CodexBoundary {
       if (turn.status === 'completed') {
         state.waiter.resolve({ items: state.items });
       } else {
+        const status = turn.status === 'failed' || turn.status === 'interrupted'
+          ? turn.status
+          : 'unknown';
+        const failure = status === 'failed'
+          ? codexFailureLabel(asRecord(turn.error)?.codexErrorInfo) ?? state.failure
+          : undefined;
         state.waiter.reject(new Error(
-          `Codex turn ended with status ${String(turn.status || 'unknown')}`,
+          `Codex turn ended with status ${status}` +
+          `${failure ? `: ${failure}` : ''}`,
         ));
       }
       return;
     }
     if (message.method === 'error') {
+      const error = asRecord(params?.error);
+      const failure = codexFailureLabel(error?.codexErrorInfo);
+      if (typeof params?.turnId === 'string' && failure !== undefined) {
+        this.#turnState(params.turnId).failure = failure;
+      }
       this.#options.logger.warn?.(
-        '[codex] app-server emitted an error notification; content suppressed',
+        failure !== undefined
+          ? `[codex] app-server error category=${failure}; content suppressed`
+          : '[codex] app-server emitted an error notification; content suppressed',
       );
     }
   }
@@ -468,7 +504,6 @@ class CodexAppServerThread implements CodexThread {
       cwd: this.#options.workingDirectory,
       approvalPolicy: this.#options.approvalPolicy,
       sandbox: 'read-only',
-      ...(this.#options.model ? { model: this.#options.model } : {}),
       ...(this.#options.developerInstructions
         ? { developerInstructions: this.#options.developerInstructions }
         : {}),
@@ -508,7 +543,6 @@ class CodexAppServerThread implements CodexThread {
       threadId: this.id,
       input: normalizeInput(input),
       ...this.#params(),
-      ...(this.#options.modelReasoningEffort ? { effort: this.#options.modelReasoningEffort } : {}),
       ...(clientUserMessageId ? { clientUserMessageId } : {}),
     });
     const turnId = result.turn.id;

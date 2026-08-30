@@ -111,9 +111,10 @@ test('built global CLI owns one portable native daemon lifecycle', async (t) => 
   ]);
   const environment: NodeJS.ProcessEnv = { ...process.env };
   const cli = path.join(packageRoot, 'dist/cli.js');
+  let launcher = cli;
   t.onTestFinished(async () => {
     if (await fs.access(cli).then(() => true, () => false)) {
-      await command(process.execPath, [cli, 'stop', '--home', instanceRoot], {
+      await command(launcher, ['stop', '--home', instanceRoot], {
         cwd: packageRoot,
         env: environment,
       }).catch(() => undefined);
@@ -148,19 +149,29 @@ test('built global CLI owns one portable native daemon lifecycle', async (t) => 
     '.env.example',
   ]) assert.equal(packedFiles.includes(required), true, required);
 
-  const launcher = await command(
-    path.join(packageRoot, 'bin/kintio.js'),
-    ['--version'],
+  const prefix = path.join(root, 'global');
+  const installed = await command(
+    'npm',
+    [
+      'install', '--global', '--prefix', prefix,
+      packageRoot, '--ignore-scripts', '--offline',
+    ],
     { cwd: packageRoot, env: environment },
   );
-  assert.equal(launcher.code, 0, launcher.output);
-  assert.equal(launcher.output.trim(), KINTIO_VERSION);
+  assert.equal(installed.code, 0, installed.output);
+  launcher = process.platform === 'win32'
+    ? path.join(prefix, 'kintio.cmd')
+    : path.join(prefix, 'bin/kintio');
+  const kintio = (args: readonly string[]) => command(
+    launcher,
+    args,
+    { cwd: packageRoot, env: environment },
+  );
+  const version = await kintio(['--version']);
+  assert.equal(version.code, 0, version.output);
+  assert.equal(version.output.trim(), KINTIO_VERSION);
 
-  const configured = await command(
-    process.execPath,
-    [cli, 'setup', '--home', instanceRoot],
-    { cwd: packageRoot, env: environment },
-  );
+  const configured = await kintio(['setup', '--home', instanceRoot]);
   assert.equal(configured.code, 0, configured.output);
   const port = await availablePort();
   const instanceConfig = path.join(instanceRoot, '.env');
@@ -168,62 +179,36 @@ test('built global CLI owns one portable native daemon lifecycle', async (t) => 
     .replace(/^PORT=.*$/mu, `PORT=${port}`);
   await fs.writeFile(instanceConfig, source, { mode: 0o600 });
 
-  const started = await command(
-    process.execPath,
-    [cli, 'start', '--home', instanceRoot],
-    { cwd: packageRoot, env: environment },
-  );
+  const started = await kintio(['start', '--home', instanceRoot]);
   assert.equal(started.code, 0, started.output);
   assert.equal((await waitForResponse(port)).status, 200);
   const firstState = await requestControl(instanceRoot, 'ping');
   assert.equal(firstState?.phase, 'running');
   assert.ok(firstState?.workerPid);
 
-  const repeated = await command(
-    process.execPath,
-    [cli, 'start', '--home', instanceRoot],
-    { cwd: packageRoot, env: environment },
-  );
+  const repeated = await kintio(['start', '--home', instanceRoot]);
   assert.equal(repeated.code, 0, repeated.output);
   assert.match(repeated.output, /already running/u);
 
-  const status = await command(
-    process.execPath,
-    [cli, 'status', '--home', instanceRoot],
-    { cwd: packageRoot, env: environment },
-  );
+  const status = await kintio(['status', '--home', instanceRoot]);
   assert.equal(status.code, 0, status.output);
   assert.match(status.output, /Kintio is running/u);
-  const logs = await command(
-    process.execPath,
-    [cli, 'logs', '--home', instanceRoot, '--lines', '20', '--no-follow'],
-    { cwd: packageRoot, env: environment },
-  );
+  const logs = await kintio([
+    'logs', '--home', instanceRoot, '--lines', '20', '--no-follow',
+  ]);
   assert.equal(logs.code, 0, logs.output);
   assert.match(logs.output, /Hono server is listening/u);
 
-  const restarted = await command(
-    process.execPath,
-    [cli, 'restart', '--home', instanceRoot],
-    { cwd: packageRoot, env: environment },
-  );
+  const restarted = await kintio(['restart', '--home', instanceRoot]);
   assert.equal(restarted.code, 0, restarted.output);
   const secondState = await requestControl(instanceRoot, 'ping');
   assert.notEqual(secondState?.runId, firstState.runId);
   assert.equal((await waitForResponse(port)).status, 200);
 
-  const stopped = await command(
-    process.execPath,
-    [cli, 'stop', '--home', instanceRoot],
-    { cwd: packageRoot, env: environment },
-  );
+  const stopped = await kintio(['stop', '--home', instanceRoot]);
   assert.equal(stopped.code, 0, stopped.output);
   await waitForPortRelease(port);
-  const finalStatus = await command(
-    process.execPath,
-    [cli, 'status', '--home', instanceRoot],
-    { cwd: packageRoot, env: environment },
-  );
+  const finalStatus = await kintio(['status', '--home', instanceRoot]);
   assert.equal(finalStatus.code, 0, finalStatus.output);
   assert.match(finalStatus.output, /not running/u);
 });

@@ -45,15 +45,6 @@ function fakeRuntime(
       events.push('runtime:start');
       await options.start?.();
     },
-    async handleMcp() {
-      return Response.json({ available: true });
-    },
-    async handleMemoryMcp() {
-      return Response.json({ available: true });
-    },
-    async handleIlinkMcp() {
-      return Response.json({ available: true });
-    },
     stopAccepting() {
       events.push('runtime:stop-accepting');
     },
@@ -69,7 +60,7 @@ function fakeRuntime(
 
 const logger = { info() {}, warn() {}, error() {} };
 
-test('supervisor exposes MCP before starting message ingress', async () => {
+test('supervisor binds public ingress before starting the runtime', async () => {
   const port = await availablePort();
   const events: string[] = [];
   const supervisor = new KintioSupervisor({
@@ -77,9 +68,7 @@ test('supervisor exposes MCP before starting message ingress', async () => {
     logger,
     runtime: fakeRuntime(events, {
       async start() {
-        const response = await fetch(`http://127.0.0.1:${port}/mcp`, {
-          method: 'POST',
-        });
+        const response = await fetch(`http://127.0.0.1:${port}/`);
         assert.equal(response.status, 200);
       },
     }),
@@ -117,7 +106,7 @@ test('WeChat callback ingress stays gated until all live listeners start', async
   await supervisor.close();
 });
 
-test('graceful close stops ingress but keeps MCP online while runtime drains', async () => {
+test('graceful close keeps the public listener online while runtime drains', async () => {
   const port = await availablePort();
   const events: string[] = [];
   const drain = deferred();
@@ -130,8 +119,8 @@ test('graceful close stops ingress but keeps MCP online while runtime drains', a
 
   const closing = supervisor.close();
   while (!events.includes('runtime:close')) await new Promise((resolve) => setTimeout(resolve, 1));
-  const mcp = await fetch(`http://127.0.0.1:${port}/mcp`, { method: 'POST' });
-  assert.equal(mcp.status, 200);
+  const root = await fetch(`http://127.0.0.1:${port}/`);
+  assert.equal(root.status, 200);
   drain.resolve();
   await closing;
   assert.equal(supervisor.state, 'closed');
@@ -168,6 +157,25 @@ test('close during startup cancels readiness and releases both channel and runti
   assert.equal(supervisor.state, 'closed');
   assert.deepEqual(events, [
     'runtime:start',
+    'runtime:stop-accepting',
+    'runtime:abort',
+    'runtime:close',
+  ]);
+});
+
+test('abort during runtime handoff aborts and closes the acquired runtime', async () => {
+  const events: string[] = [];
+  const supervisor = new KintioSupervisor({
+    config: createConfig({ PORT: String(await availablePort()), CODEX_ENABLED: 'false' }),
+    logger,
+    runtime: fakeRuntime(events),
+  });
+
+  const starting = supervisor.start();
+  await supervisor.abortForExit();
+  await assert.rejects(starting, /startup was cancelled/u);
+  assert.equal(supervisor.state, 'aborted');
+  assert.deepEqual(events, [
     'runtime:stop-accepting',
     'runtime:abort',
     'runtime:close',
@@ -217,6 +225,7 @@ test('runtime initialization failure closes the already-bound HTTP channel', asy
     'runtime:start',
     'runtime:stop-accepting',
     'runtime:abort',
+    'runtime:close',
   ]);
 });
 
@@ -230,7 +239,14 @@ test('process abort stops ingress without claiming a graceful resource close', a
   });
   await supervisor.start();
 
+  const idle = net.createConnection(port, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    idle.once('connect', resolve);
+    idle.once('error', reject);
+  });
+  const idleClosed = new Promise<void>((resolve) => idle.once('close', () => resolve()));
   await supervisor.abortForExit();
+  await idleClosed;
   assert.equal(supervisor.state, 'aborted');
   assert.deepEqual(events, [
     'runtime:start',
@@ -239,6 +255,33 @@ test('process abort stops ingress without claiming a graceful resource close', a
   ]);
   await assert.rejects(fetch(`http://127.0.0.1:${port}/`));
   await assert.rejects(supervisor.start(), /cannot start from aborted/u);
+});
+
+test('process abort upgrades a graceful close and drops idle HTTP connections', async () => {
+  const port = await availablePort();
+  const events: string[] = [];
+  const drain = deferred();
+  const supervisor = new KintioSupervisor({
+    config: createConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
+    logger,
+    runtime: fakeRuntime(events, { close: () => drain.promise }),
+  });
+  await supervisor.start();
+  const idle = net.createConnection(port, '127.0.0.1');
+  await new Promise<void>((resolve, reject) => {
+    idle.once('connect', resolve);
+    idle.once('error', reject);
+  });
+  const idleClosed = new Promise<void>((resolve) => idle.once('close', () => resolve()));
+  const graceful = supervisor.close();
+  while (!events.includes('runtime:close')) {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  await supervisor.abortForExit();
+  drain.resolve();
+  await graceful;
+  await idleClosed;
+  assert.equal(supervisor.state, 'aborted');
 });
 
 test('constructing and closing an unstarted supervisor owns no runtime files', async (t) => {

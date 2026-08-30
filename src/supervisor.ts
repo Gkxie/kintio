@@ -17,13 +17,14 @@ export type SupervisorState =
 export class KintioSupervisor {
   readonly #config: AppConfig;
   readonly #logger: Logger;
-  readonly #runtimeFactory: () => Runtime;
+  readonly #runtimeFactory: () => Promise<Runtime>;
   readonly #onFatal: (error: Error) => void;
   #runtime: Runtime | undefined;
   #runtimeIngressStopped = false;
   #runtimeAbort: Promise<void> | undefined;
   #runtimeClose: Promise<void> | undefined;
   #server: ServerType | undefined;
+  #httpClosing: Promise<void> | undefined;
   #state: SupervisorState = 'idle';
   #ingressOpen = false;
   #starting: Promise<{ readonly port: number }> | undefined;
@@ -44,7 +45,7 @@ export class KintioSupervisor {
     this.#config = config;
     this.#logger = logger;
     this.#runtimeFactory = runtime
-      ? () => runtime
+      ? async () => runtime
       : () => createRuntime({ config, logger });
     this.#onFatal = onFatal;
   }
@@ -64,14 +65,14 @@ export class KintioSupervisor {
     this.#state = 'starting';
     this.#starting = (async () => {
       let startupErrorListener: ((error: Error) => void) | undefined;
-      let runtimeStartAttempted = false;
       try {
-        const runtime = this.#runtimeFactory();
+        const runtime = await this.#runtimeFactory();
         this.#runtime = runtime;
+        this.#assertStarting();
         const app = createApp({
           config: this.#config,
           logger: this.#logger,
-          runtime,
+          messageProcessor: runtime.messageProcessor,
           acceptIngress: () => this.#ingressOpen,
         });
         const server = createAdaptorServer({ fetch: app.fetch });
@@ -87,7 +88,6 @@ export class KintioSupervisor {
           channelFailure,
         ]);
         this.#assertStarting();
-        runtimeStartAttempted = true;
         await Promise.race([runtime.start(), channelFailure]);
         this.#assertStarting();
         this.#ingressOpen = true;
@@ -101,7 +101,7 @@ export class KintioSupervisor {
         this.#ingressOpen = false;
         if (this.#state === 'starting') this.#state = 'failed';
         try {
-          await this.#cleanupFailedStart(!runtimeStartAttempted);
+          await this.#cleanupFailedStart();
         } finally {
           if (startupErrorListener && this.#server) {
             this.#server.off('error', startupErrorListener);
@@ -128,7 +128,7 @@ export class KintioSupervisor {
         await this.#closeRuntime();
       } finally {
         await this.#closeHttp(false).catch(() => undefined);
-        this.#state = 'closed';
+        if (!this.#aborting) this.#state = 'closed';
       }
     })();
     return this.#closing;
@@ -194,24 +194,27 @@ export class KintioSupervisor {
     }
   }
 
-  async #cleanupFailedStart(closeResources: boolean): Promise<void> {
+  async #cleanupFailedStart(): Promise<void> {
     this.#stopRuntimeIngress();
     try {
       await this.#abortRuntime();
     } finally {
-      if (closeResources) await this.#closeRuntime().catch(() => undefined);
+      await this.#closeRuntime().catch(() => undefined);
       await this.#closeHttp(true).catch(() => undefined);
     }
   }
 
   #stopRuntimeIngress(): void {
     if (this.#runtimeIngressStopped) return;
+    if (!this.#runtime) return;
     this.#runtimeIngressStopped = true;
-    this.#runtime?.stopAccepting();
+    this.#runtime.stopAccepting();
   }
 
   #abortRuntime(): Promise<void> {
-    this.#runtimeAbort ||= this.#runtime?.abort() || Promise.resolve();
+    const runtime = this.#runtime;
+    if (!runtime) return Promise.resolve();
+    this.#runtimeAbort ||= runtime.abort();
     return this.#runtimeAbort;
   }
 
@@ -223,13 +226,15 @@ export class KintioSupervisor {
   async #closeHttp(force: boolean): Promise<void> {
     const server = this.#server;
     if (!server) return;
+    if (!this.#httpClosing && server.listening) {
+      this.#httpClosing = new Promise<void>((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+      });
+    }
     if (force) {
       (server as ServerType & { closeAllConnections?: () => void })
         .closeAllConnections?.();
     }
-    if (!server.listening) return;
-    await new Promise<void>((resolve, reject) => {
-      server.close((error) => error ? reject(error) : resolve());
-    });
+    await this.#httpClosing;
   }
 }

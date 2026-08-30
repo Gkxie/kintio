@@ -1,33 +1,51 @@
-import { createHash, timingSafeEqual } from 'node:crypto';
-
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 
-function authorized(request: Request, bearerToken: string): boolean {
-  if (!bearerToken) return false;
-  const digest = (value: string) => createHash('sha256').update(value, 'utf8').digest();
-  return timingSafeEqual(
-    digest(request.headers.get('authorization') || ''),
-    digest(`Bearer ${bearerToken}`),
-  );
+const MAX_REQUEST_BYTES = 256 * 1024;
+
+function localRequest(request: Request): boolean {
+  const url = new URL(request.url);
+  return url.protocol === 'http:' && url.hostname === '127.0.0.1' &&
+    request.headers.get('host') === url.host && !request.headers.has('origin');
+}
+
+async function boundedRequest(request: Request): Promise<Request | Response> {
+  if (request.method !== 'POST' || !request.body) return request;
+  const declared = Number(request.headers.get('content-length') || 0);
+  if (!Number.isFinite(declared) || declared < 0 || declared > MAX_REQUEST_BYTES) {
+    return Response.json({ error: 'request too large' }, { status: 413 });
+  }
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > MAX_REQUEST_BYTES) {
+      await reader.cancel().catch(() => undefined);
+      return Response.json({ error: 'request too large' }, { status: 413 });
+    }
+    chunks.push(value);
+  }
+  return new Request(request, { body: Buffer.concat(chunks, size) });
 }
 
 export async function handleMcpHttpRequest({
   request,
-  bearerToken,
   createServer,
 }: {
   readonly request: Request;
-  readonly bearerToken: string;
   readonly createServer: () => McpServer;
 }): Promise<Response> {
-  if (!authorized(request, bearerToken)) {
-    return Response.json(
-      { error: 'unauthorized' },
-      { status: 401, headers: { 'WWW-Authenticate': 'Bearer' } },
-    );
+  if (!localRequest(request)) {
+    return Response.json({ error: 'forbidden' }, { status: 403 });
   }
-  const transport = new WebStandardStreamableHTTPServerTransport();
+  const bounded = await boundedRequest(request);
+  if (bounded instanceof Response) return bounded;
+  const transport = new WebStandardStreamableHTTPServerTransport({
+    enableJsonResponse: true,
+  });
   await createServer().connect(transport);
-  return transport.handleRequest(request);
+  return transport.handleRequest(bounded);
 }

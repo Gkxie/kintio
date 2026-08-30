@@ -12,7 +12,7 @@ function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
-test('runtime keeps project Codex configuration isolated from the user configuration', async (t) => {
+test('runtime never mutates the host Codex configuration', async (t) => {
   const temporary = await createTempSqlite(t, {
     prefix: 'wechat-runtime-',
     filename: 'wecom.sqlite',
@@ -39,16 +39,12 @@ test('runtime keeps project Codex configuration isolated from the user configura
     WECOM_CORP_ID: 'ww-runtime-test',
     WECOM_KF_SECRET: 'runtime-secret',
     ILINK_ENABLED: 'false',
-    WECOM_MCP_BEARER_TOKEN: 'r'.repeat(32),
     WECOM_ALLOWED_USER_IDS: 'wm-runtime-test',
     WECOM_DB_FILE: temporary.filePath,
-    CODEX_MODEL: 'gpt-project-runtime',
-    CODEX_REASONING_EFFORT: 'low',
     CODEX_WORKING_DIRECTORY: path.join(temporary.directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(temporary.directory, 'image-inputs'),
-    CODEX_WEB_SEARCH_MODE: 'disabled',
   });
-  const runtime = createRuntime({
+  const runtime = await createRuntime({
     config,
     logger: { info() {}, warn() {}, error() {} },
   });

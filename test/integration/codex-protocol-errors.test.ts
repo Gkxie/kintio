@@ -91,20 +91,27 @@ function standardHandler(message: RpcMessage, child: FakeProcess): void {
 }
 
 test('JSON-RPC errors retain the code but suppress the server message', async () => {
-  const fake = fakeSpawn((message, child) => {
-    if (message.method === 'initialize') {
-      child.send({
-        id: message.id,
-        error: { code: -32001, message: 'authentication rejected' },
-      });
-    }
-  });
-  const server = new CodexAppServer({ spawnProcess: fake.spawn });
-  await assert.rejects(server.initialize(), (error: unknown) =>
-    error instanceof Error && error.message === 'Codex app-server request failed: initialize' &&
-    'code' in error && error.code === -32001
-  );
-  await server.close();
+  for (const [code, expected] of [
+    [-32001, -32001],
+    [{ providerSecretCanary: true }, undefined],
+  ] as const) {
+    const fake = fakeSpawn((message, child) => {
+      if (message.method === 'initialize') {
+        child.send({
+          id: message.id,
+          error: { code, message: 'authentication-secret-canary' },
+        });
+      }
+    });
+    const server = new CodexAppServer({ spawnProcess: fake.spawn });
+    await assert.rejects(server.initialize(), (error: unknown) =>
+      error instanceof Error &&
+      error.message === 'Codex app-server request failed: initialize' &&
+      !error.message.includes('authentication-secret-canary') &&
+      ('code' in error ? error.code : undefined) === expected
+    );
+    await server.close();
+  }
 });
 
 test('request timeout rejects and close terminates the unresponsive child', async () => {
@@ -200,33 +207,89 @@ test('thread catalog distinguishes active, archived, and deleted IDs', async () 
 
 test('failed and interrupted turn notifications reject completion and release active state', async () => {
   const fake = fakeSpawn(standardHandler);
-  const server = new CodexAppServer({ spawnProcess: fake.spawn });
-  const thread = server.startThread(threadOptions);
-  const failed = await thread.startRun('first');
-  fake.child().send({
-    method: 'turn/completed',
-    params: {
-      turn: {
-        id: failed.turnId,
-        status: 'failed',
-        error: { message: 'model failed' },
-      },
-    },
+  const warnings: string[] = [];
+  const server = new CodexAppServer({
+    spawnProcess: fake.spawn,
+    logger: { warn(message) { warnings.push(message); } },
   });
-  await assert.rejects(failed.completion, /status failed/u);
+  const thread = server.startThread(threadOptions);
+  const notifyError = (turnId: string, codexErrorInfo: unknown): void => {
+    fake.child().send({
+      method: 'error',
+      params: {
+        threadId: 'thread-one', turnId, willRetry: true,
+        error: {
+          message: 'notification-secret-canary',
+          additionalDetails: '/private/notification',
+          codexErrorInfo,
+        },
+      },
+    });
+  };
+  const complete = (turnId: string, status: string, codexErrorInfo?: unknown): void => {
+    fake.child().send({
+      method: 'turn/completed',
+      params: {
+        turn: {
+          id: turnId, status,
+          error: {
+            message: 'completion-secret-canary',
+            additionalDetails: '/private/completion',
+            ...(codexErrorInfo === undefined ? {} : { codexErrorInfo }),
+          },
+        },
+      },
+    });
+  };
+  const failed = await thread.startRun('first');
+  notifyError(failed.turnId, { providerSecretCanary: { httpStatusCode: 418 } });
+  notifyError(failed.turnId, { httpConnectionFailed: { httpStatusCode: 401 } });
+  complete(failed.turnId, 'failed');
+  await assert.rejects(
+    failed.completion,
+    (error: unknown) => error instanceof Error &&
+      error.message === 'Codex turn ended with status failed: httpConnectionFailed (HTTP 401)' &&
+      !/secret-canary|\/private/u.test(error.message),
+  );
+  assert.deepEqual(warnings, [
+    '[codex] app-server error category=other; content suppressed',
+    '[codex] app-server error category=httpConnectionFailed (HTTP 401); ' +
+      'content suppressed',
+  ]);
+  assert.doesNotMatch(JSON.stringify(warnings), /secret-canary|providerSecretCanary|\/private/u);
 
   const interrupted = await thread.startRun('second');
+  notifyError(interrupted.turnId, 'serverOverloaded');
   assert.equal(await thread.interrupt?.(), true);
   const interrupt = fake.requests.find((request) => request.method === 'turn/interrupt');
   assert.deepEqual(interrupt?.params, {
     threadId: 'thread-one',
     turnId: interrupted.turnId,
   });
-  fake.child().send({
-    method: 'turn/completed',
-    params: { turn: { id: interrupted.turnId, status: 'interrupted' } },
-  });
-  await assert.rejects(interrupted.completion, /status interrupted/u);
+  complete(interrupted.turnId, 'interrupted');
+  await assert.rejects(
+    interrupted.completion,
+    (error: unknown) => error instanceof Error &&
+      error.message === 'Codex turn ended with status interrupted',
+  );
+
+  const future = await thread.startRun('third');
+  notifyError(future.turnId, 'usageLimitExceeded');
+  complete(future.turnId, 'failed', { futureProviderError: { raw: 'secret' } });
+  await assert.rejects(
+    future.completion,
+    (error: unknown) => error instanceof Error &&
+      error.message === 'Codex turn ended with status failed: other',
+  );
+
+  const malformed = await thread.startRun('fourth');
+  complete(malformed.turnId, 'failed\nturn-secret-canary');
+  await assert.rejects(
+    malformed.completion,
+    (error: unknown) => error instanceof Error &&
+      error.message === 'Codex turn ended with status unknown',
+  );
+  assert.doesNotMatch(JSON.stringify(warnings), /secret-canary|\/private/u);
   await server.close();
 });
 

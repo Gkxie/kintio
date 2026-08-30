@@ -14,6 +14,7 @@ import { WecomSync } from './services/wecom-sync.ts';
 import { WechatKfToolExecutor } from './mcp/wechat-kf-executor.ts';
 import { handleWechatKfMcpRequest } from './mcp/wechat-kf-server.ts';
 import { handleIlinkMcpRequest } from './mcp/ilink-server.ts';
+import { LocalMcpHost } from './mcp/local-host.ts';
 import { IlinkSendExecutor } from './ilink/executor.ts';
 import { IlinkListenerManager } from './ilink/listener.ts';
 import { IlinkLoginManager } from './ilink/login-manager.ts';
@@ -37,9 +38,6 @@ import type { ChatChannel, Logger } from './types.ts';
 export interface Runtime {
   readonly messageProcessor: WecomSync | null;
   start(): Promise<void>;
-  handleMcp(request: Request): Promise<Response>;
-  handleMemoryMcp(request: Request): Promise<Response>;
-  handleIlinkMcp(request: Request): Promise<Response>;
   stopAccepting(): void;
   close(): Promise<void>;
   abort(): Promise<void>;
@@ -100,27 +98,18 @@ function databaseHasActiveWriter(filePath: string): boolean {
   }
 }
 
-export function createRuntime({
+export async function createRuntime({
   config,
   logger = console,
 }: {
   config: AppConfig;
   logger?: Logger;
-}): Runtime {
+}): Promise<Runtime> {
   if ((!config.wecom.api.enabled && !config.ilink.enabled) || !config.codex.enabled) {
     logger.info('[runtime] message processing is disabled');
     return {
       messageProcessor: null,
       async start() {},
-      async handleMcp() {
-        return Response.json({ error: 'service unavailable' }, { status: 503 });
-      },
-      async handleMemoryMcp() {
-        return Response.json({ error: 'service unavailable' }, { status: 503 });
-      },
-      async handleIlinkMcp() {
-        return Response.json({ error: 'service unavailable' }, { status: 503 });
-      },
       stopAccepting() {},
       async close() {},
       async abort() {},
@@ -140,6 +129,7 @@ export function createRuntime({
   let store: SqliteStore | undefined;
   let cleanupTimer: NodeJS.Timeout | undefined;
   let ilinkOffers: IlinkLoginStore | undefined;
+  let localMcp: LocalMcpHost | undefined;
 
   try {
     store = new SqliteStore({ filePath: config.state.databaseFile });
@@ -170,6 +160,7 @@ export function createRuntime({
     const mediaGateway = apiClient ? new WecomMediaGateway({ apiClient }) : undefined;
     let ilinkLogin: IlinkLoginManager | undefined;
     let ilinkListener: IlinkListenerManager | undefined;
+    let toolsUnavailable = false;
     const wechatTools = apiClient && mediaGateway
       ? new WechatKfToolExecutor({
           store,
@@ -250,12 +241,27 @@ export function createRuntime({
         }
       },
     };
-    const codex = createCodexAppServer(config.codex, {
+    let conversationMemory: ConversationMemoryExecutor | undefined;
+    const activeLocalMcp = new LocalMcpHost({
+      ...(wechatTools ? {
+        wechatKf: (request) => toolsUnavailable
+          ? Promise.resolve(Response.json({ error: 'service unavailable' }, { status: 503 }))
+          : handleWechatKfMcpRequest({ request, executor: wechatTools }),
+      } : {}),
+      memory: (request) => toolsUnavailable || !conversationMemory
+        ? Promise.resolve(Response.json({ error: 'service unavailable' }, { status: 503 }))
+        : handleConversationMemoryMcpRequest({ request, executor: conversationMemory }),
+      ...(ilinkTools ? {
+        ilink: (request) => toolsUnavailable
+          ? Promise.resolve(Response.json({ error: 'service unavailable' }, { status: 503 }))
+          : handleIlinkMcpRequest({ request, executor: ilinkTools }),
+      } : {}),
+    });
+    localMcp = activeLocalMcp;
+    const mcpEndpoints = await activeLocalMcp.start();
+    const codex = createCodexAppServer({
       logger,
-      ...(wechatTools ? { mcpUrl: config.wecom.mcp.url } : {}),
-      memoryMcpUrl: config.wecom.mcp.memoryUrl,
-      mcpBearerToken: config.wecom.mcp.bearerToken,
-      ...(config.ilink.enabled ? { ilinkMcpUrl: config.ilink.mcpUrl } : {}),
+      mcpEndpoints,
       mcpToolTimeoutSec: Math.ceil((
         config.wecom.api.timeoutMs * 4 +
         config.wecom.api.observeMs +
@@ -272,7 +278,7 @@ export function createRuntime({
       codex,
       config: config.codex,
     });
-    const conversationMemory = new ConversationMemoryExecutor({
+    conversationMemory = new ConversationMemoryExecutor({
       store,
       threads: codex,
     });
@@ -397,7 +403,6 @@ export function createRuntime({
     let startupRecovery: Promise<void> | undefined;
     let closing: Promise<void> | undefined;
     let accepting = true;
-    let toolsUnavailable = false;
     let ilinkClosing: Promise<void> | undefined;
     let deferredDrain: Promise<void> | undefined;
     let deferredDrainRequested = false;
@@ -459,42 +464,6 @@ export function createRuntime({
         })();
         return starting;
       },
-      handleMcp(request: Request): Promise<Response> {
-        if (toolsUnavailable || !wechatTools) {
-          return Promise.resolve(
-            Response.json({ error: 'service unavailable' }, { status: 503 }),
-          );
-        }
-        return handleWechatKfMcpRequest({
-          request,
-          executor: wechatTools,
-          bearerToken: config.wecom.mcp.bearerToken,
-        });
-      },
-      handleMemoryMcp(request: Request): Promise<Response> {
-        if (toolsUnavailable) {
-          return Promise.resolve(
-            Response.json({ error: 'service unavailable' }, { status: 503 }),
-          );
-        }
-        return handleConversationMemoryMcpRequest({
-          request,
-          executor: conversationMemory,
-          bearerToken: config.wecom.mcp.bearerToken,
-        });
-      },
-      handleIlinkMcp(request: Request): Promise<Response> {
-        if (toolsUnavailable || !ilinkTools) {
-          return Promise.resolve(
-            Response.json({ error: 'service unavailable' }, { status: 503 }),
-          );
-        }
-        return handleIlinkMcpRequest({
-          request,
-          executor: ilinkTools,
-          bearerToken: config.wecom.mcp.bearerToken,
-        });
-      },
       stopAccepting() {
         if (!accepting) return;
         accepting = false;
@@ -522,16 +491,20 @@ export function createRuntime({
               ilinkTools?.waitForIdle(),
               wechatTools?.close(),
             ]);
-            if (cleanupTimer) clearInterval(cleanupTimer);
             try {
-              activeStore.cleanup();
-              ilinkOffers?.cleanup();
-              activeStore.checkpoint('TRUNCATE');
+              await activeLocalMcp.close();
             } finally {
+              if (cleanupTimer) clearInterval(cleanupTimer);
               try {
-                activeStore.close();
+                activeStore.cleanup();
+                ilinkOffers?.cleanup();
+                activeStore.checkpoint('TRUNCATE');
               } finally {
-                instanceLock.release();
+                try {
+                  activeStore.close();
+                } finally {
+                  instanceLock.release();
+                }
               }
             }
           }
@@ -542,15 +515,28 @@ export function createRuntime({
         runtime.stopAccepting();
         toolsUnavailable = true;
         wechatTools?.abort();
-        await processor.abort();
-        await ilinkClosing;
+        await Promise.all([
+          processor.abort(),
+          ilinkClosing,
+          activeLocalMcp.close(true),
+        ]);
       },
     };
     return runtime;
   } catch (error: unknown) {
     if (cleanupTimer) clearInterval(cleanupTimer);
-    store?.close();
-    instanceLock.release();
+    await localMcp?.close(true).catch(() => undefined);
+    try {
+      store?.close();
+    } catch (cleanupError: unknown) {
+      logger.error(
+        `[runtime] startup cleanup failed: ${
+          cleanupError instanceof Error ? cleanupError.message : String(cleanupError)
+        }`,
+      );
+    } finally {
+      instanceLock.release();
+    }
     throw error;
   }
 }

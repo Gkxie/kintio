@@ -11,7 +11,6 @@ import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
 import {
   ConversationMemoryExecutor,
   createConversationMemoryMcpServer,
-  handleConversationMemoryMcpRequest,
 } from '../../src/mcp/conversation-memory-server.ts';
 import {
   SqliteStore,
@@ -249,19 +248,4 @@ test('memory MCP does not expose unexpected thread reader errors', async (t) => 
     },
   });
   assert.doesNotMatch(JSON.stringify(result), /secret-value|private-thread|\/root/u);
-});
-
-test('memory HTTP MCP requires its bearer token', async (t) => {
-  const created = await harness(t);
-  const response = await handleConversationMemoryMcpRequest({
-    request: new Request('https://robot.example/mcp/memory', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {} }),
-    }),
-    executor: created.executor,
-    bearerToken: 'correct-token',
-  });
-  assert.equal(response.status, 401);
-  assert.equal(response.headers.get('www-authenticate'), 'Bearer');
 });

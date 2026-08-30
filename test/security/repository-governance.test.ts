@@ -188,7 +188,10 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(realCodex, /^  workflow_dispatch:$/mu);
   assert.doesNotMatch(realCodex, /^  (?:push|pull_request|schedule):/mu);
   assert.match(realCodex, /github\.ref == 'refs\/heads\/master'/u);
+  assert.match(realCodex, /startsWith\(github\.ref, 'refs\/heads\/codex\/'\)/u);
   assert.match(realCodex, /github\.actor == 'Gkxie'/u);
+  assert.match(realCodex, /github\.triggering_actor == 'Gkxie'/u);
+  assert.match(realCodex, /github\.run_attempt == 1/u);
   assert.match(realCodex, /^    environment: codex-eval$/mu);
   assert.match(realCodex, /persist-credentials: false/u);
   assert.match(realCodex, /pnpm install --frozen-lockfile --ignore-scripts/u);
@@ -196,6 +199,12 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(realCodex, /sha256sum --check --strict/u);
   assert.match(realCodex, /KINTIO_CI_API_KEY: \$\{\{ secrets\.KINTIO_CI_API_KEY \}\}/u);
   assert.equal(realCodex.match(/secrets\.KINTIO_CI_API_KEY/gu)?.length, 1);
+  assert.match(realCodex, /codex login --with-api-key/u);
+  assert.match(realCodex, /requires_openai_auth = true/u);
+  assert.doesNotMatch(realCodex, /env_key = "KINTIO_CI_API_KEY"/u);
+  assert.match(realCodex, /base_url = "\$KINTIO_CI_BASE_URL"/u);
+  assert.match(realCodex, /model_reasoning_effort = "none"/u);
+  assert.doesNotMatch(realCodex, /^\s+CODEX_(?:MODEL|PATH|REASONING_EFFORT|WEB_SEARCH_MODE):/mu);
   assert.doesNotMatch(realCodex, /REAL_CODEX_CONCURRENCY|upload-artifact|download-artifact/u);
   assert.match(realCodex, /name: Remove isolated Codex state\n\s+if: always\(\)/u);
 

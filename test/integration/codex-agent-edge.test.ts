@@ -140,7 +140,6 @@ async function harness(t: TestContext, boundary: Boundary) {
   const agent = new CodexAgent({
     codex: boundary,
     config: {
-      model: 'gpt-edge', reasoningEffort: 'none',
       workingDirectory: directory, imageTempDirectory: directory,
       generatedImageDirectory: path.join(directory, 'generated'),
     },
@@ -180,168 +179,49 @@ test('prompt includes media, channel, observation, and customer boundaries', asy
   assert.doesNotMatch(prompt, /open_kfid|external_userid|media_id/iu);
 });
 
-test('app-server isolates an explicit provider key from its config arguments', async (t) => {
-  const captures: Array<{
-    command: string;
-    args: readonly string[];
-    env: NodeJS.ProcessEnv;
-  }> = [];
-  const spawnProcess = ((command, args, options) => {
-    captures.push({ command, args: [...args], env: { ...options.env } });
+test('app-server registers channel-specific local MCP profiles', async (t) => {
+  const captures: Array<{ args: readonly string[] }> = [];
+  const spawnProcess = ((_command, args) => {
+    captures.push({ args: [...args] });
     return new InitProcess() as unknown as ReturnType<SpawnProcess>;
   }) as SpawnProcess;
-  const providerApiKeyEnv = 'KINTIO_TEST_PROVIDER_API_KEY';
-  const providerApiKey = 'provider-key-canary-value';
-  const previousProviderApiKey = process.env[providerApiKeyEnv];
-  process.env[providerApiKeyEnv] = providerApiKey;
-  t.onTestFinished(() => {
-    if (previousProviderApiKey === undefined) delete process.env[providerApiKeyEnv];
-    else process.env[providerApiKeyEnv] = previousProviderApiKey;
+  const configured = createCodexAppServer({
+    spawnProcess,
+    mcpEndpoints: {
+      wechatKf: 'http://127.0.0.1:30101/mcp',
+      memory: 'http://127.0.0.1:30101/mcp/memory',
+      ilink: 'http://127.0.0.1:30101/mcp/ilink',
+    },
+    mcpToolTimeoutSec: 35,
+    ilinkMcpToolTimeoutSec: 150,
   });
-  const configured = createCodexAppServer(
-    {
-      pathOverride: '/custom/codex', webSearchMode: 'live',
-      workingDirectory: '/custom/workspace',
+  const ilinkOnly = createCodexAppServer({
+    spawnProcess,
+    mcpEndpoints: {
+      memory: 'http://127.0.0.1:30102/mcp/memory',
+      ilink: 'http://127.0.0.1:30102/mcp/ilink',
     },
-    {
-      spawnProcess,
-      mcpUrl: 'https://robot.example/mcp',
-      mcpBearerToken: 'test-bearer-token',
-      ilinkMcpUrl: 'https://robot.example/mcp/ilink',
-      mcpToolTimeoutSec: 35,
-      ilinkMcpToolTimeoutSec: 150,
-      modelProvider: {
-        baseUrl: 'https://www.xieyu.chat/',
-        apiKeyEnv: providerApiKeyEnv,
-      },
-    },
-  );
-  const defaults = createCodexAppServer(
-    {
-      pathOverride: '', webSearchMode: 'disabled',
-      workingDirectory: '/default/workspace',
-    },
-    {
-      spawnProcess,
-      mcpUrl: 'http://127.0.0.1:8888/mcp',
-      mcpBearerToken: 'test-bearer-token',
-    },
-  );
-  const ilinkOnly = createCodexAppServer(
-    {
-      pathOverride: '', webSearchMode: 'disabled',
-      workingDirectory: '/ilink-only/workspace',
-    },
-    {
-      spawnProcess,
-      memoryMcpUrl: 'https://chat.example/mcp/memory',
-      ilinkMcpUrl: 'https://chat.example/mcp/ilink',
-      mcpBearerToken: 'test-bearer-token',
-    },
-  );
+  });
   t.onTestFinished(async () => {
-    await Promise.all([configured.close(), defaults.close(), ilinkOnly.close()]);
+    await Promise.all([configured.close(), ilinkOnly.close()]);
   });
   await configured.initialize();
-  await defaults.initialize();
   await ilinkOnly.initialize();
-  assert.equal(captures[0]?.command, '/custom/codex');
-  assert.equal(captures[1]?.command, 'codex');
-  assert.deepEqual(captures[0]?.args.slice(0, 2), ['app-server', '--stdio']);
-  assert.equal('OPENAI_API_KEY' in (captures[0]?.env || {}), false);
-  assert.equal('OPENAI_BASE_URL' in (captures[0]?.env || {}), false);
-  assert.equal('KINTIO_CI_API_KEY' in (captures[0]?.env || {}), false);
-  assert.equal(
-    captures[0]?.env[providerApiKeyEnv],
-    providerApiKey,
-  );
-  assert.equal(
-    captures[1]?.env[providerApiKeyEnv],
-    providerApiKey,
-  );
-  assert.equal(captures[0]?.env.KINTIO_MCP_BEARER_TOKEN, 'test-bearer-token');
-  assert.ok(captures[0]?.args.includes('model_provider="kintio_proxy"'));
-  assert.ok(captures[0]?.args.includes('model_providers.kintio_proxy={}'));
   assert.ok(captures[0]?.args.includes(
-    'model_providers.kintio_proxy.base_url="https://www.xieyu.chat"',
+    'mcp_servers.wechat_kf.url="http://127.0.0.1:30101/mcp"',
   ));
   assert.ok(captures[0]?.args.includes(
-    `model_providers.kintio_proxy.env_key="${providerApiKeyEnv}"`,
-  ));
-  assert.ok(captures[0]?.args.includes(
-    'model_providers.kintio_proxy.wire_api="responses"',
-  ));
-  assert.equal(JSON.stringify(captures[0]?.args).includes(providerApiKey), false);
-  assert.ok(captures[0]?.args.includes(
-    'mcp_servers.wechat_kf.url="https://robot.example/mcp"',
-  ));
-  assert.ok(captures[0]?.args.includes(
-    'mcp_servers.conversation_memory.url="https://robot.example/mcp/memory"',
+    'mcp_servers.conversation_memory.url="http://127.0.0.1:30101/mcp/memory"',
   ));
   assert.ok(captures[0]?.args.includes('mcp_servers.wechat_kf.tool_timeout_sec=35'));
   assert.ok(captures[0]?.args.includes('mcp_servers.weixin_ilink.tool_timeout_sec=150'));
-  assert.ok(captures[0]?.args.includes('web_search="live"'));
-  assert.ok(captures[1]?.args.includes('web_search="disabled"'));
   assert.equal(
-    captures[2]?.args.some((argument) => argument.startsWith('mcp_servers.wechat_kf.')),
+    captures[1]?.args.some((argument) => argument.startsWith('mcp_servers.wechat_kf.')),
     false,
   );
-  assert.ok(captures[2]?.args.includes(
-    'mcp_servers.weixin_ilink.url="https://chat.example/mcp/ilink"',
+  assert.ok(captures[1]?.args.includes(
+    'mcp_servers.weixin_ilink.url="http://127.0.0.1:30102/mcp/ilink"',
   ));
-});
-
-test('app-server rejects unsafe explicit provider credentials and URLs', (t) => {
-  const base = {
-    pathOverride: '', webSearchMode: 'disabled' as const,
-    workingDirectory: '/provider-validation/workspace',
-  };
-  const options = {
-    memoryMcpUrl: 'https://chat.example/mcp/memory',
-    mcpBearerToken: 'test-bearer-token',
-  };
-  assert.throws(() => createCodexAppServer(base, {
-    ...options,
-    modelProvider: { baseUrl: 'https://www.xieyu.chat', apiKeyEnv: 'invalid-name' },
-  }), /environment name is invalid/u);
-  const missingKeyBefore = process.env.KINTIO_MISSING_PROVIDER_API_KEY;
-  const unsafeKeyBefore = process.env.KINTIO_TEST_UNSAFE_PROVIDER_API_KEY;
-  delete process.env.KINTIO_MISSING_PROVIDER_API_KEY;
-  t.onTestFinished(() => {
-    if (missingKeyBefore === undefined) {
-      delete process.env.KINTIO_MISSING_PROVIDER_API_KEY;
-    } else {
-      process.env.KINTIO_MISSING_PROVIDER_API_KEY = missingKeyBefore;
-    }
-    if (unsafeKeyBefore === undefined) {
-      delete process.env.KINTIO_TEST_UNSAFE_PROVIDER_API_KEY;
-    } else {
-      process.env.KINTIO_TEST_UNSAFE_PROVIDER_API_KEY = unsafeKeyBefore;
-    }
-  });
-  assert.throws(() => createCodexAppServer(base, {
-    ...options,
-    modelProvider: {
-      baseUrl: 'https://www.xieyu.chat',
-      apiKeyEnv: 'KINTIO_MISSING_PROVIDER_API_KEY',
-    },
-  }), /API key is missing/u);
-  process.env.KINTIO_TEST_UNSAFE_PROVIDER_API_KEY = 'provider-key';
-  for (const baseUrl of [
-    'http://www.xieyu.chat',
-    'https://user:password@www.xieyu.chat',
-    'https://www.xieyu.chat?key=value',
-    'https://www.xieyu.chat#fragment',
-    'not a URL',
-  ]) {
-    assert.throws(() => createCodexAppServer(base, {
-      ...options,
-      modelProvider: {
-        baseUrl,
-        apiKeyEnv: 'KINTIO_TEST_UNSAFE_PROVIDER_API_KEY',
-      },
-    }), /HTTPS URL|must use HTTPS/u, baseUrl);
-  }
 });
 
 test('history inspection distinguishes missing, input-only, and completed without a boundary', async (t) => {
