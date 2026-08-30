@@ -7,7 +7,7 @@ import { test } from 'vitest';
 import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
 
-import { createConfig } from '../../src/config.ts';
+import { loadConfig } from '../../src/config.ts';
 import { CodexAgent, createCodexAppServer } from '../../src/services/codex-agent.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
@@ -22,7 +22,6 @@ import { WecomSync } from '../../src/services/wecom-sync.ts';
 import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
 import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
-process.loadEnvFile?.('.env');
 const targetOpenKfId = process.env.LIVE_WECOM_OPEN_KFID || '';
 const targetUserId = process.env.LIVE_WECOM_EXTERNAL_USER_ID || '';
 const allowedTargets = new Set(
@@ -44,7 +43,7 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
   process.stdout.write(
     'LIVE target configured estimated=1/5 types=text\n',
   );
-  const config = createConfig(process.env);
+  const config = loadConfig();
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-live-'));
   const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
   const apiClient = new WecomApiClient({

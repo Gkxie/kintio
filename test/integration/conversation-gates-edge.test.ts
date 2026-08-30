@@ -46,7 +46,7 @@ async function createHarness(
   const downloads: string[] = [];
   const errors: string[] = [];
   let sendSequence = 0;
-  let cursor = '';
+  const cursors = new Map<string, string>();
   const codexAgent = {
     async submit(input: AgentInput): Promise<SimulatedAgentSubmission> {
       inputs.push(input);
@@ -90,12 +90,14 @@ async function createHarness(
   });
 
   function ingest(raw: Record<string, unknown>): string {
+    const openKfId = String(raw.open_kfid || 'wk-one');
+    const cursor = cursors.get(openKfId) || '';
     const next = `${cursor}-${String(raw.msgid)}`;
     const result = store.ingestSyncPage({
-      openKfId: 'wk-one', expectedCursor: cursor, nextCursor: next,
-      messages: [normalizeWecomMessage(raw, 'wk-one', { cursor, index: 0 })],
+      openKfId, expectedCursor: cursor, nextCursor: next,
+      messages: [normalizeWecomMessage(raw, openKfId, { cursor, index: 0 })],
     });
-    cursor = next;
+    cursors.set(openKfId, next);
     const key = result.insertedMessageKeys[0];
     if (!key) throw new Error('Expected inserted gate message');
     return key;
@@ -174,6 +176,50 @@ test('unsupported message resets unauthorized trigger progress without Codex or 
   assert.equal(harness.store.getAuthorization('wm-one')?.consecutiveMatches, 2);
   assert.equal(harness.inputs.length, 0);
   assert.equal(harness.downloads.length, 0);
+});
+
+test('authorization won by another conversation continues the current message', async (t) => {
+  const harness = await createHarness(
+    t,
+    async (input) => immediate(input),
+    async () => [],
+    [],
+  );
+  for (let index = 1; index <= 3; index += 1) {
+    const messageKey = harness.ingest(customer(`auth-${index}`, '发车', {
+      open_kfid: 'wk-auth',
+    }));
+    const result = harness.store.evaluateAuthorization({
+      messageKey,
+      openKfId: 'wk-auth',
+      externalUserId: 'wm-one',
+      isTrigger: true,
+      requiredConsecutive: 3,
+    });
+    assert.equal(
+      result.decision,
+      index === 3 ? 'authorized_now' : 'blocked',
+    );
+  }
+
+  const target = harness.ingest(customer('authorization-race', '继续处理', {
+    open_kfid: 'wk-race',
+  }));
+  const getAuthorization = harness.store.getAuthorization.bind(harness.store);
+  let staleRead = true;
+  harness.store.getAuthorization = (externalUserId: string) => {
+    if (staleRead) {
+      staleRead = false;
+      return undefined;
+    }
+    return getAuthorization(externalUserId);
+  };
+
+  await harness.processor.enqueue(target);
+  await harness.processor.waitForIdle();
+  assert.equal(harness.inputs.length, 1);
+  assert.equal(harness.inputs[0]?.message.messageKey, target);
+  assert.equal(harness.store.getInbound(target)?.status, 'completed');
 });
 
 test('media download failure leaves received input recoverable and never starts Codex', async (t) => {

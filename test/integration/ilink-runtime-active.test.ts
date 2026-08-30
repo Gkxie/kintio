@@ -129,6 +129,19 @@ async function fixture(t: TestContext) {
 test('active runtime restores encrypted iLink listeners, commits and enqueues, routes MCP sends, and shuts down', async (t) => {
   const { temp, config, accounts } = await fixture(t);
   const reader = temp.open({ readOnly: true });
+  let readerClosed = false;
+  const closeReader = () => {
+    if (readerClosed) return;
+    readerClosed = true;
+    try {
+      reader.close();
+    } catch (error: unknown) {
+      if (
+        typeof error !== 'object' || error === null ||
+        !('code' in error) || error.code !== 'ERR_INVALID_STATE'
+      ) throw error;
+    }
+  };
   const rawAccountSecrets = reader.prepare(`
     SELECT nonce, ciphertext, auth_tag FROM ilink_account_secrets
     ORDER BY account_key
@@ -245,6 +258,7 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
   const app = createApp({ config, logger, runtime });
   let shutDown = false;
   t.onTestFinished(async () => {
+    closeReader();
     for (const submission of submissions) {
       submission.completion.reject(new Error('active runtime test cleanup'));
     }
@@ -392,6 +406,7 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     (row) => row.status === 'accepted' && row.channel === 'weixin_ilink',
   ));
 
+  closeReader();
   runtime.stopAccepting();
   assert.equal(
     (await app.request('/mcp/ilink', { method: 'POST' })).status,

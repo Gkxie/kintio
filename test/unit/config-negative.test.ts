@@ -102,6 +102,7 @@ test('HTTP MCP URL and bearer token fail closed', () => {
     ...base,
     WECOM_CORP_ID: 'ww-test',
     WECOM_KF_SECRET: 'secret',
+    ILINK_ENABLED: 'false',
   };
   for (const token of ['', 'short', 'a'.repeat(129), `${'a'.repeat(31)}!`]) {
     assert.throws(
@@ -113,6 +114,7 @@ test('HTTP MCP URL and bearer token fail closed', () => {
     'not-a-url',
     'ftp://example.com/mcp',
     'https://user:pass@example.com/mcp',
+    'https://example.com/mcp?token=leaked',
     'https://example.com/mcp#fragment',
     'http://example.com/mcp',
     'http://192.168.1.20/mcp',

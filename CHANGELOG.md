@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Made iLink activation explicit with `ILINK_ENABLED=true`, fixed an
+  authorization race that could defer an already-authorized message until
+  restart, and stopped opt-in tests and low-level Codex processes from
+  inheriting unrelated deployment credentials
+  ([#14](https://github.com/Gkxie/kintio/issues/14)).
 - Replaced the custom CLA parser and ledger writer with the immutable,
   SHA-pinned CLA Assistant Lite workflow used by OpenAI Codex, while retaining
   public signature records in the protected `cla-signatures` branch

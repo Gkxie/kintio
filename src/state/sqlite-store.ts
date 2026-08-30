@@ -85,9 +85,7 @@ export interface AuthorizationRecord {
 }
 
 export interface AuthorizationEvaluation {
-  allowed: boolean;
-  newlyAuthorized: boolean;
-  duplicate: boolean;
+  decision: 'blocked' | 'authorized_now' | 'already_authorized' | 'duplicate';
   consecutiveMatches: number;
 }
 
@@ -2541,25 +2539,19 @@ export class SqliteStore {
       const current = this.getAuthorization(externalUserId);
       if (current?.authorized && current.lastMessageKey === messageKey) {
         return {
-          allowed: false,
-          newlyAuthorized: false,
-          duplicate: true,
+          decision: 'duplicate',
           consecutiveMatches: current.consecutiveMatches,
         };
       }
       if (current?.authorized) {
         return {
-          allowed: true,
-          newlyAuthorized: false,
-          duplicate: false,
+          decision: 'already_authorized',
           consecutiveMatches: current.consecutiveMatches,
         };
       }
       if (current?.lastMessageKey === messageKey) {
         return {
-          allowed: false,
-          newlyAuthorized: false,
-          duplicate: true,
+          decision: 'duplicate',
           consecutiveMatches: current.consecutiveMatches,
         };
       }
@@ -2631,9 +2623,7 @@ export class SqliteStore {
       }
 
       return {
-        allowed: false,
-        newlyAuthorized,
-        duplicate: false,
+        decision: newlyAuthorized ? 'authorized_now' : 'blocked',
         consecutiveMatches,
       };
     });

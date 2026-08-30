@@ -280,7 +280,12 @@ export function createConfig(
   }
 
   const apiEnabled = Boolean(corpId && kfSecret);
-  const ilinkEnabled = parseBoolean(environment.ILINK_ENABLED, apiEnabled);
+  if (apiEnabled && !String(environment.ILINK_ENABLED ?? '').trim()) {
+    throw new Error(
+      'ILINK_ENABLED must be explicitly true or false when WeChat KF API is enabled',
+    );
+  }
+  const ilinkEnabled = parseBoolean(environment.ILINK_ENABLED, false);
   const codexEnabled = parseBoolean(
     environment.CODEX_ENABLED,
     apiEnabled || ilinkEnabled,
@@ -318,9 +323,11 @@ export function createConfig(
   }
   if (
     !['http:', 'https:'].includes(mcpUrl.protocol) ||
-    mcpUrl.username || mcpUrl.password || mcpUrl.hash
+    mcpUrl.username || mcpUrl.password || mcpUrl.search || mcpUrl.hash
   ) {
-    throw new Error('KINTIO_MCP_URL must be an HTTP(S) URL without credentials or hash');
+    throw new Error(
+      'KINTIO_MCP_URL must be an HTTP(S) URL without credentials, query, or hash',
+    );
   }
   if (
     mcpUrl.protocol === 'http:' &&
@@ -468,7 +475,7 @@ export function loadConfig(
     root?: string;
   } = {},
 ): AppConfig {
-  const environment = options.environment || process.env;
+  const environment = { ...(options.environment || process.env) };
   const configuredEnvFile = options.envFile || environment.KINTIO_CONFIG_FILE;
   const initialRoot = path.resolve(
     options.root ||

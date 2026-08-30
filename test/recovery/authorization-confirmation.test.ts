@@ -177,7 +177,7 @@ function seedAuthorizationPrelude(store: SqliteStore, suffix: string): string {
         confirmationText,
       });
       assert.equal(result.consecutiveMatches, index);
-      assert.equal(result.newlyAuthorized, false);
+      assert.equal(result.decision, 'blocked');
     }
   }
   return stableMessageKey(openKfId, `${suffix}-3`);

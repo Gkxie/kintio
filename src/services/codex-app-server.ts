@@ -234,10 +234,7 @@ export class CodexAppServer implements CodexBoundary {
       .flatMap((value) => ['--config', value]);
     const command = this.#options.codexPathOverride || 'codex';
     const argumentsList = ['app-server', '--stdio', ...configArguments];
-    const childEnvironment: NodeJS.ProcessEnv = this.#options.env
-      ? { ...this.#options.env }
-      : { ...process.env };
-    childEnvironment.CODEX_INTERNAL_ORIGINATOR_OVERRIDE ||= 'kintio_app_server';
+    const childEnvironment: NodeJS.ProcessEnv = { ...(this.#options.env || {}) };
     const child = this.#options.spawnProcess(command, argumentsList, {
       env: childEnvironment,
       stdio: ['pipe', 'pipe', 'pipe'],

@@ -38,7 +38,6 @@ import { WecomApiClient } from '../../src/services/wecom-api.ts';
 import { SqliteStore, type AttemptRecord } from '../../src/state/sqlite-store.ts';
 import type { ResolvedImage } from '../../src/types.ts';
 
-process.loadEnvFile?.('.env');
 if (process.env.RUN_REAL_CODEX !== '1') {
   throw new Error('Set RUN_REAL_CODEX=1 to run the real Codex opt-in test');
 }
