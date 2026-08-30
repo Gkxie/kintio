@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1024" viewBox="0 0 720 1024">
+  <!-- The runtime composites a real QR matrix into the blank 480 × 480 region. -->
+  <defs>
+    <filter id="qr-shadow" x="-15%" y="-15%" width="130%" height="135%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#163621" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+
+  <g transform="translate(72 64)">
+    <rect width="52" height="52" rx="16" fill="#16B86A"/>
+    <path d="M20.5 31.5l-3 3a6 6 0 01-8.5-8.5l6-6a6 6 0 018.5 0" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round"/>
+    <path d="M31.5 20.5l3-3a6 6 0 018.5 8.5l-6 6a6 6 0 01-8.5 0" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round"/>
+    <path d="M20 32l12-12" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round"/>
+  </g>
+
+  <text x="144" y="89" fill="#111814" font-family="Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="36" font-weight="700">连接 Kintio</text>
+  <text x="144" y="121" fill="#6B756D" font-family="Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="19">使用 WeChat iLink 协议</text>
+  <text x="72" y="176" fill="#4F5C53" font-family="Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="23">使用微信扫描下方二维码</text>
+
+  <rect x="120" y="220" width="480" height="480" rx="30" fill="#FFFFFF" stroke="#E1E9E3" stroke-width="2" filter="url(#qr-shadow)"/>
+  <path d="M120 272v-22a30 30 0 0130-30h22" fill="none" stroke="#16B86A" stroke-width="4" stroke-linecap="round"/>
+  <path d="M548 220h22a30 30 0 0130 30v22" fill="none" stroke="#16B86A" stroke-width="4" stroke-linecap="round"/>
+
+  <text x="360" y="766" text-anchor="middle" fill="#111814" font-family="Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="31" font-weight="700">微信扫码，连接你的 AI</text>
+  <text x="360" y="806" text-anchor="middle" fill="#707B73" font-family="Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="20">扫码成功后可在微信中直接开始对话</text>
+
+  <rect x="72" y="842" width="576" height="112" rx="24" fill="#EFF9F3"/>
+  <g transform="translate(98 870)">
+    <circle cx="22" cy="22" r="21" fill="#DDF3E7"/>
+    <circle cx="22" cy="22" r="11" fill="none" stroke="#138A55" stroke-width="2.5"/>
+    <path d="M22 16v7l5 3" fill="none" stroke="#138A55" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="154" y="888" fill="#08784C" font-family="Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="24" font-weight="700">二维码 5 分钟内有效</text>
+  <text x="154" y="924" fill="#526D5C" font-family="Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif" font-size="18">过期后可重新获取 · 未扫码不会建立连接</text>
+</svg>

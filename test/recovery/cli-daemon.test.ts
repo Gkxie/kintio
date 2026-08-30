@@ -93,6 +93,7 @@ test('built global CLI owns one isolated PM2 daemon lifecycle', async (t) => {
   await Promise.all([
     fs.cp('src', path.join(packageRoot, 'src'), { recursive: true }),
     fs.cp('bin', path.join(packageRoot, 'bin'), { recursive: true }),
+    fs.cp('assets', path.join(packageRoot, 'assets'), { recursive: true }),
     fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), {
       recursive: true,
     }),
@@ -145,6 +146,7 @@ test('built global CLI owns one isolated PM2 daemon lifecycle', async (t) => {
     'dist/cli.js',
     'bin/kintio.js',
     'dist/index.js',
+    'assets/ilink-login-card.png',
     '.env.example',
     'ecosystem.config.cjs',
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
