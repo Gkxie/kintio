@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "claVersion": "1.0",
+  "repositoryId": 1351029736,
+  "githubUserId": 27680715,
+  "githubLogin": "Gkxie",
+  "claSha256": "3518c68da1ac583516a62b5ee1af825c58bd25fc4ec8696318b6188c89305891",
+  "claCommit": "c50df4fd94c12380a2c02abbf57c7ec08e74b96a",
+  "claUrl": "https://github.com/Gkxie/kintio/blob/c50df4fd94c12380a2c02abbf57c7ec08e74b96a/CLA.md",
+  "signedAt": "2026-08-30T10:16:30Z",
+  "commentId": 5468089301,
+  "commentUrl": "https://github.com/Gkxie/kintio/pull/5#issuecomment-5468089301",
+  "pullRequest": 5
+}
