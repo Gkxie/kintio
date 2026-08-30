@@ -256,8 +256,8 @@ test('app-server isolates an explicit provider key from its config arguments', a
     providerApiKey,
   );
   assert.equal(
-    providerApiKeyEnv in (captures[1]?.env || {}),
-    false,
+    captures[1]?.env[providerApiKeyEnv],
+    providerApiKey,
   );
   assert.equal(captures[0]?.env.KINTIO_MCP_BEARER_TOKEN, 'test-bearer-token');
   assert.ok(captures[0]?.args.includes('model_provider="kintio_proxy"'));

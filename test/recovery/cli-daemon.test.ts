@@ -106,11 +106,7 @@ test('built global CLI owns one isolated PM2 daemon lifecycle', async (t) => {
     fs.symlink(path.resolve('node_modules'), path.join(packageRoot, 'node_modules')),
   ]);
   const port = await availablePort();
-  const environment: NodeJS.ProcessEnv = {
-    ...process.env,
-    PORT: String(port),
-    CODEX_ENABLED: 'false',
-  };
+  const environment: NodeJS.ProcessEnv = { ...process.env };
   const directPm2Environment = { ...environment, PM2_HOME: pm2Home };
   const pm2Script = path.join(packageRoot, 'node_modules/pm2/bin/pm2');
   t.onTestFinished(async () => {

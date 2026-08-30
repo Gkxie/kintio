@@ -135,7 +135,11 @@ test('start validates the instance and delegates one background process to PM2',
     HOME: root,
     PATH: process.env.PATH,
     HTTPS_PROXY: 'http://proxy.example:8080',
-    SENSITIVE_UNRELATED_SECRET: 'must-not-reach-pm2',
+    AGENT_HOST_CANARY: 'host-environment-reaches-agent-runtime',
+    KINTIO_HOME: path.join(root, 'stale-home'),
+    KINTIO_CONFIG_FILE: path.join(root, 'stale.env'),
+    NODE_ENV: 'stale-node-env',
+    KINTIO_KILL_TIMEOUT_MS: '99999',
   };
 
   assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
@@ -151,9 +155,13 @@ test('start validates the instance and delegates one background process to PM2',
   assert.equal(requests[1]?.env.PM2_HOME, path.join(home, 'data/pm2'));
   assert.equal(requests[1]?.env.NODE_ENV, 'production');
   assert.equal(requests[1]?.env.KINTIO_KILL_TIMEOUT_MS, '17000');
+  assert.equal(requests[1]?.env.NODE_ENV, 'production');
   assert.equal(requests[1]?.env.HOME, root);
   assert.equal(requests[1]?.env.HTTPS_PROXY, 'http://proxy.example:8080');
-  assert.equal(requests[1]?.env.SENSITIVE_UNRELATED_SECRET, undefined);
+  assert.equal(
+    requests[1]?.env.AGENT_HOST_CANARY,
+    'host-environment-reaches-agent-runtime',
+  );
   assert.match(requests[1]?.env.KINTIO_START_TOKEN || '', /^[A-Za-z0-9_-]{43}$/u);
   assert.ok((requests[0]?.timeoutMs || 0) > 0);
   assert.ok((requests[1]?.timeoutMs || 0) > 0);

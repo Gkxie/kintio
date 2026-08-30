@@ -58,7 +58,6 @@ jobs:
           CODEX_WEB_SEARCH_MODE: disabled
           KINTIO_CI_API_KEY: ${{ secrets.KINTIO_CI_API_KEY }}
           KINTIO_CI_BASE_URL: ${{ vars.KINTIO_CI_BASE_URL }}
-          REAL_CODEX_CONCURRENCY: 1
           RUN_REAL_CODEX: 1
         run: >-
           pnpm exec vitest run

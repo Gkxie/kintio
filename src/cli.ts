@@ -80,36 +80,6 @@ Options:
   -v, --version          Show the Kintio version
 `;
 
-const HOST_ENVIRONMENT_KEYS = [
-  'HOME',
-  'USER',
-  'LOGNAME',
-  'PATH',
-  'SHELL',
-  'LANG',
-  'LC_ALL',
-  'LC_CTYPE',
-  'TZ',
-  'CODEX_HOME',
-  'XDG_CONFIG_HOME',
-  'XDG_DATA_HOME',
-  'XDG_CACHE_HOME',
-  'PM2_HOME',
-  'KINTIO_START_TIMEOUT_MS',
-  'NODE_EXTRA_CA_CERTS',
-  'SSL_CERT_FILE',
-  'SSL_CERT_DIR',
-  'HTTP_PROXY',
-  'HTTPS_PROXY',
-  'ALL_PROXY',
-  'NO_PROXY',
-  'http_proxy',
-  'https_proxy',
-  'all_proxy',
-  'no_proxy',
-  'NODE_USE_ENV_PROXY',
-] as const;
-
 function defaultExecute(request: ProcessRequest): Promise<ProcessResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(request.file, [...request.args], {
@@ -164,19 +134,11 @@ function resolveInputPath(value: string, cwd: string): string {
   return path.resolve(cwd, value);
 }
 
-function hostEnvironment(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  return Object.fromEntries(
-    HOST_ENVIRONMENT_KEYS.flatMap((name) =>
-      environment[name] === undefined ? [] : [[name, environment[name]]]
-    ),
-  );
-}
-
 function lifecycleEnvironment(
   location: InstanceLocation,
   runtime: CliRuntime,
 ): NodeJS.ProcessEnv {
-  const environment = hostEnvironment(runtime.env);
+  const environment = { ...runtime.env };
   if (!environment.PM2_HOME) {
     assertTrustedDirectory(
       ensurePrivateDirectory(location.home),
@@ -438,7 +400,7 @@ function processEnvironment(
   assertTrustedDirectory(path.dirname(location.configFile), 'Kintio config directory', false);
   prepareDirectories(location.home);
   const environment: NodeJS.ProcessEnv = {
-    ...hostEnvironment(runtime.env),
+    ...runtime.env,
     KINTIO_HOME: location.home,
     KINTIO_CONFIG_FILE: location.configFile,
     NODE_ENV: 'production',
@@ -459,8 +421,8 @@ function backgroundEnvironment(
   runtime: CliRuntime,
 ): NodeJS.ProcessEnv {
   return {
-    ...processEnvironment(location, runtime),
     ...lifecycleEnvironment(location, runtime),
+    ...processEnvironment(location, runtime),
   };
 }
 

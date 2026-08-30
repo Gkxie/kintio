@@ -16,7 +16,10 @@ jobs:
       (
         (
           github.event_name == 'pull_request_target' &&
-          (github.event.action == 'closed' || github.event.pull_request.draft == false)
+          (
+            (github.event.action == 'closed' && github.event.pull_request.merged == true) ||
+            (github.event.action != 'closed' && github.event.pull_request.draft == false)
+          )
         ) ||
         (
           github.event_name == 'issue_comment' &&
@@ -72,7 +75,7 @@ jobs:
               if (!pullRequest.author.databaseId || !authorIds.has(pullRequest.author.databaseId)) {
                 throw new Error("The pull request opener must be a primary commit author for CLA verification");
               }
-            } else if (!["dependabot[bot]", "dependabot", "renovate[bot]", "renovate"].includes(pullRequest.author?.login)) {
+            } else if (!["dependabot[bot]", "dependabot"].includes(pullRequest.author?.login)) {
               throw new Error("Only approved dependency bots may open a CLA-exempt pull request");
             }
             if (commits.nodes.some((entry) => /^Co-authored-by:/imu.test(entry.commit.message))) {
@@ -99,6 +102,6 @@ jobs:
           path-to-document: https://github.com/Gkxie/kintio/blob/cla-v1.1/CLA.md
           path-to-signatures: signatures/v1.1/cla.json
           branch: cla-signatures
-          allowlist: dependabot[bot],renovate[bot]
+          allowlist: dependabot[bot]
           custom-pr-sign-comment: I have read the Kintio CLA v1.1 and I hereby sign it
           lock-pullrequest-aftermerge: true

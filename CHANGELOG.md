@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Removed duplicate post-merge CI, coverage artifact round trips, redundant
+  registry audits, and brittle repository-policy snapshots; retained the
+  executable security boundaries and made Agent subprocesses inherit the host
+  environment without copying Kintio configuration-file values into it
+  ([#16](https://github.com/Gkxie/kintio/issues/16)).
 - Made iLink activation explicit with `ILINK_ENABLED=true`, fixed an
   authorization race that could defer an already-authorized message until
   restart, and stopped opt-in tests and low-level Codex processes from

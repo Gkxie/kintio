@@ -146,22 +146,6 @@ function asRecord(value: unknown): JsonRecord | undefined {
     : undefined;
 }
 
-function codexEnvironment(extra: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH ||
-      `${path.dirname(process.execPath)}:/usr/local/bin:/usr/bin:/bin`,
-  };
-  for (const name of [
-    'HOME', 'CODEX_HOME', 'XDG_CONFIG_HOME', 'USER', 'LOGNAME',
-    'LANG', 'LC_ALL',
-    'SSL_CERT_FILE', 'SSL_CERT_DIR', 'HTTP_PROXY', 'HTTPS_PROXY',
-    'ALL_PROXY', 'NO_PROXY',
-  ]) {
-    if (process.env[name]) environment[name] = process.env[name];
-  }
-  return { ...environment, ...extra };
-}
-
 function modelProvider(
   provider: ModelProviderOptions | undefined,
 ): {
@@ -270,10 +254,11 @@ export function createCodexAppServer(
   ];
   return new CodexAppServer({
     ...(config.pathOverride ? { codexPathOverride: config.pathOverride } : {}),
-    env: codexEnvironment({
+    env: {
+      ...process.env,
       ...provider.environment,
       KINTIO_MCP_BEARER_TOKEN: options.mcpBearerToken,
-    }),
+    },
     configOverrides: overrides,
     ...(options.spawnProcess ? { spawnProcess: options.spawnProcess } : {}),
     ...(options.logger ? { logger: options.logger } : {}),

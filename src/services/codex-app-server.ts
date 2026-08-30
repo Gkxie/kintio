@@ -234,7 +234,9 @@ export class CodexAppServer implements CodexBoundary {
       .flatMap((value) => ['--config', value]);
     const command = this.#options.codexPathOverride || 'codex';
     const argumentsList = ['app-server', '--stdio', ...configArguments];
-    const childEnvironment: NodeJS.ProcessEnv = { ...(this.#options.env || {}) };
+    const childEnvironment: NodeJS.ProcessEnv = {
+      ...(this.#options.env || process.env),
+    };
     const child = this.#options.spawnProcess(command, argumentsList, {
       env: childEnvironment,
       stdio: ['pipe', 'pipe', 'pipe'],
