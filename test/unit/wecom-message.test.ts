@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 
 import {
-  CUSTOMER_MESSAGE_TYPES,
-  MESSAGE_ORIGINS,
   MESSAGE_TYPES,
-  isSupportedCustomerMessage,
   normalizeWecomMessage,
-  renderMessageForCodex,
 } from '../../src/domain/wecom-message.ts';
+import {
+  MESSAGE_ORIGINS,
+  isProcessableCustomerMessage,
+  renderMessageForAgent,
+} from '../../src/domain/message.ts';
 
 type FixturePayload = Record<string, unknown>;
 type MessageFixture = readonly [msgtype: string, payload: FixturePayload];
@@ -127,7 +128,11 @@ const fixtures: readonly MessageFixture[] = [
 ];
 
 test('normalizes every known customer type with stable sync metadata', () => {
-  assert.equal(fixtures.length, CUSTOMER_MESSAGE_TYPES.length);
+  assert.deepEqual(
+    fixtures.map(([type]) => type),
+    Object.values(MESSAGE_TYPES).filter((type) =>
+      type !== MESSAGE_TYPES.EVENT && type !== MESSAGE_TYPES.UNKNOWN),
+  );
   for (const [index, [msgtype, payload]] of fixtures.entries()) {
     const message = normalizeWecomMessage(
       { ...base, msgtype, ...payload },
@@ -141,8 +146,8 @@ test('normalizes every known customer type with stable sync metadata', () => {
     assert.equal(message.conversation.accountKey, 'wk-one');
     assert.equal(message.conversation.peerId, 'wm-one');
     assert.deepEqual(message.sync, { cursor: 'cursor-one', index });
-    assert.ok(renderMessageForCodex(message).length > 0, msgtype);
-    assert.equal(isSupportedCustomerMessage(message), true);
+    assert.ok(renderMessageForAgent(message).length > 0, msgtype);
+    assert.equal(isProcessableCustomerMessage(message), true);
   }
 });
 
@@ -277,5 +282,5 @@ test('normalizes system events and rejects unknown customer types from support',
   });
   assert.equal(unknown.type, MESSAGE_TYPES.UNKNOWN);
   assert.equal(unknown.rawType, 'future_type');
-  assert.equal(isSupportedCustomerMessage(unknown), false);
+  assert.equal(isProcessableCustomerMessage(unknown), false);
 });

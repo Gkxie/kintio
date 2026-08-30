@@ -2941,6 +2941,7 @@ export class SqliteStore {
       const accepted = this.#finishSending(attemptId, 'accepted', {
         wecomMsgId: acceptedMessageId,
       });
+      if (accepted.channel !== 'wechat_kf') return accepted;
       const failure = rowAs<{ fail_type: number }>(this.database.prepare(`
         SELECT fail_type FROM delivery_failures WHERE wecom_msgid = ?
       `).get(acceptedMessageId));
@@ -3008,7 +3009,8 @@ export class SqliteStore {
       const current = rowAs<AttemptRow>(this.database
         .prepare(`
           SELECT * FROM send_attempts
-          WHERE wecom_msgid = ? AND status = 'accepted'
+          WHERE channel = 'wechat_kf'
+            AND wecom_msgid = ? AND status = 'accepted'
           ORDER BY updated_at DESC LIMIT 1
         `)
         .get(messageId));

@@ -77,6 +77,7 @@ async function createHarness(
       readonly requiredConsecutive?: number;
       readonly confirmationText?: string;
     };
+    readonly onSend?: () => void | Promise<void>;
   },
 ): Promise<Harness> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'message-flow-'));
@@ -98,6 +99,7 @@ async function createHarness(
     apiClient: {
       async sendPreparedMessage(input) {
         sent.push(input);
+        await options.onSend?.();
         return { msgid: `wecom-${sent.length}` };
       },
     },
@@ -214,7 +216,9 @@ test('unauthorized image does zero work; third trigger confirms and authorizatio
 test('start plus steer executes one latest-direction reply', async (t) => {
   const completion = deferred<SimulatedAgentCompletion>();
   let primary = '';
+  let damageOnSend = (): void => undefined;
   const harness = await createHarness(t, {
+    onSend: () => damageOnSend(),
     allowedUserIds: ['wm-one'],
     createAgent: (store) => statefulFakeAgent(store, (input) => {
       if (input.mode === 'start') {
@@ -232,6 +236,17 @@ test('start plus steer executes one latest-direction reply', async (t) => {
   const steerKey = harness.ingest(customer('steer', '只说三个景点', { send_time: 101 }));
   await harness.processor.enqueue(primaryKey);
   await harness.processor.enqueue(steerKey);
+  let damagedKey = '';
+  damageOnSend = () => {
+    damagedKey = harness.ingest(customer('damaged-followup', '损坏消息', {
+      send_time: 102,
+    }));
+    harness.store.database.prepare(`
+      UPDATE inbound_messages
+      SET payload_json = json_set(payload_json, '$.conversation.channel', 'weixin_ilink')
+      WHERE message_key = ?
+    `).run(damagedKey);
+  };
   completion.resolve({
     replies: [{ type: 'text', content: '故宫、长城、云冈石窟。' }],
   });
@@ -239,6 +254,7 @@ test('start plus steer executes one latest-direction reply', async (t) => {
   assert.equal(harness.sent.length, 1);
   assert.equal(harness.store.getInbound(primaryKey)?.status, 'completed');
   assert.equal(harness.store.getInbound(steerKey)?.status, 'absorbed');
+  assert.equal(harness.store.getInbound(damagedKey)?.status, 'ignored');
 });
 
 test('recovery keeps an old primary and newer unlinked message independent', async (t) => {

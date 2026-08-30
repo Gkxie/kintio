@@ -3,10 +3,12 @@ import { test } from 'vitest';
 
 import {
   MESSAGE_TYPES,
-  isSupportedCustomerMessage,
   normalizeWecomMessage,
-  renderMessageForCodex,
 } from '../../src/domain/wecom-message.ts';
+import {
+  isProcessableCustomerMessage,
+  renderMessageForAgent,
+} from '../../src/domain/message.ts';
 
 function customer(msgtype: string, section: unknown = undefined) {
   return normalizeWecomMessage({
@@ -22,8 +24,8 @@ function customer(msgtype: string, section: unknown = undefined) {
 test('malformed and unknown payloads produce explicit safe summaries', () => {
   const empty = normalizeWecomMessage(null);
   assert.equal(empty.type, MESSAGE_TYPES.UNKNOWN);
-  assert.equal(isSupportedCustomerMessage(empty), false);
-  assert.match(renderMessageForCodex(empty), /content not parsed/u);
+  assert.equal(isProcessableCustomerMessage(empty), false);
+  assert.match(renderMessageForAgent(empty), /content not parsed/u);
 
   const primitive = normalizeWecomMessage('not-an-object');
   assert.equal(primitive.origin, 'unknown');
@@ -31,7 +33,7 @@ test('malformed and unknown payloads produce explicit safe summaries', () => {
 
   const unknown = customer('future_type', { future_type: { secret: 'x' } });
   assert.equal(unknown.type, MESSAGE_TYPES.UNKNOWN);
-  assert.equal(isSupportedCustomerMessage(unknown), false);
+  assert.equal(isProcessableCustomerMessage(unknown), false);
   assert.doesNotMatch(unknown.summary, /secret/u);
 });
 

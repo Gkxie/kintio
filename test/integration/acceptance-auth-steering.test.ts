@@ -6,7 +6,7 @@ import { describe, test } from 'vitest';
 import type { TestContext } from 'vitest';
 
 import {
-  CUSTOMER_MESSAGE_TYPES,
+  MESSAGE_TYPES,
   normalizeWecomMessage,
 } from '../../src/domain/wecom-message.ts';
 import {
@@ -296,7 +296,9 @@ test('every known unauthorized customer type is silent before Codex and media wo
   });
   const keys: string[] = [];
 
-  for (const [index, type] of CUSTOMER_MESSAGE_TYPES.entries()) {
+  const customerTypes = Object.values(MESSAGE_TYPES).filter((type) =>
+    type !== MESSAGE_TYPES.EVENT && type !== MESSAGE_TYPES.UNKNOWN);
+  for (const [index, type] of customerTypes.entries()) {
     const key = await harness.process(
       rawCustomer({
         msgid: `unauthorized-${type}-${index}`,
