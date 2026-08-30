@@ -6,16 +6,32 @@ observable problem, then decide whether it requires a code change.
 
 Follow the [Code of Conduct](CODE_OF_CONDUCT.md) in discussions and reviews.
 
-## Human accountability
+## Choose a workflow
 
-Before starting a feature, behavior, protocol, data, or architecture change, an
-external contributor must comment on the relevant issue and wait for a
-maintainer to confirm the proposed scope. Work on a `help wanted` or `good first
-issue` also requires confirmation; a public label is not approval to start.
-Work explicitly requested by a maintainer in an existing review is exempt.
-Small, obvious documentation and test fixes may start as a pull request.
+Choose the workflow that preserves the reason for the change with the least
+ceremony:
+
+- **Issue-driven workflow:** open or claim an issue when the direction needs
+  discussion, the work needs coordination, or the result spans more than one
+  pull request. An external contributor claiming an existing issue must wait
+  for a maintainer to confirm the proposed scope. Work on a `help wanted` or
+  `good first issue` also requires confirmation; a public label is not approval
+  to start.
+- **Direct pull request workflow:** start with a pull request when the problem,
+  boundary, and solution are already clear enough to review as one change. The
+  PR itself must preserve the motivation, observable result, verification, and
+  compatibility impact. Do not create a retrospective issue only to satisfy a
+  form field.
+
+These workflows apply equally to maintainers, contributors with write access,
+local Agent-assisted work, and external contributors. A maintainer may redirect
+a direct PR to an issue or Discussion when consensus or scope discovery is
+still required. Work explicitly requested in an existing review may link that
+review instead.
 External contributors may keep at most one pull request open, including drafts,
 unless a maintainer grants an exception.
+
+## Human accountability
 
 AI-assisted contributions are welcome when a human actively directs and reviews
 the work. Disclose any material use of generative AI or an automated agent,
@@ -161,9 +177,9 @@ and the complete deterministic test suite. Live Codex or channel-adapter tests
 run only when a maintainer supplies a dedicated target and an explicit
 allowlist. Delete every test Thread after such a run.
 
-Features, behavior changes, protocol changes, data migrations, and architecture
-changes require an issue that establishes direction and the scope confirmation
-described above.
+If the work follows the issue-driven workflow, link the issue and its scope
+confirmation. A direct PR may write `None` for the related issue only when its
+`Why` section contains the complete problem and decision context.
 
 Contributors with repository write access must also follow
 [MAINTAINING.md](MAINTAINING.md).

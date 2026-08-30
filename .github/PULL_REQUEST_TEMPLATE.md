@@ -4,7 +4,7 @@ Describe the original user problem. Use fake IDs and synthetic messages.
 
 ## Related issue
 
-For feature, behavior, protocol, data, architecture, `help wanted`, or `good first issue` work, external contributors must link the issue and the maintainer comment confirming the scope before work began. Maintainer-authored work and small, obvious documentation or test fixes may write `None`; work explicitly requested in an existing review may link that review. Use `Refs #123` in most cases so maintainers can close the issue after a release. Use `Fixes #123` only for repository workflow or documentation changes that take effect when merged.
+Link the issue when this work was discussed, claimed, coordinated, or tracked there. Use `Refs #123` when the issue remains open until release, and `Fixes #123` only when the change takes effect at merge. Work explicitly requested in an existing review may link that review. A self-contained direct PR may write `None`, but its `Why` section must then preserve the complete problem and decision context. Do not create an issue only to satisfy this field. Work claimed from `help wanted` or `good first issue` still requires the maintainer scope confirmation recorded on that issue.
 
 ## Human accountability
 
