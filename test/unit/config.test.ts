@@ -9,6 +9,7 @@ import { parseEnv } from 'node:util';
 
 import {
   createConfig,
+  loadConfig,
   resolveProjectRoot,
   resolveStateFiles,
 } from '../../src/config.ts';
@@ -75,6 +76,40 @@ test('source and compiled config resolve the same project root', () => {
     resolveProjectRoot(pathToFileURL(path.join(root, 'dist/src/config.js')).href),
     root,
   );
+});
+
+test('an instance root owns relative config, state, cache, and workspace paths', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-instance-root-'));
+  t.onTestFinished(() => fs.rm(root, { recursive: true, force: true }));
+  const configFile = path.join(root, 'instance.env');
+  await fs.writeFile(configFile, [
+    'PORT=9123',
+    'KINTIO_DB_FILE=./state/kintio.sqlite',
+    'CODEX_WORKING_DIRECTORY=./workspace',
+    'CODEX_IMAGE_TMP_DIR=./cache/images',
+  ].join('\n'));
+  const environment: NodeJS.ProcessEnv = { PORT: '9234' };
+  const config = loadConfig({ environment, envFile: configFile, root });
+
+  assert.equal(config.port, 9234);
+  assert.equal(config.state.databaseFile, path.join(root, 'state/kintio.sqlite'));
+  assert.equal(config.state.lockFile, path.join(root, 'state/kintio.lock'));
+  assert.equal(config.codex.workingDirectory, path.join(root, 'workspace'));
+  assert.equal(config.codex.imageTempDirectory, path.join(root, 'cache/images'));
+  assert.equal(config.ilink.storageKeyFile, path.join(root, 'state/ilink-storage.key'));
+});
+
+test('KINTIO_CONFIG_FILE selects its directory when no instance root is supplied', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-config-file-'));
+  t.onTestFinished(() => fs.rm(root, { recursive: true, force: true }));
+  const configFile = path.join(root, 'custom.env');
+  await fs.writeFile(configFile, 'CODEX_WORKING_DIRECTORY=./agent-work\n');
+  const config = loadConfig({
+    environment: { KINTIO_CONFIG_FILE: configFile },
+  });
+
+  assert.equal(config.state.databaseFile, path.join(root, 'data/kintio.sqlite'));
+  assert.equal(config.codex.workingDirectory, path.join(root, 'agent-work'));
 });
 
 test('fresh state uses Kintio names while an existing legacy database stays in place', () => {

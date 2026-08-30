@@ -397,4 +397,9 @@ export class WechatKfToolExecutor {
     await this.kick();
     this.#closed = true;
   }
+
+  abort(): void {
+    this.#closed = true;
+    this.#rerun = false;
+  }
 }

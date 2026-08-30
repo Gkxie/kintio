@@ -196,10 +196,14 @@ Kintio uses SemVer and `vX.Y.Z` Git tags. During `0.x`:
   policy.
 
 Kintio is a self-hosted application. `private: true` prevents accidental npm
-publication; the release artifacts are a GitHub Release and its corresponding
-source, not an npm package. Source-only releases carry no uploaded assets. The
-release workflow refuses any pre-existing Release for the tag instead of
-publishing or trusting content that it did not create.
+registry publication. The package manifest still defines the global CLI and an
+explicit file allowlist so a checked-out source tree can be built and installed
+locally without exposing tests, repository automation, or runtime state. Public
+npm publication requires a separate reviewed release design and trusted
+publisher configuration; do not remove the guard merely to test the CLI.
+GitHub releases remain source-only and carry no uploaded assets. The release
+workflow refuses any pre-existing Release for the tag instead of publishing or
+trusting content that it did not create.
 
 ## Publish a release
 

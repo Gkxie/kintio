@@ -122,13 +122,13 @@ test('POST / verifies and accepts an encrypted WeCom event', async () => {
   assert.equal(await response.text(), 'success');
 });
 
-test('POST acknowledges before asynchronously enqueueing message sync', async () => {
+test('POST acknowledges after synchronously registering message sync', async () => {
   const calls: Array<{ callbackToken: string; openKfId: string }> = [];
   const app = createTestApp({
     messageProcessor: {
       enqueue(event: { callbackToken: string; openKfId: string }) {
         calls.push(event);
-        return new Promise<never>(() => {});
+        return true;
       },
     },
   });
@@ -154,6 +154,35 @@ test('POST acknowledges before asynchronously enqueueing message sync', async ()
   assert.deepEqual(calls, [
     { callbackToken: 'callback-sync-token', openKfId: 'wkd-test' },
   ]);
+});
+
+test('POST returns 503 when shutdown rejects sync registration', async () => {
+  const app = createTestApp({
+    messageProcessor: {
+      enqueue() {
+        return false;
+      },
+    },
+  });
+  const event = [
+    '<xml>',
+    '<MsgType><![CDATA[event]]></MsgType>',
+    '<Event><![CDATA[kf_msg_or_event]]></Event>',
+    '<Token><![CDATA[callback-sync-token]]></Token>',
+    '<OpenKfId><![CDATA[wkd-test]]></OpenKfId>',
+    '</xml>',
+  ].join('');
+  const encrypted = encryptMessage(event);
+  const query = createSignedQuery(encrypted);
+
+  const response = await app.request(`/?${query}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/xml' },
+    body: `<xml><Encrypt><![CDATA[${encrypted}]]></Encrypt></xml>`,
+  });
+
+  assert.equal(response.status, 503);
+  assert.equal(await response.text(), 'service unavailable');
 });
 
 test('POST rejects request bodies larger than one MiB', async () => {

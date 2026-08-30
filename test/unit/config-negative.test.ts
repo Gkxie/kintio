@@ -61,15 +61,23 @@ test('positive integer settings reject zero fractions and non-numbers', () => {
     WECOM_API_TIMEOUT_MS: '1',
     WECOM_MCP_OBSERVE_MS: '1',
     WECOM_AUTH_TRIGGER_COUNT: '1',
-    SHUTDOWN_TIMEOUT_MS: '1',
+    SHUTDOWN_TIMEOUT_MS: '1000',
   });
   assert.equal(config.wecom.api.timeoutMs, 1);
   assert.equal(config.wecom.api.observeMs, 1);
   assert.equal(config.wecom.authorization.requiredConsecutive, 1);
-  assert.equal(config.state.shutdownTimeoutMs, 1);
+  assert.equal(config.state.shutdownTimeoutMs, 1000);
   assert.throws(
     () => createConfig({ ...base, WECOM_MCP_OBSERVE_MS: '20001' }),
     /WECOM_MCP_OBSERVE_MS must not exceed 20000/u,
+  );
+  assert.throws(
+    () => createConfig({ ...base, SHUTDOWN_TIMEOUT_MS: '120001' }),
+    /SHUTDOWN_TIMEOUT_MS must not exceed 120000/u,
+  );
+  assert.throws(
+    () => createConfig({ ...base, SHUTDOWN_TIMEOUT_MS: '999' }),
+    /SHUTDOWN_TIMEOUT_MS must be at least 1000/u,
   );
 });
 

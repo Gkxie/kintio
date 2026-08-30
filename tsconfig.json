@@ -28,6 +28,7 @@
     "types": ["node"]
   },
   "include": [
+    "cli.ts",
     "index.ts",
     "src/**/*.ts"
   ],

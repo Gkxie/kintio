@@ -19,6 +19,8 @@
 - 每个适配器身份使用独立 Agent Thread，不跨通道合并身份或历史。
 - 用户补充指令时可以调整正在执行的任务，避免旧指令排队产生过时回复。
 - SQLite Inbox 支持重启恢复，并优先处理实时消息。
+- 应用 Supervisor 统一管理 HTTP 回调、轮询监听和未来长连接通道；Hono 只是 HTTP 适配器，
+  不是进程生命周期入口。
 - MCP 动作只作用于当前会话，不向 Agent 暴露渠道密钥、原始用户标识或数据库路径。
 - 投递结果明确区分已受理、失败和不确定；结果不确定时不会盲目重发。
 
@@ -38,29 +40,38 @@
 受支持适配器的凭据。
 
 ```bash
+git clone https://github.com/Gkxie/kintio.git
+cd kintio
 corepack enable pnpm
 pnpm install --frozen-lockfile
-cp .env.example .env
+pnpm run build
+npm install --global .
+kintio setup
 codex login status
 ```
 
-`.env.example` 默认不启用任何适配器。请按英文[部署指南](docs/setup.md)生成强 MCP Token，
-并配置 WeChat KF API，或为已有 Weixin iLink 绑定设置 `ILINK_ENABLED=true`。
+`kintio setup` 会在 `~/.kintio` 创建私有实例目录、安装内置 Agent Skill，并生成权限为
+`0600`、已经包含强 MCP Token 的 `.env`。默认不启用任何适配器；请按英文
+[部署指南](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)配置 WeChat KF API，或为已有 Weixin iLink 绑定设置
+`ILINK_ENABLED=true`。
 
 ```bash
-pnpm start
+kintio start
+kintio status
+kintio logs --lines 100
 ```
 
 启动成功后会输出 `Hono server is listening on port 8888`；投入使用前仍需按部署
-指南完成回调或绑定验证。
+指南完成回调或绑定验证。需要前台进程时使用 `kintio run`；现有源码目录部署可以在完成
+部署指南中的一次性进程管理器迁移后，继续使用原数据库和配置。
 
 ## 英文文档
 
-- [Setup guide](docs/setup.md)：配置到收到第一条 Agent 回复。
-- [Architecture](docs/architecture.md)：消息链路、模块边界与身份隔离。
-- [Roadmap](ROADMAP.md)：长期方向和 `0.x` 优先级。
-- [Contributing guide](CONTRIBUTING.md)：参与方式与验证要求。
-- [Security policy](SECURITY.md)：信任边界与私密漏洞报告。
+- [Setup guide](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)：配置到收到第一条 Agent 回复。
+- [Architecture](https://github.com/Gkxie/kintio/blob/master/docs/architecture.md)：消息链路、模块边界与身份隔离。
+- [Roadmap](https://github.com/Gkxie/kintio/blob/master/ROADMAP.md)：长期方向和 `0.x` 优先级。
+- [Contributing guide](https://github.com/Gkxie/kintio/blob/master/CONTRIBUTING.md)：参与方式与验证要求。
+- [Security policy](https://github.com/Gkxie/kintio/blob/master/SECURITY.md)：信任边界与私密漏洞报告。
 - [Changelog](CHANGELOG.md)：用户可观察的版本变化。
 
 Kintio 处于 `0.x` 阶段，使用 [Apache License 2.0](LICENSE)。Weixin iLink 协议实现所涉及的

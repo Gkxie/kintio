@@ -155,14 +155,37 @@ test('public collaboration files keep stable forms, one test entry point, and re
   const packageJson = JSON.parse(packageSource) as {
     name?: string;
     version?: string;
+    private?: boolean;
     license?: string;
+    bin?: Record<string, string>;
+    files?: string[];
+    scripts?: Record<string, string>;
+    dependencies?: Record<string, string>;
     repository?: { url?: string };
     bugs?: { url?: string };
     homepage?: string;
   };
   assert.match(packageJson.version || '', /^0\./u);
   assert.equal(packageJson.name, 'kintio');
+  assert.equal(packageJson.private, true);
   assert.equal(packageJson.license, 'Apache-2.0');
+  assert.equal(packageJson.bin?.kintio, 'bin/kintio.js');
+  assert.equal(packageJson.scripts?.prepack, 'pnpm run build');
+  assert.equal(packageJson.dependencies?.pm2, '7.0.4');
+  for (const file of [
+    'dist',
+    'bin/kintio.js',
+    '.env.example',
+    'ecosystem.config.cjs',
+    'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
+  ]) {
+    assert.equal(packageJson.files?.includes(file), true, `missing package file ${file}`);
+  }
+  for (const readme of [await read('README.md'), await read('README.zh-CN.md')]) {
+    const setupIndex = readme.indexOf('kintio setup');
+    assert.notEqual(setupIndex, -1);
+    assert.ok(readme.indexOf('kintio start', setupIndex) > setupIndex);
+  }
   assert.equal(
     packageJson.repository?.url,
     'git+https://github.com/Gkxie/kintio.git',

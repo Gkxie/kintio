@@ -33,6 +33,8 @@ Agent result              -> Kintio delivers it back to the same chat
 - Steering for active work: a user's follow-up can redirect the current Agent turn instead
   of waiting behind stale instructions.
 - A durable SQLite inbox, restart recovery, and live-message priority over backlog recovery.
+- One application Supervisor for HTTP callbacks, polling listeners, and future long-lived
+  channel transports; Hono is an adapter rather than the process lifecycle owner.
 - Session-scoped MCP actions that cannot choose another recipient or expose provider
   credentials, raw user identifiers, or database paths to the Agent.
 - Explicit delivery outcomes: accepted, failed, or uncertain. Uncertain sends are not
@@ -63,14 +65,20 @@ Prerequisites:
 - credentials for at least one supported adapter.
 
 ```bash
+git clone https://github.com/Gkxie/kintio.git
+cd kintio
 corepack enable pnpm
 pnpm install --frozen-lockfile
-cp .env.example .env
+pnpm run build
+npm install --global .
+kintio setup
 codex login status
 ```
 
-No adapter is enabled by default. Follow the [setup guide](docs/setup.md) to generate a
-strong MCP token and configure one adapter:
+`kintio setup` creates a private instance under `~/.kintio`, installs the bundled Agent
+skill, and writes a `0600` environment file with a generated MCP token. No adapter is
+enabled by default. Follow the [setup guide](https://github.com/Gkxie/kintio/blob/master/docs/setup.md) and edit
+`~/.kintio/.env` to configure one adapter:
 
 - For WeChat KF API, set its callback token, EncodingAESKey, CorpID, and secret. A temporary
   `WECOM_AUTH_TRIGGER` can authorize the first user without knowing their
@@ -81,11 +89,16 @@ strong MCP token and configure one adapter:
 Start Kintio:
 
 ```bash
-pnpm start
+kintio start
+kintio status
+kintio logs --lines 100
 ```
 
 Successful startup prints `Hono server is listening on port 8888`. Complete the callback
 or binding checks described in the setup guide before sending production traffic.
+Use `kintio run` when a foreground process is preferable to PM2. Existing source-based
+deployments can keep their current state after the one-time process-manager migration
+described in the setup guide.
 
 ## Security boundaries
 
@@ -99,18 +112,18 @@ or binding checks described in the setup guide before sending production traffic
 - A provider accepting an outbound request does not prove that a client displayed it;
   uncertain outcomes remain explicit to avoid duplicate delivery.
 
-See the [security policy](SECURITY.md) for the complete trust boundary and private
+See the [security policy](https://github.com/Gkxie/kintio/blob/master/SECURITY.md) for the complete trust boundary and private
 vulnerability-reporting process.
 
 ## Documentation and contributing
 
-- [Setup guide](docs/setup.md) — configuration through the first Agent reply.
-- [Architecture](docs/architecture.md) — message flow, module boundaries, identity
+- [Setup guide](https://github.com/Gkxie/kintio/blob/master/docs/setup.md) — configuration through the first Agent reply.
+- [Architecture](https://github.com/Gkxie/kintio/blob/master/docs/architecture.md) — message flow, module boundaries, identity
   isolation, and source entry points.
-- [Roadmap](ROADMAP.md) — long-term direction and `0.x` priorities.
-- [Contributing guide](CONTRIBUTING.md) — where to start and how to validate changes.
-- [Maintainer guide](MAINTAINING.md) — issue, pull request, and release operations.
-- [Code of Conduct](CODE_OF_CONDUCT.md), [Changelog](CHANGELOG.md), and
+- [Roadmap](https://github.com/Gkxie/kintio/blob/master/ROADMAP.md) — long-term direction and `0.x` priorities.
+- [Contributing guide](https://github.com/Gkxie/kintio/blob/master/CONTRIBUTING.md) — where to start and how to validate changes.
+- [Maintainer guide](https://github.com/Gkxie/kintio/blob/master/MAINTAINING.md) — issue, pull request, and release operations.
+- [Code of Conduct](https://github.com/Gkxie/kintio/blob/master/CODE_OF_CONDUCT.md), [Changelog](CHANGELOG.md), and
   [Apache License 2.0](LICENSE).
 
 The default verification entry point is:
