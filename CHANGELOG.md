@@ -10,6 +10,8 @@ This file records important user-visible changes after the first public release.
   temporary media, and the Agent workspace under `~/.kintio` by default.
 - Made an application Supervisor the process composition root; Hono now remains
   an HTTP callback and MCP channel beside polling and future WebSocket inputs.
+- Rendered optional iLink login invitations as branded QR cards with an explicit
+  five-minute validity notice.
 
 ## 0.4.1 - 2026-08-30
 

@@ -175,6 +175,7 @@ test('public collaboration files keep stable forms, one test entry point, and re
   for (const file of [
     'dist',
     'bin/kintio.js',
+    'assets/ilink-login-card.png',
     '.env.example',
     'ecosystem.config.cjs',
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',

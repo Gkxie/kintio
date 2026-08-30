@@ -12,6 +12,7 @@
   "files": [
     "bin/kintio.js",
     "dist",
+    "assets/ilink-login-card.png",
     "codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md",
     ".env.example",
     "ecosystem.config.cjs",
@@ -51,11 +52,13 @@
     "@modelcontextprotocol/sdk": "^1.30.0",
     "hono": "^4.13.5",
     "pm2": "7.0.4",
+    "pngjs": "5.0.0",
     "qrcode": "1.5.4",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "24.13.3",
+    "@types/pngjs": "^6.0.5",
     "@types/qrcode": "1.5.6",
     "@vitest/coverage-v8": "4.1.11",
     "knip": "6.32.2",
