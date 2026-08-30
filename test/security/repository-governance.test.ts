@@ -292,6 +292,8 @@ test('GitHub automation covers CI, security, dependency policy, and releases', a
     /commits\(first:100\)[\s\S]+totalCount[\s\S]+databaseId/u,
   );
   assert.match(claWorkflow, /Every commit author must be linked/u);
+  assert.match(claWorkflow, /The pull request opener must be a primary commit author/u);
+  assert.match(claWorkflow, /Only approved dependency bots may open/u);
   assert.match(claWorkflow, /Co-authored-by:/u);
   assert.match(
     claWorkflow,

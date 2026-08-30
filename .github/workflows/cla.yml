@@ -55,16 +55,25 @@ jobs:
             -f owner="$owner" \
             -f repository="$repository" \
             -F number="$PR_NUMBER" \
-            -f query='query($owner:String!,$repository:String!,$number:Int!){repository(owner:$owner,name:$repository){pullRequest(number:$number){commits(first:100){totalCount nodes{commit{message author{user{databaseId}}}}}}}}' |
+            -f query='query($owner:String!,$repository:String!,$number:Int!){repository(owner:$owner,name:$repository){pullRequest(number:$number){author{__typename login ... on User{databaseId}} commits(first:100){totalCount nodes{commit{message author{user{databaseId}}}}}}}}' |
           node --input-type=module -e '
             let input = "";
             for await (const chunk of process.stdin) input += chunk;
-            const commits = JSON.parse(input).data.repository.pullRequest.commits;
+            const pullRequest = JSON.parse(input).data.repository.pullRequest;
+            const commits = pullRequest.commits;
             if (commits.totalCount > 100) {
               throw new Error("CLA Assistant supports at most 100 commits per pull request");
             }
             if (commits.nodes.some((entry) => !entry.commit.author?.user?.databaseId)) {
               throw new Error("Every commit author must be linked to a GitHub account for CLA verification");
+            }
+            const authorIds = new Set(commits.nodes.map((entry) => entry.commit.author.user.databaseId));
+            if (pullRequest.author?.__typename === "User") {
+              if (!pullRequest.author.databaseId || !authorIds.has(pullRequest.author.databaseId)) {
+                throw new Error("The pull request opener must be a primary commit author for CLA verification");
+              }
+            } else if (!["dependabot[bot]", "dependabot", "renovate[bot]", "renovate"].includes(pullRequest.author?.login)) {
+              throw new Error("Only approved dependency bots may open a CLA-exempt pull request");
             }
             if (commits.nodes.some((entry) => /^Co-authored-by:/imu.test(entry.commit.message))) {
               throw new Error("Co-authored-by trailers are not supported by the CLA check; split authors into separate pull requests");

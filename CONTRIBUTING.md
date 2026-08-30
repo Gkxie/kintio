@@ -64,7 +64,8 @@ more than 100 commits or `Co-authored-by` trailers are rejected because the
 frozen CLA Action cannot inspect those contributors completely; split that
 work into separately authored pull requests instead. Sign before the pull
 request reaches 30 comments because the frozen Action reads only the first
-comment page.
+comment page. The pull request opener must also be a primary commit author so
+their GitHub identity participates in the CLA check.
 
 ## Open an issue
 
