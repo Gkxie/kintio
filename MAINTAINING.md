@@ -24,8 +24,8 @@ also grants broad code and release authority. Keep Reviewers outside the
 collaborator list. Before adding a second Maintainer, prefer moving the project
 to an organization with separate triage, maintain, and write roles; then require
 one independent approval for protected changes. Restrict `cla-signatures`
-updates to the CLA GitHub App or workflow before granting anyone else write
-access; its current tamper-evident model trusts every write collaborator. Also
+updates to the pinned CLA workflow before granting anyone else write access;
+its tamper-evident model trusts every write collaborator. Also
 restrict creation of `v*` tags to a Release Maintainer role or dedicated App;
 the current tag rules prevent mutation and deletion but not creation by a write
 collaborator.
@@ -110,9 +110,9 @@ only to make a direct PR look issue-driven.
   activity are not proof by themselves. Close confirmed unattended, materially
   undisclosed, or bulk-generated submissions; block an account only for repeated
   or clearly abusive behavior.
-- The pull request opener and every GitHub-linked commit author must have a
-  successful `CLA` status for the current agreement hash. Unlinked authors fail
-  closed. Never bypass that status or edit the signature ledger by hand.
+- Every contributor identified by CLA Assistant must have a successful `CLA`
+  status for the current agreement version. Never bypass that status or edit
+  the signature ledger by hand.
 - Every PR must explain the problem, observable result, verification, and
   compatibility impact. Use `Refs` for issues that remain open until release.
 - `Quality`, `Unit, integration, recovery, security`, and `gitleaks` must pass.
@@ -167,36 +167,36 @@ history. Resume releases only after the known-good state is verified.
 
 ## CLA changes
 
-`CLA.md` names XIE YU as the Project Owner. The repository-native workflow
-stores public signature records on the tamper-evident `cla-signatures` branch
-after authenticating the GitHub signing event. Any byte-level change to
-`CLA.md` changes its SHA-256 hash and requires a new signature for future
-contributions. Protect the ledger from deletion and non-fast-forward writes.
-Manual ledger edits are forbidden. Never rewrite or delete historical ledger
-commits. Review legal changes separately from implementation changes.
+`CLA.md` names XIE YU as the Project Owner. CLA Assistant Lite records public
+signatures on the protected `cla-signatures` branch. The Action is a frozen
+dependency: keep its full commit SHA pinned, never execute pull-request code in
+its `pull_request_target` job, and replace it if its Node runtime becomes
+unsupported or a security defect is reported.
 
-Correct an inaccurate current record only by asking the contributor to post a
-new commit-and-hash-bound signature comment. The workflow may then append a
-correcting ledger commit; a maintainer must never edit the JSON by hand.
+The frozen Action scans at most 100 commits and the first 30 pull-request
+comments. The workflow rejects larger or co-authored histories; contributors
+should sign before a discussion exceeds 30 comments. If a late signature is no
+longer visible to the Action, open a replacement pull request and sign it first.
+Concurrent signatures can conflict while updating the aggregate JSON; a
+Maintainer may comment `recheck` after the other signature finishes. The Action
+locks merged pull-request conversations to preserve signature comments.
 
-To activate CLA enforcement without locking out every pull request:
+Review legal changes separately from implementation changes. A material CLA
+change requires all of the following in one reviewed release:
 
-1. Merge the CLA document, workflow, script, and tests before requiring its
-   status.
-2. Create `cla-signatures` from an empty root commit.
-3. Protect that branch from deletion and non-fast-forward writes.
-4. Open a temporary pull request, confirm that the manual commit status context
-   is exactly `CLA`, sign the generated commit-and-hash-bound comment, and verify
-   the status changes from pending to success.
-5. Add that `CLA` status—not the `CLA evaluation` workflow job—to the strict
-   required checks on `master`, and bind its expected source to GitHub Actions
-   rather than trusting another integration that publishes the same context.
-6. Repeat the unsigned/signed smoke test from a fork, then close the temporary
-   pull request and retain its public signature evidence.
+1. increment the version in `CLA.md`;
+2. create an immutable annotated `cla-vX.Y` tag for that document;
+3. point `path-to-document` at the tag and `path-to-signatures` at a new
+   versioned JSON path;
+4. update the exact signing comment to name the new CLA version;
+5. open a test pull request and verify that existing contributors must sign the
+   new version.
 
-After a repository rename or transfer, update the repository identity in the
-CLA, workflow, script validation, ledger ruleset, and smoke test before
-accepting more contributions.
+Never rewrite or delete historical ledger commits, import old records into a
+new format, or edit the aggregate JSON by hand. The legacy per-user v1 records
+remain evidence for contributions accepted before CLA Assistant Lite. After a
+repository rename or transfer, update the repository identity in the CLA and
+workflow before accepting more contributions.
 
 ## Version policy
 
@@ -264,17 +264,17 @@ verify that:
   `Unit, integration, recovery, security`, `gitleaks`, `CLA`,
   `JavaScript and TypeScript` (CodeQL), and `review` (Dependency Review);
 - required checks use strict branch freshness so a CLA change forces open pull
-  requests to synchronize and re-evaluate the current agreement hash;
+  requests to synchronize and evaluate the current agreement version;
 - fork workflows require approval for all external contributors, and users
   without write access can have at most one open non-draft PR;
-- the Actions allowlist permits only GitHub-owned actions and
-  `pnpm/action-setup`; actions use full commit SHAs, the Gitleaks container uses
-  an OCI digest, default tokens are read-only, and Actions cannot approve pull
-  requests;
+- the Actions allowlist permits only GitHub-owned actions,
+  `pnpm/action-setup`, and the frozen CLA Assistant Action; actions use full
+  commit SHAs, the Gitleaks container uses an OCI digest, default tokens are
+  read-only, and Actions cannot approve pull requests;
 - `master` rejects deletion and non-fast-forward updates, and `v*` tags reject
   updates and deletion;
-- `cla-signatures` rejects deletion and non-fast-forward writes, and records
-  preserve the authenticated signing event and immutable CLA hash;
+- `cla-signatures` rejects deletion and non-fast-forward writes, and `cla-v*`
+  tags reject updates and deletion;
 - Private Vulnerability Reporting, CodeQL, Secret Scanning, and Push Protection
   are enabled; enable validity checks and non-provider patterns when the account
   plan supports them, with digest-pinned Gitleaks covering the current gap;

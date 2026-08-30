@@ -1,106 +1,104 @@
 name: CLA
 
 on:
-  pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review]
   issue_comment:
     types: [created]
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review, closed]
 
 permissions: {}
 
 jobs:
-  evaluate:
-    name: CLA evaluation
+  cla:
+    name: CLA
     if: >-
       github.repository == 'Gkxie/kintio' &&
-      github.event_name == 'pull_request_target' &&
-      github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: cla-evaluate-${{ github.repository_id }}-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
-    permissions:
-      contents: read
-      pull-requests: write
-      statuses: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 24
-      - name: Evaluate CLA signatures
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node --experimental-strip-types scripts/cla.ts
-
-  comment-preflight:
-    name: CLA comment preflight
-    if: >-
-      github.repository == 'Gkxie/kintio' &&
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      github.event.action == 'created' &&
       (
         (
-          github.event.comment.body == 'recheck' &&
-          (
-            github.event.comment.author_association == 'OWNER' ||
-            github.event.comment.author_association == 'MEMBER' ||
-            github.event.comment.author_association == 'COLLABORATOR'
-          )
+          github.event_name == 'pull_request_target' &&
+          (github.event.action == 'closed' || github.event.pull_request.draft == false)
         ) ||
-        startsWith(github.event.comment.body, 'I have read the CLA Document and I hereby sign the CLA')
+        (
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          (
+            github.event.comment.body == 'I have read the Kintio CLA v1.1 and I hereby sign it' ||
+            (
+              github.event.comment.body == 'recheck' &&
+              (
+                github.event.comment.author_association == 'OWNER' ||
+                github.event.comment.author_association == 'MEMBER' ||
+                github.event.comment.author_association == 'COLLABORATOR'
+              )
+            )
+          )
+        )
       )
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    concurrency:
-      group: cla-preflight-${{ github.repository_id }}-${{ github.event.issue.number }}-${{ github.event.comment.user.id }}
-      cancel-in-progress: true
     permissions:
-      contents: read
-      pull-requests: read
-    outputs:
-      mode: ${{ steps.preflight.outputs.mode }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 24
-      - name: Check whether the comment can mutate CLA state
-        id: preflight
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node --experimental-strip-types scripts/cla.ts preflight
-
-  sign:
-    name: CLA signature
-    needs: comment-preflight
-    if: needs.comment-preflight.outputs.mode == 'sign'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    concurrency:
-      group: cla-sign-${{ github.repository_id }}
-      queue: max
-    permissions:
+      actions: write
       contents: write
       pull-requests: write
-      statuses: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          ref: ${{ github.event.repository.default_branch }}
-          persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 24
-      - name: Record or recheck CLA signatures
+      - name: Reject commit history that CLA Assistant cannot fully inspect
+        if: >-
+          github.event_name == 'issue_comment' ||
+          github.event.action != 'closed'
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: node --experimental-strip-types scripts/cla.ts
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          owner="${GITHUB_REPOSITORY%%/*}"
+          repository="${GITHUB_REPOSITORY#*/}"
+          gh api graphql \
+            -f owner="$owner" \
+            -f repository="$repository" \
+            -F number="$PR_NUMBER" \
+            -f query='query($owner:String!,$repository:String!,$number:Int!){repository(owner:$owner,name:$repository){pullRequest(number:$number){author{__typename login ... on User{databaseId}} commits(first:100){totalCount nodes{commit{message author{user{databaseId}}}}}}}}' |
+          node --input-type=module -e '
+            let input = "";
+            for await (const chunk of process.stdin) input += chunk;
+            const pullRequest = JSON.parse(input).data.repository.pullRequest;
+            const commits = pullRequest.commits;
+            if (commits.totalCount > 100) {
+              throw new Error("CLA Assistant supports at most 100 commits per pull request");
+            }
+            if (commits.nodes.some((entry) => !entry.commit.author?.user?.databaseId)) {
+              throw new Error("Every commit author must be linked to a GitHub account for CLA verification");
+            }
+            const authorIds = new Set(commits.nodes.map((entry) => entry.commit.author.user.databaseId));
+            if (pullRequest.author?.__typename === "User") {
+              if (!pullRequest.author.databaseId || !authorIds.has(pullRequest.author.databaseId)) {
+                throw new Error("The pull request opener must be a primary commit author for CLA verification");
+              }
+            } else if (!["dependabot[bot]", "dependabot", "renovate[bot]", "renovate"].includes(pullRequest.author?.login)) {
+              throw new Error("Only approved dependency bots may open a CLA-exempt pull request");
+            }
+            if (commits.nodes.some((entry) => /^Co-authored-by:/imu.test(entry.commit.message))) {
+              throw new Error("Co-authored-by trailers are not supported by the CLA check; split authors into separate pull requests");
+            }
+          '
+      - name: Check CLA
+        if: >-
+          (
+            github.event_name == 'pull_request_target' &&
+            (
+              github.event.action == 'opened' ||
+              github.event.action == 'reopened' ||
+              github.event.action == 'synchronize' ||
+              github.event.action == 'ready_for_review' ||
+              (github.event.action == 'closed' && github.event.pull_request.merged == true)
+            )
+          ) ||
+          github.event_name == 'issue_comment'
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08 # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-document: https://github.com/Gkxie/kintio/blob/cla-v1.1/CLA.md
+          path-to-signatures: signatures/v1.1/cla.json
+          branch: cla-signatures
+          allowlist: dependabot[bot],renovate[bot]
+          custom-pr-sign-comment: I have read the Kintio CLA v1.1 and I hereby sign it
+          lock-pullrequest-aftermerge: true
