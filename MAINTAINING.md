@@ -233,8 +233,10 @@ releases remain source-only and carry no uploaded assets.
    branch, title, changed-file allowlist, package and runtime versions,
    Changelog, merge commit, and version monotonicity. It then creates an
    annotated tag at the squash commit and dispatches `release.yml` at that tag.
-   Release-tag creation is restricted to the GitHub Actions App. A release tag
-   must never be deleted, moved, or reused, even if the release workflow fails.
+   A Tag push alone does not trigger a release; `release.yml` independently
+   verifies the same owner-created and owner-merged Release PR before publishing.
+   A release tag must never be deleted, moved, or reused, even if the release
+   workflow fails.
 6. The read-only release verification job rechecks version monotonicity, the
    Changelog, source commit, tests, build, and dependencies, then uploads one
    npm tarball with its SHA-512 integrity.
