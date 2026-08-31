@@ -209,7 +209,7 @@ Kintio uses SemVer and `vX.Y.Z` Git tags. During `0.x`:
 - **`1.0.0`:** reserved for stable public interfaces and an established upgrade
   policy.
 
-Kintio is published as the public `kintio` package on the official npm
+Kintio is published as the public `@kin-tio/cli` package on the official npm
 Registry. The manifest's explicit file allowlist excludes tests, repository
 automation, source-only files, and runtime state. npm publication is currently
 an intentional Maintainer action from a clean, reviewed release commit using
@@ -234,8 +234,8 @@ remain source-only and carry no uploaded assets.
    pnpm test
    pnpm run build
    npm pack --json --ignore-scripts
-   npm publish ./kintio-X.Y.Z.tgz --access public
-   npm view kintio@X.Y.Z dist.integrity
+   npm publish ./kin-tio-cli-X.Y.Z.tgz --access public
+   npm view @kin-tio/cli@X.Y.Z dist.integrity
    ```
 
    Account 2FA is required. Confirm a clean-prefix Registry installation reports

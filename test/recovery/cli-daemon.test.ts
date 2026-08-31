@@ -232,11 +232,12 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   launcher = process.platform === 'win32'
     ? path.join(prefix, 'kintio.cmd')
     : path.join(prefix, 'bin/kintio');
+  const packageDirectory = ['@kin-tio', 'cli'];
   const installedBin = path.join(
     prefix,
     ...(process.platform === 'win32'
-      ? ['node_modules', 'kintio', 'bin', 'kintio.js']
-      : ['lib', 'node_modules', 'kintio', 'bin', 'kintio.js']),
+      ? ['node_modules', ...packageDirectory, 'bin', 'kintio.js']
+      : ['lib', 'node_modules', ...packageDirectory, 'bin', 'kintio.js']),
   );
   await fs.access(installedBin);
   const environment: NodeJS.ProcessEnv = {

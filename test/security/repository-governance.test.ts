@@ -81,7 +81,7 @@ test('package, release version, and public entry points stay aligned', async () 
     repository?: { url?: string };
     publishConfig?: { access?: string; registry?: string };
   };
-  assert.equal(packageJson.name, 'kintio');
+  assert.equal(packageJson.name, '@kin-tio/cli');
   assert.match(packageJson.version || '', /^0\.\d+\.\d+$/u);
   assert.notEqual(packageJson.private, true);
   assert.equal(packageJson.author, 'XIE YU');
@@ -117,7 +117,7 @@ test('package, release version, and public entry points stay aligned', async () 
   }
   for (const file of ['README.md', 'README.zh-CN.md']) {
     const readme = await read(file);
-    const installIndex = readme.indexOf('npm install --global kintio');
+    const installIndex = readme.indexOf('npm install --global @kin-tio/cli');
     const setupIndex = readme.indexOf('kintio setup');
     assert.notEqual(installIndex, -1);
     assert.notEqual(setupIndex, -1);
