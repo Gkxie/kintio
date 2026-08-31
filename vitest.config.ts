@@ -84,7 +84,10 @@ export default defineConfig({
         : []),
     ],
     coverage: {
-      enabled: true,
+      // Windows still runs the complete suite, including real named pipes. The
+      // coverage gate runs on POSIX where the Unix socket permission branches
+      // are physically executable instead of counting them as Windows misses.
+      enabled: process.platform !== 'win32',
       provider: 'v8',
       include: ['src/**/*.ts'],
       exclude: ['dist/**', 'test/**'],

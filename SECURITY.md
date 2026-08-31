@@ -57,9 +57,10 @@ maintain every `0.x` line at the same time.
 - Keep the Kintio instance and config below directories that untrusted local
   users cannot replace or modify. Custom Windows paths need an owner-only DACL;
   custom POSIX paths need trusted parents or sticky shared parents.
-- Never proxy or publish the Runtime-owned local MCP listener. Public Hono
-  `/mcp*` paths intentionally return 404, and conversation capabilities must
-  never be logged or copied between sessions.
+- Keep the Runtime-owned MCP descriptor and IPC endpoint private. MCP uses stdio
+  plus a Unix-domain socket or Windows named pipe, not a publishable TCP listener;
+  public Hono `/mcp*` paths intentionally return 404, and conversation capabilities
+  must never be logged or copied between sessions.
 - Bind archived memory through the current short-lived session; never let the
   model select an arbitrary Thread ID.
 - Prefer a dedicated operating-system user in production. WeChat authorization

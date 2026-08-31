@@ -9,7 +9,7 @@ import type { TestContext } from 'vitest';
 
 import { createApp } from '../../src/app.ts';
 import { createConfig, type AppConfig } from '../../src/config.ts';
-import { LocalMcpHost } from '../../src/mcp/local-host.ts';
+import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
@@ -127,12 +127,12 @@ test('active runtime stop/abort/close are safe and close releases the instance l
   await runtime.close();
 });
 
-test('local MCP startup failure rolls back SQLite and the instance lock', async (t) => {
+test('MCP IPC startup failure rolls back SQLite and the instance lock', async (t) => {
   const directory = await workspace(t);
   const config = activeConfig(directory);
-  const failed = vi.spyOn(LocalMcpHost.prototype, 'start')
-    .mockRejectedValue(new Error('local MCP bind failed'));
-  await assert.rejects(createRuntime({ config, logger }), /local MCP bind failed/u);
+  const failed = vi.spyOn(McpIpcHost.prototype, 'start')
+    .mockRejectedValue(new Error('MCP IPC bind failed'));
+  await assert.rejects(createRuntime({ config, logger }), /MCP IPC bind failed/u);
   failed.mockRestore();
   await assert.rejects(fs.access(config.state.lockFile), { code: 'ENOENT' });
 

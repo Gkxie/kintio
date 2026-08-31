@@ -179,7 +179,7 @@ test('prompt includes media, channel, observation, and customer boundaries', asy
   assert.doesNotMatch(prompt, /open_kfid|external_userid|media_id/iu);
 });
 
-test('app-server registers channel-specific local MCP profiles', async (t) => {
+test('app-server registers channel-specific stdio MCP launches', async (t) => {
   const captures: Array<{ args: readonly string[] }> = [];
   const spawnProcess = ((_command, args) => {
     captures.push({ args: [...args] });
@@ -187,19 +187,19 @@ test('app-server registers channel-specific local MCP profiles', async (t) => {
   }) as SpawnProcess;
   const configured = createCodexAppServer({
     spawnProcess,
-    mcpEndpoints: {
-      wechatKf: 'http://127.0.0.1:30101/mcp',
-      memory: 'http://127.0.0.1:30101/mcp/memory',
-      ilink: 'http://127.0.0.1:30101/mcp/ilink',
+    mcpLaunches: {
+      wechatKf: { command: '/node', args: ['/relay', '--route', 'wechat_kf'] },
+      memory: { command: '/node', args: ['/relay', '--route', 'conversation_memory'] },
+      ilink: { command: '/node', args: ['/relay', '--route', 'weixin_ilink'] },
     },
     mcpToolTimeoutSec: 35,
     ilinkMcpToolTimeoutSec: 150,
   });
   const ilinkOnly = createCodexAppServer({
     spawnProcess,
-    mcpEndpoints: {
-      memory: 'http://127.0.0.1:30102/mcp/memory',
-      ilink: 'http://127.0.0.1:30102/mcp/ilink',
+    mcpLaunches: {
+      memory: { command: '/node', args: ['/relay', '--route', 'conversation_memory'] },
+      ilink: { command: '/node', args: ['/relay', '--route', 'weixin_ilink'] },
     },
   });
   t.onTestFinished(async () => {
@@ -208,10 +208,10 @@ test('app-server registers channel-specific local MCP profiles', async (t) => {
   await configured.initialize();
   await ilinkOnly.initialize();
   assert.ok(captures[0]?.args.includes(
-    'mcp_servers.wechat_kf.url="http://127.0.0.1:30101/mcp"',
+    'mcp_servers.wechat_kf.command="/node"',
   ));
   assert.ok(captures[0]?.args.includes(
-    'mcp_servers.conversation_memory.url="http://127.0.0.1:30101/mcp/memory"',
+    'mcp_servers.conversation_memory.args=["/relay","--route","conversation_memory"]',
   ));
   assert.ok(captures[0]?.args.includes('mcp_servers.wechat_kf.tool_timeout_sec=35'));
   assert.ok(captures[0]?.args.includes('mcp_servers.weixin_ilink.tool_timeout_sec=150'));
@@ -220,7 +220,7 @@ test('app-server registers channel-specific local MCP profiles', async (t) => {
     false,
   );
   assert.ok(captures[1]?.args.includes(
-    'mcp_servers.weixin_ilink.url="http://127.0.0.1:30102/mcp/ilink"',
+    'mcp_servers.weixin_ilink.args=["/relay","--route","weixin_ilink"]',
   ));
 });
 

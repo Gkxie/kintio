@@ -11,7 +11,7 @@ import type {
   HistoryInspection,
 } from '../agent/runtime.ts';
 import type { CodexConfig } from '../config.ts';
-import type { LocalMcpEndpoints } from '../mcp/local-host.ts';
+import type { LocalMcpLaunches, McpRelayLaunch } from '../mcp/ipc-host.ts';
 import type { ChatChannel } from '../types.ts';
 import {
   SEND_TOOL_NAMES,
@@ -140,32 +140,48 @@ export function createCodexAppServer(
   options: {
     readonly logger?: { warn?(message: string): void };
     readonly spawnProcess?: SpawnProcess;
-    readonly mcpEndpoints: LocalMcpEndpoints;
+    readonly mcpLaunches: LocalMcpLaunches;
     readonly mcpToolTimeoutSec?: number;
     readonly ilinkMcpToolTimeoutSec?: number;
   },
 ): CodexAppServer {
+  const server = (
+    name: string,
+    launch: McpRelayLaunch,
+    tools: readonly string[],
+    timeoutSec: number,
+  ): string[] => [
+    `mcp_servers.${name}.command=${JSON.stringify(launch.command)}`,
+    `mcp_servers.${name}.args=${JSON.stringify(launch.args)}`,
+    `mcp_servers.${name}.enabled_tools=${JSON.stringify(tools)}`,
+    `mcp_servers.${name}.required=true`,
+    `mcp_servers.${name}.tool_timeout_sec=${timeoutSec}`,
+    `mcp_servers.${name}.default_tools_approval_mode="approve"`,
+  ];
   const overrides = [
     'mcp_servers={}',
-    ...(options.mcpEndpoints.wechatKf ? [
-      `mcp_servers.wechat_kf.url=${JSON.stringify(options.mcpEndpoints.wechatKf)}`,
-      `mcp_servers.wechat_kf.enabled_tools=${JSON.stringify(CHANNEL_AGENT_PROFILES.wechat_kf.tools)}`,
-      'mcp_servers.wechat_kf.required=true',
-      `mcp_servers.wechat_kf.tool_timeout_sec=${Math.max(30, Number(options.mcpToolTimeoutSec) || 30)}`,
-      'mcp_servers.wechat_kf.default_tools_approval_mode="approve"',
-    ] : []),
-    ...(options.mcpEndpoints.ilink ? [
-      `mcp_servers.weixin_ilink.url=${JSON.stringify(options.mcpEndpoints.ilink)}`,
-      `mcp_servers.weixin_ilink.enabled_tools=${JSON.stringify(CHANNEL_AGENT_PROFILES.weixin_ilink.tools)}`,
-      'mcp_servers.weixin_ilink.required=true',
-      `mcp_servers.weixin_ilink.tool_timeout_sec=${Math.max(30, Number(options.ilinkMcpToolTimeoutSec) || 30)}`,
-      'mcp_servers.weixin_ilink.default_tools_approval_mode="approve"',
-    ] : []),
-    `mcp_servers.conversation_memory.url=${JSON.stringify(options.mcpEndpoints.memory)}`,
-    'mcp_servers.conversation_memory.enabled_tools=["read_archived_thread"]',
-    'mcp_servers.conversation_memory.required=true',
-    'mcp_servers.conversation_memory.tool_timeout_sec=30',
-    'mcp_servers.conversation_memory.default_tools_approval_mode="approve"',
+    ...(options.mcpLaunches.wechatKf
+      ? server(
+          'wechat_kf',
+          options.mcpLaunches.wechatKf,
+          CHANNEL_AGENT_PROFILES.wechat_kf.tools,
+          Math.max(30, Number(options.mcpToolTimeoutSec) || 30),
+        )
+      : []),
+    ...(options.mcpLaunches.ilink
+      ? server(
+          'weixin_ilink',
+          options.mcpLaunches.ilink,
+          CHANNEL_AGENT_PROFILES.weixin_ilink.tools,
+          Math.max(30, Number(options.ilinkMcpToolTimeoutSec) || 30),
+        )
+      : []),
+    ...server(
+      'conversation_memory',
+      options.mcpLaunches.memory,
+      ['read_archived_thread'],
+      30,
+    ),
     'agents.enabled=false',
     'allow_login_shell=false',
     ...[

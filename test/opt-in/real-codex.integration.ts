@@ -23,12 +23,12 @@ import type {
   AgentInput,
 } from '../../src/agent/runtime.ts';
 import type { CodexBoundary } from '../../src/services/codex-app-server.ts';
-import { handleWechatKfMcpRequest } from '../../src/mcp/wechat-kf-server.ts';
+import { createWechatKfMcpServer } from '../../src/mcp/wechat-kf-server.ts';
 import {
   ConversationMemoryExecutor,
-  handleConversationMemoryMcpRequest,
+  createConversationMemoryMcpServer,
 } from '../../src/mcp/conversation-memory-server.ts';
-import { LocalMcpHost } from '../../src/mcp/local-host.ts';
+import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
 import { WecomApiClient } from '../../src/services/wecom-api.ts';
@@ -120,21 +120,24 @@ async function createRealHarness(): Promise<RealHarness> {
     },
   });
   let memoryExecutor: ConversationMemoryExecutor | undefined;
-  const localMcp = new LocalMcpHost({
-    wechatKf: (request) => handleWechatKfMcpRequest({ request, executor }),
-    memory: async (request) => memoryExecutor
-      ? await handleConversationMemoryMcpRequest({
-        request,
-        executor: memoryExecutor,
-      })
-      : Response.json({ error: 'not ready' }, { status: 503 }),
+  const mcpHost = new McpIpcHost({
+    instanceKey: path.join(directory, 'runtime.lock'),
+    stateDirectory: directory,
+    relayFile: path.resolve('mcp-relay.ts'),
+    wechatKf: () => createWechatKfMcpServer(executor),
+    memory: () => createConversationMemoryMcpServer({
+      read(session) {
+        if (!memoryExecutor) throw new Error('memory executor is not ready');
+        return memoryExecutor.read(session);
+      },
+    }),
   });
   const config = {
     workingDirectory: path.resolve('codex-workspace'),
     imageTempDirectory,
     generatedImageDirectory,
   };
-  const codex = createCodexAppServer({ mcpEndpoints: await localMcp.start() });
+  const codex = createCodexAppServer({ mcpLaunches: await mcpHost.start() });
   const memoryReads: string[] = [];
   memoryExecutor = new ConversationMemoryExecutor({
     store,
@@ -267,7 +270,7 @@ async function createRealHarness(): Promise<RealHarness> {
       try {
         await agent.close();
         await executor.close();
-        await localMcp.close();
+        await mcpHost.close();
         fakeWechat.close();
         await once(fakeWechat, 'close');
         store.close();
