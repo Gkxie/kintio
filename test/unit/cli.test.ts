@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { TestContext } from 'vitest';
 import { test } from 'vitest';
 import crossSpawn from 'cross-spawn';
@@ -94,19 +95,23 @@ test('setup creates one private config and refreshes the managed Agent skill', a
 test('managed Skill follows and refreshes the configured Agent workspace', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
+  const workingDirectory = await fs.mkdtemp(
+    path.join(os.tmpdir(), 'kintio-external-agent-workspace-'),
+  );
+  t.onTestFinished(() => fs.rm(workingDirectory, { recursive: true, force: true }));
   const configFile = path.join(home, '.env');
   const runtime = cliRuntime(root);
   assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
   await fs.appendFile(
     configFile,
-    '\nCODEX_WORKING_DIRECTORY=./custom-agent-workspace\n',
+    `\nCODEX_WORKING_DIRECTORY=${workingDirectory}\n`,
   );
   runtime.stdout.length = 0;
 
   assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
   const customSkill = path.join(
-    home,
-    'custom-agent-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
+    workingDirectory,
+    '.agents/skills/wechat-kf-reply-sop/SKILL.md',
   );
   const bundledSkill = await fs.readFile(
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
@@ -155,6 +160,62 @@ test('run keeps the worker in the foreground with explicit instance selectors', 
   assert.equal(requests[0]?.env.KINTIO_HOME, home);
   assert.equal(requests[0]?.env.KINTIO_CONFIG_FILE, configFile);
   assert.equal(requests[0]?.env.AGENT_HOST_CANARY, 'preserved');
+});
+
+test('foreground executor turns a CLI signal into Worker IPC shutdown', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const packageRoot = path.join(root, 'package');
+  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const readyFile = path.join(home, 'worker-ready');
+  const stoppedFile = path.join(home, 'worker-stopped');
+  await fs.mkdir(path.dirname(workerFile), { recursive: true });
+  await fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), {
+    recursive: true,
+  });
+  await fs.writeFile(workerFile, [
+    "const fs = require('node:fs');",
+    `fs.writeFileSync(${JSON.stringify(readyFile)}, String(process.pid));`,
+    "process.on('message', (message) => {",
+    "  if (message !== 'shutdown') return;",
+    `  fs.writeFileSync(${JSON.stringify(stoppedFile)}, 'shutdown');`,
+    '  process.exit(0);',
+    '});',
+    "process.on('disconnect', () => process.exit(0));",
+    'setInterval(() => undefined, 1000);',
+  ].join('\n'));
+  const setupRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+
+  const previousListeners = new Set(process.listeners('SIGTERM'));
+  const runtime = cliRuntime(root, { packageRoot });
+  let workerPid = 0;
+  const running = runCli(['run', '--home', home], runtime.overrides);
+  t.onTestFinished(async () => {
+    if (workerPid) {
+      try { process.kill(workerPid, 'SIGKILL'); } catch {}
+    }
+    await running.catch(() => undefined);
+  });
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      workerPid = Number(await fs.readFile(readyFile, 'utf8'));
+      break;
+    } catch {
+      await delay(10);
+    }
+  }
+  assert.ok(workerPid);
+  const handler = process.listeners('SIGTERM').find(
+    (listener) => !previousListeners.has(listener),
+  );
+  assert.ok(handler);
+  handler('SIGTERM');
+  assert.equal(await running, 0);
+  assert.equal(await fs.readFile(stoppedFile, 'utf8'), 'shutdown');
+  assert.deepEqual(process.listeners('SIGTERM'), [...previousListeners]);
+  workerPid = 0;
 });
 
 test('logs validate line counts and read native daemon output without a process manager', async (t) => {
@@ -416,7 +477,7 @@ test('setup refuses linked config and workspace paths that escape the instance',
   assert.match(skillRuntime.stderr.join(''), /symbolic link|not a directory/u);
 });
 
-test('configuration privacy follows POSIX modes and Windows profile ACLs', async (t) => {
+test('setup enforces POSIX modes without treating chmod as Windows ACL evidence', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);

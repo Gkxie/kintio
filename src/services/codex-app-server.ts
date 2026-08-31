@@ -269,6 +269,7 @@ export class CodexAppServer implements CodexBoundary {
       ));
     });
     child.once('exit', (code, signal) => {
+      if (this.#process === child) this.#process = null;
       if (this.#closed) return;
       const detail = signal ? `signal ${signal}` : `code ${code ?? 1}`;
       this.#fail(new Error(`Codex app-server exited with ${detail}`));

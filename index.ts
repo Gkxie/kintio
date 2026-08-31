@@ -61,6 +61,9 @@ process.on('message', (message) => {
   if (message === 'shutdown') void shutdown('parent shutdown');
 });
 process.once('disconnect', () => shutdown('parent disconnect'));
+if (process.env.KINTIO_MANAGED_WORKER === '1' && !process.connected) {
+  void shutdown('parent disconnect');
+}
 
 try {
   await supervisor.start();

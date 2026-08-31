@@ -4,7 +4,7 @@ import net from 'node:net';
 import path from 'node:path';
 import { test } from 'vitest';
 import { setTimeout as delay } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import crossSpawn from 'cross-spawn';
 
 import { isForcedExit, startTestChild } from '../support/child-process.ts';
@@ -94,6 +94,7 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
   const child = startTestChild(t, indexFile, {
     timeoutMs: 8_000,
     env: {
+      KINTIO_HOME: temporary.directory,
       PORT: String(servicePort),
       WECOM_CALLBACK_TOKEN: 'LifecycleToken123',
       WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
@@ -142,6 +143,7 @@ test('parent shutdown message uses the same graceful close path', async (t) => {
   const child = startTestChild(t, indexFile, {
     timeoutMs: 8_000,
     env: {
+      KINTIO_HOME: temporary.directory,
       PORT: String(servicePort),
       WECOM_CALLBACK_TOKEN: '',
       WECOM_ENCODING_AES_KEY: '',
@@ -160,6 +162,70 @@ test('parent shutdown message uses the same graceful close path', async (t) => {
   assert.match(child.output().stdout, /Received parent shutdown; shutting down/u);
 });
 
+test('managed Worker notices a parent lost before bootstrap listeners exist', async (t) => {
+  const servicePort = await availablePort();
+  const temporary = await createTempSqlite(t, {
+    prefix: 'kintio-early-parent-disconnect-',
+    filename: 'state.sqlite',
+  });
+  const home = path.join(temporary.directory, 'instance');
+  const configFile = path.join(home, '.env');
+  const databaseFile = path.join(home, 'data/state.sqlite');
+  const bootstrapDelay = path.join(temporary.directory, 'bootstrap-delay.mjs');
+  await fs.mkdir(home, { recursive: true });
+  await fs.writeFile(configFile, [
+    `PORT=${servicePort}`,
+    'CODEX_ENABLED=false',
+    'ILINK_ENABLED=false',
+    `KINTIO_DB_FILE=${databaseFile}`,
+  ].join('\n'));
+  await fs.writeFile(
+    bootstrapDelay,
+    'await new Promise((resolve) => setTimeout(resolve, 250));\n',
+  );
+  const child = crossSpawn(
+    process.execPath,
+    ['--import', pathToFileURL(bootstrapDelay).href, indexFile],
+    {
+      env: {
+        ...process.env,
+        KINTIO_HOME: home,
+        KINTIO_CONFIG_FILE: configFile,
+        KINTIO_MANAGED_WORKER: '1',
+      },
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+    },
+  );
+  if (!child.stdout || !child.stderr) {
+    child.kill('SIGKILL');
+    throw new Error('Managed Worker was started without captured output');
+  }
+  let output = '';
+  child.stdout.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  child.stderr.on('data', (chunk: Buffer) => { output += chunk.toString(); });
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+    (resolve, reject) => {
+      child.once('error', reject);
+      child.once('exit', (code, signal) => resolve({ code, signal }));
+    },
+  );
+  t.onTestFinished(async () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    await exited.catch(() => undefined);
+  });
+
+  child.disconnect();
+  const result = await Promise.race([
+    exited,
+    delay(5_000).then(() => {
+      throw new Error(`Managed Worker survived its lost parent\n${output}`);
+    }),
+  ]);
+  assert.deepEqual(result, { code: 0, signal: null }, output);
+  assert.match(output, /Received parent disconnect; shutting down/u);
+  await assertPortReleased(servicePort);
+});
+
 test('production script builds and runs dist/index.js', async (t) => {
   const servicePort = await availablePort();
   await assertPortReleased(servicePort);
@@ -176,6 +242,7 @@ test('production script builds and runs dist/index.js', async (t) => {
   await fs.writeFile(managedSkill, 'stale dist Worker Skill\n');
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
+    KINTIO_HOME: temporary.directory,
     PORT: String(servicePort),
     WECOM_CALLBACK_TOKEN: 'LifecycleToken123',
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',

@@ -9,6 +9,15 @@ import { createConfig } from '../../src/config.ts';
 import type { Runtime } from '../../src/runtime.ts';
 import { KintioSupervisor } from '../../src/supervisor.ts';
 
+const isolatedRoot = path.join(os.tmpdir(), 'kintio-supervisor-config');
+
+function testConfig(
+  environment: NodeJS.ProcessEnv,
+  root = isolatedRoot,
+) {
+  return createConfig(environment, root);
+}
+
 interface Deferred {
   readonly promise: Promise<void>;
   readonly resolve: () => void;
@@ -64,7 +73,7 @@ test('supervisor binds public ingress before starting the runtime', async () => 
   const port = await availablePort();
   const events: string[] = [];
   const supervisor = new KintioSupervisor({
-    config: createConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
+    config: testConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
     logger,
     runtime: fakeRuntime(events, {
       async start() {
@@ -85,7 +94,7 @@ test('WeChat callback ingress stays gated until all live listeners start', async
   const port = await availablePort();
   const events: string[] = [];
   const supervisor = new KintioSupervisor({
-    config: createConfig({
+    config: testConfig({
       PORT: String(port),
       WECOM_CALLBACK_TOKEN: 'SupervisorToken123',
       WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
@@ -111,7 +120,7 @@ test('graceful close keeps the public listener online while runtime drains', asy
   const events: string[] = [];
   const drain = deferred();
   const supervisor = new KintioSupervisor({
-    config: createConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
+    config: testConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
     logger,
     runtime: fakeRuntime(events, { close: () => drain.promise }),
   });
@@ -138,7 +147,7 @@ test('close during startup cancels readiness and releases both channel and runti
   const releaseStart = deferred();
   const enteredStart = deferred();
   const supervisor = new KintioSupervisor({
-    config: createConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
+    config: testConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
     logger,
     runtime: fakeRuntime(events, {
       async start() {
@@ -166,7 +175,7 @@ test('close during startup cancels readiness and releases both channel and runti
 test('abort during runtime handoff aborts and closes the acquired runtime', async () => {
   const events: string[] = [];
   const supervisor = new KintioSupervisor({
-    config: createConfig({ PORT: String(await availablePort()), CODEX_ENABLED: 'false' }),
+    config: testConfig({ PORT: String(await availablePort()), CODEX_ENABLED: 'false' }),
     logger,
     runtime: fakeRuntime(events),
   });
@@ -193,7 +202,7 @@ test('HTTP bind failure releases core resources without starting message ingress
   if (!address || typeof address === 'string') throw new Error('Missing blocked port');
   const events: string[] = [];
   const supervisor = new KintioSupervisor({
-    config: createConfig({ PORT: String(address.port), CODEX_ENABLED: 'false' }),
+    config: testConfig({ PORT: String(address.port), CODEX_ENABLED: 'false' }),
     logger,
     runtime: fakeRuntime(events),
   });
@@ -210,7 +219,7 @@ test('runtime initialization failure closes the already-bound HTTP channel', asy
   const port = await availablePort();
   const events: string[] = [];
   const supervisor = new KintioSupervisor({
-    config: createConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
+    config: testConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
     logger,
     runtime: fakeRuntime(events, {
       async start() {
@@ -233,7 +242,7 @@ test('process abort stops ingress without claiming a graceful resource close', a
   const port = await availablePort();
   const events: string[] = [];
   const supervisor = new KintioSupervisor({
-    config: createConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
+    config: testConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
     logger,
     runtime: fakeRuntime(events),
   });
@@ -262,7 +271,7 @@ test('process abort upgrades a graceful close and drops idle HTTP connections', 
   const events: string[] = [];
   const drain = deferred();
   const supervisor = new KintioSupervisor({
-    config: createConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
+    config: testConfig({ PORT: String(port), CODEX_ENABLED: 'false' }),
     logger,
     runtime: fakeRuntime(events, { close: () => drain.promise }),
   });
@@ -289,11 +298,11 @@ test('constructing and closing an unstarted supervisor owns no runtime files', a
   t.onTestFinished(() => fs.rm(root, { recursive: true, force: true }));
   const databaseFile = path.join(root, 'state.sqlite');
   const supervisor = new KintioSupervisor({
-    config: createConfig({
+    config: testConfig({
       PORT: String(await availablePort()),
       KINTIO_DB_FILE: databaseFile,
       CODEX_ENABLED: 'false',
-    }),
+    }, root),
     logger,
   });
 

@@ -43,7 +43,7 @@ test('runtime never mutates the host Codex configuration', async (t) => {
     WECOM_DB_FILE: temporary.filePath,
     CODEX_WORKING_DIRECTORY: path.join(temporary.directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(temporary.directory, 'image-inputs'),
-  });
+  }, temporary.directory);
   const runtime = await createRuntime({
     config,
     logger: { info() {}, warn() {}, error() {} },
