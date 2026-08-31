@@ -226,9 +226,14 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(realCodex, /name: Remove isolated Codex state\n\s+if: always\(\)/u);
 
   const release = workflows.get('.github/workflows/release.yml') || '';
-  assert.match(release, /tags: \['v\*\.\*\.\*'\]/u);
   assert.match(release, /^  workflow_dispatch:$/mu);
+  assert.doesNotMatch(release, /^  push:/mu);
   assert.match(release, /git merge-base --is-ancestor/u);
+  assert.match(release, /associatedPulls\.find/u);
+  assert.match(release, /pull\.user\?\.login === process\.env\.REPOSITORY_OWNER/u);
+  assert.match(release, /releasePull\.merged_by\?\.login !== process\.env\.REPOSITORY_OWNER/u);
+  assert.match(release, /tag commit is not an authorized merged Release PR/u);
+  assert.match(release, /allowedReleaseFiles/u);
   assert.match(release, /Release tags must be annotated tags/u);
   assert.match(release, /contents: read[\s\S]+contents: write/u);
   assert.match(release, /npm pack --json --ignore-scripts/u);
