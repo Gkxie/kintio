@@ -211,10 +211,12 @@ Kintio uses SemVer and `vX.Y.Z` Git tags. During `0.x`:
 
 Kintio is published as the public `@kin-tio/cli` package on the official npm
 Registry. The manifest's explicit file allowlist excludes tests, repository
-automation, source-only files, and runtime state. npm publication is currently
-an intentional Maintainer action from a clean, reviewed release commit using
-account 2FA; do not store a publish token in the repository. GitHub releases
-remain source-only and carry no uploaded assets.
+automation, source-only files, and runtime state. npm publication uses Trusted
+Publishing from `Gkxie/kintio`, `release.yml`, and the `npm-release`
+Environment. The Environment accepts only release tags, requires Maintainer
+approval, and cannot be bypassed by administrators. The publish job receives a
+short-lived OIDC credential and no reusable npm token. GitHub releases remain
+source-only and carry no uploaded assets.
 
 ## Publish a release
 
@@ -226,22 +228,7 @@ remain source-only and carry no uploaded assets.
 4. Run `pnpm test` and inspect `npm pack --dry-run`. Before merging, wait for
    every required PR check, including CI and Gitleaks. After merging, confirm
    that `master` points to the reviewed squash commit and wait for CodeQL.
-5. From that clean `master` commit, build and publish the exact tarball:
-
-   ```bash
-   test -z "$(git status --short)"
-   pnpm install --frozen-lockfile
-   pnpm test
-   pnpm run build
-   npm pack --json --ignore-scripts
-   npm publish ./kin-tio-cli-X.Y.Z.tgz --access public
-   npm view @kin-tio/cli@X.Y.Z dist.integrity
-   ```
-
-   Account 2FA is required. Confirm a clean-prefix Registry installation reports
-   the exact version before continuing. If the package name becomes occupied
-   before the first publish, stop and select a reviewed replacement in a new PR.
-6. Create and push an annotated tag from the latest `master`:
+5. Create and push an annotated tag from the latest `master`:
 
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z"
@@ -251,20 +238,25 @@ remain source-only and carry no uploaded assets.
    Once pushed, a release tag must never be deleted, moved, or reused, even if
    the release workflow fails.
 
-7. The release workflow's read-only job rechecks version monotonicity, the
-   Changelog, source commit, tests, build, and dependencies. A separate job with
-   minimal write permission then publishes the GitHub Release. Pushing the tag
-   is the final release action, so Release Notes must already have been reviewed
-   in the version PR.
-8. Confirm that [SECURITY.md](SECURITY.md) lists the supported release line.
-   Close linked issues only after the release is downloadable.
+6. The read-only verification job rechecks version monotonicity, the Changelog,
+   source commit, tests, build, and dependencies, then uploads one npm tarball
+   with its SHA-512 integrity. Review the pending `npm-release` deployment and
+   approve it only when the tag and release notes are correct.
+7. The OIDC job publishes that exact tarball and waits for npm's publish-time
+   scan to make it installable. A tokenless job then installs the public
+   Registry version before a separately permissioned job creates the GitHub
+   Release.
+8. Verify npm provenance, Registry integrity, `kintio --version`, and the
+   GitHub Release. Confirm that [SECURITY.md](SECURITY.md) lists the supported
+   release line. Close linked issues only after all four checks succeed.
 
-Rerun the original workflow after a transient infrastructure failure only when
-no GitHub Release was created. A pre-existing Release always fails closed; if a
-Release exists, verify it instead of rerunning the workflow. If code must change,
+Rerun the original workflow after a transient failure only when no GitHub
+Release was created. If npm already contains the version, the workflow continues
+only when its integrity exactly matches the verified tarball. A different
+integrity or a pre-existing GitHub Release fails closed. If code must change,
 keep the failed tag, increment to a new Patch version, and carry forward every
-Changelog entry that has never been published. Never rewrite a public Release;
-publish a new Patch release instead.
+Changelog entry that has never been published. Never rewrite a public package
+version or Release.
 
 An npm version is also immutable. Do not unpublish or overwrite a defective
 version; deprecate it with an actionable upgrade message and publish a fixed

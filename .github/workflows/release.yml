@@ -19,6 +19,10 @@ jobs:
       contents: read
     outputs:
       commit: ${{ steps.metadata.outputs.commit }}
+      package_name: ${{ steps.package.outputs.name }}
+      package_version: ${{ steps.package.outputs.version }}
+      package_file: ${{ steps.package.outputs.filename }}
+      package_integrity: ${{ steps.package.outputs.integrity }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -149,10 +153,22 @@ jobs:
           fs.writeFileSync(`${process.env.RUNNER_TEMP}/release-notes.md`, `${notes}\n`);
           NODE
 
+          tag_ref="refs/tags/$RELEASE_TAG"
+          tag_type=$(git cat-file -t "$tag_ref" 2>/dev/null || true)
+          test "$tag_type" = 'tag' || {
+            echo 'Release tags must be annotated tags.'
+            exit 1
+          }
+          tag_target_type=$(git cat-file -p "$tag_ref" | sed -n 's/^type //p')
+          test "$tag_target_type" = 'commit' || {
+            echo 'The annotated release tag must point directly to a commit.'
+            exit 1
+          }
           commit=$(git rev-parse HEAD)
+          tag_commit=$(git rev-parse "$tag_ref^{commit}")
           event_commit=$(git rev-parse "${EVENT_SHA}^{commit}")
-          test "$commit" = "$event_commit" || {
-            echo 'Checked out commit differs from the tag push event; release refused.'
+          test "$commit" = "$event_commit" && test "$commit" = "$tag_commit" || {
+            echo 'Checked out commit differs from the annotated tag; release refused.'
             exit 1
           }
           git merge-base --is-ancestor "$commit" refs/remotes/origin/master || {
@@ -165,16 +181,326 @@ jobs:
       - run: KNIP_DISABLE_RAW_TRANSFER=1 pnpm exec knip
       - run: pnpm test
       - run: pnpm run build
+      - name: Pack the verified npm artifact
+        id: package
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-package"
+          npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP/npm-package" > "$RUNNER_TEMP/npm-pack.json"
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+
+          const results = JSON.parse(fs.readFileSync(
+            process.env.RUNNER_TEMP + '/npm-pack.json',
+            'utf8',
+          ));
+          if (!Array.isArray(results) || results.length !== 1) {
+            throw new Error('npm pack must produce exactly one package');
+          }
+          const [packed] = results;
+          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          if (packed.name !== packageJson.name || packed.version !== packageJson.version) {
+            throw new Error('packed identity differs from package.json');
+          }
+          if (
+            packageJson.private === true
+            || packageJson.publishConfig?.access !== 'public'
+            || packageJson.publishConfig?.registry !== 'https://registry.npmjs.org/'
+          ) {
+            throw new Error('package is not configured for the public npm Registry');
+          }
+          if (
+            typeof packed.filename !== 'string'
+            || packed.filename !== path.basename(packed.filename)
+          ) {
+            throw new Error('npm pack returned an unsafe filename');
+          }
+          const tarball = path.join(
+            process.env.RUNNER_TEMP,
+            'npm-package',
+            packed.filename,
+          );
+          const integrity = 'sha512-' + createHash('sha512')
+            .update(fs.readFileSync(tarball))
+            .digest('base64');
+          if (packed.integrity !== integrity) {
+            throw new Error('npm pack integrity differs from the tarball bytes');
+          }
+          const metadata = {
+            name: packed.name,
+            version: packed.version,
+            filename: packed.filename,
+            integrity,
+          };
+          fs.writeFileSync(
+            process.env.RUNNER_TEMP + '/npm-package/package-metadata.json',
+            JSON.stringify(metadata, null, 2) + '\n',
+          );
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            Object.entries(metadata)
+              .map(([key, value]) => key + '=' + value + '\n')
+              .join(''),
+          );
+          NODE
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: release-notes-${{ github.run_id }}
           path: ${{ runner.temp }}/release-notes.md
           if-no-files-found: error
-          retention-days: 1
+          retention-days: 30
+          overwrite: true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: npm-package-${{ github.run_id }}
+          path: ${{ runner.temp }}/npm-package
+          if-no-files-found: error
+          retention-days: 30
           overwrite: true
 
-  release:
+  publish-npm:
     needs: verify
+    environment: npm-release
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package-${{ github.run_id }}
+          path: release-input
+      - name: Publish with OIDC or verify an identical existing version
+        env:
+          EXPECTED_NAME: ${{ needs.verify.outputs.package_name }}
+          EXPECTED_VERSION: ${{ needs.verify.outputs.package_version }}
+          EXPECTED_FILE: ${{ needs.verify.outputs.package_file }}
+          EXPECTED_INTEGRITY: ${{ needs.verify.outputs.package_integrity }}
+        run: |
+          node --input-type=module <<'NODE'
+          import { createHash } from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          import { spawnSync } from 'node:child_process';
+
+          const registry = 'https://registry.npmjs.org/';
+          const metadata = JSON.parse(fs.readFileSync(
+            'release-input/package-metadata.json',
+            'utf8',
+          ));
+          const expected = {
+            name: process.env.EXPECTED_NAME,
+            version: process.env.EXPECTED_VERSION,
+            filename: process.env.EXPECTED_FILE,
+            integrity: process.env.EXPECTED_INTEGRITY,
+          };
+          for (const key of Object.keys(expected)) {
+            if (metadata[key] !== expected[key]) {
+              throw new Error('downloaded package ' + key + ' differs from verification');
+            }
+          }
+          if (metadata.filename !== path.basename(metadata.filename)) {
+            throw new Error('downloaded package filename is unsafe');
+          }
+          const tarball = path.resolve('release-input', metadata.filename);
+          const integrity = 'sha512-' + createHash('sha512')
+            .update(fs.readFileSync(tarball))
+            .digest('base64');
+          if (integrity !== metadata.integrity) {
+            throw new Error('downloaded tarball integrity differs from verification');
+          }
+
+          const npmVersion = spawnSync('npm', ['--version'], { encoding: 'utf8' });
+          if (npmVersion.status !== 0) throw new Error('cannot read npm version');
+          const found = npmVersion.stdout.trim().split('.').map(Number);
+          const minimum = [11, 5, 1];
+          let comparison = 0;
+          for (let index = 0; index < minimum.length && comparison === 0; index += 1) {
+            comparison = Math.sign((found[index] || 0) - minimum[index]);
+          }
+          if (comparison < 0) {
+            throw new Error('npm 11.5.1 or newer is required');
+          }
+
+          const spec = metadata.name + '@' + metadata.version;
+          const viewIntegrity = () => {
+            const result = spawnSync(
+              'npm',
+              ['view', spec, 'dist.integrity', '--json', '--registry', registry],
+              { encoding: 'utf8' },
+            );
+            if (result.status === 0) {
+              const value = JSON.parse(result.stdout || 'null');
+              if (typeof value !== 'string') {
+                throw new Error('invalid Registry metadata for ' + spec);
+              }
+              return value;
+            }
+            const output = (result.stdout || '') + '\n' + (result.stderr || '');
+            if (/\bE404\b|404 Not Found/u.test(output)) return undefined;
+            throw new Error('cannot query ' + spec + ': ' + output.trim());
+          };
+          const distTagsContainVersion = () => {
+            const result = spawnSync(
+              'npm',
+              ['dist-tag', 'ls', metadata.name, '--registry', registry],
+              { encoding: 'utf8' },
+            );
+            if (result.status !== 0) {
+              throw new Error('cannot query npm dist-tags for ' + metadata.name);
+            }
+            return result.stdout.split(/\r?\n/u).some((line) => {
+              const separator = line.indexOf(':');
+              return separator >= 0
+                && line.slice(separator + 1).trim() === metadata.version;
+            });
+          };
+
+          const existing = viewIntegrity();
+          if (existing !== undefined && existing !== metadata.integrity) {
+            throw new Error(spec + ' already exists with different bytes');
+          }
+          if (existing === metadata.integrity) {
+            console.log(spec + ' already exists with the verified integrity');
+            process.exit(0);
+          }
+
+          const pendingFromEarlierRun = distTagsContainVersion();
+          if (!pendingFromEarlierRun) {
+            const published = spawnSync(
+              'npm',
+              ['publish', tarball, '--ignore-scripts', '--access', 'public', '--registry', registry],
+              { stdio: 'inherit' },
+            );
+            if (published.status !== 0 && !distTagsContainVersion()) {
+              throw new Error('npm publish failed without reserving the release dist-tag');
+            }
+          } else {
+            console.log(spec + ' is already pending npm publish-time scanning');
+          }
+
+          let lastError;
+          for (let attempt = 1; attempt <= 80; attempt += 1) {
+            let current;
+            try {
+              current = viewIntegrity();
+              lastError = undefined;
+            } catch (error) {
+              lastError = error;
+            }
+            if (current === metadata.integrity) {
+              console.log(spec + ' is installable with the verified integrity');
+              process.exit(0);
+            }
+            if (current !== undefined) {
+              throw new Error(spec + ' appeared with different bytes');
+            }
+            if (attempt === 1 || attempt % 4 === 0) {
+              console.log('npm publish-time scan pending; attempt=' + attempt);
+              if (lastError) console.log(String(lastError.message || lastError));
+            }
+            await new Promise((resolve) => setTimeout(resolve, 15_000));
+          }
+          throw lastError || new Error(spec + ' did not become installable within 20 minutes');
+          NODE
+
+  smoke-registry:
+    needs: [verify, publish-npm]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: Install the public Registry package
+        env:
+          PACKAGE_NAME: ${{ needs.verify.outputs.package_name }}
+          PACKAGE_VERSION: ${{ needs.verify.outputs.package_version }}
+        run: |
+          npm install --global --prefix "$RUNNER_TEMP/kintio-global" "$PACKAGE_NAME@$PACKAGE_VERSION" --ignore-scripts --no-audit --no-fund --registry https://registry.npmjs.org/
+          test "$("$RUNNER_TEMP/kintio-global/bin/kintio" --version)" = "$PACKAGE_VERSION"
+          HOME="$RUNNER_TEMP/kintio-profile" "$RUNNER_TEMP/kintio-global/bin/kintio" setup
+          test -f "$RUNNER_TEMP/kintio-profile/.kintio/.env"
+          test -f "$RUNNER_TEMP/kintio-profile/.kintio/codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md"
+      - name: Verify Registry signatures and Trusted Publishing provenance
+        env:
+          PACKAGE_NAME: ${{ needs.verify.outputs.package_name }}
+          PACKAGE_VERSION: ${{ needs.verify.outputs.package_version }}
+          EXPECTED_REPOSITORY: https://github.com/${{ github.repository }}
+          EXPECTED_WORKFLOW: .github/workflows/release.yml
+          EXPECTED_REF: refs/tags/${{ github.ref_name }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+        run: |
+          mkdir "$RUNNER_TEMP/provenance-audit"
+          node --input-type=module -e "import fs from 'node:fs'; fs.writeFileSync(process.argv[1], '{\"private\":true}\n')" "$RUNNER_TEMP/provenance-audit/package.json"
+          npm install --prefix "$RUNNER_TEMP/provenance-audit" --save-exact "$PACKAGE_NAME@$PACKAGE_VERSION" --ignore-scripts --no-audit --no-fund --registry https://registry.npmjs.org/
+          set +e
+          npm audit signatures --prefix "$RUNNER_TEMP/provenance-audit" --json --include-attestations > "$RUNNER_TEMP/provenance-audit/report.json"
+          set -e
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
+          const report = JSON.parse(fs.readFileSync(
+            process.env.RUNNER_TEMP + '/provenance-audit/report.json',
+            'utf8',
+          ));
+          const targetFailure = [
+            ...(report.invalid || []),
+            ...(report.missing || []),
+          ].find((item) =>
+            item.name === process.env.PACKAGE_NAME
+            && item.version === process.env.PACKAGE_VERSION
+          );
+          if (targetFailure) {
+            throw new Error('npm reported invalid or missing Kintio signatures');
+          }
+          const target = report.verified?.find((item) =>
+            item.name === process.env.PACKAGE_NAME
+            && item.version === process.env.PACKAGE_VERSION
+          );
+          if (!target?.attestations?.provenance) {
+            throw new Error('Trusted Publishing provenance is missing');
+          }
+          const provenance = target.attestationBundles?.find(
+            (item) => item.predicateType === 'https://slsa.dev/provenance/v1',
+          );
+          if (!provenance?.bundle?.dsseEnvelope?.payload) {
+            throw new Error('verified SLSA provenance bundle is missing');
+          }
+          const statement = JSON.parse(Buffer.from(
+            provenance.bundle.dsseEnvelope.payload,
+            'base64',
+          ).toString('utf8'));
+          const build = statement.predicate?.buildDefinition;
+          const workflow = build?.externalParameters?.workflow;
+          const sourceCommit = build?.resolvedDependencies?.some(
+            (item) => item.digest?.gitCommit === process.env.EXPECTED_COMMIT,
+          );
+          if (
+            workflow?.repository !== process.env.EXPECTED_REPOSITORY
+            || workflow?.path !== process.env.EXPECTED_WORKFLOW
+            || workflow?.ref !== process.env.EXPECTED_REF
+            || !sourceCommit
+            || statement.predicate?.runDetails?.builder?.id
+              !== 'https://github.com/actions/runner/github-hosted'
+          ) {
+            throw new Error('provenance does not match the release workflow and commit');
+          }
+          NODE
+
+  release:
+    needs: [verify, publish-npm, smoke-registry]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
