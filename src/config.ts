@@ -11,7 +11,7 @@ export function resolveProjectRoot(moduleUrl: string): string {
     : parentDirectory;
 }
 
-const projectRoot = resolveProjectRoot(import.meta.url);
+export const KINTIO_PACKAGE_ROOT = resolveProjectRoot(import.meta.url);
 
 export const FORCE_ABORT_TIMEOUT_MS = 5_000;
 const MAX_SHUTDOWN_TIMEOUT_MS = 120_000;
@@ -31,7 +31,7 @@ export function parseStartTimeout(value: string | undefined): number {
 
 function resolveInstanceRoot(
   environment: NodeJS.ProcessEnv = process.env,
-  fallback = projectRoot,
+  fallback = KINTIO_PACKAGE_ROOT,
 ): string {
   return path.resolve(environment.KINTIO_HOME || fallback);
 }
@@ -393,7 +393,9 @@ export function loadConfig(
   const initialRoot = path.resolve(
     options.root ||
       environment.KINTIO_HOME ||
-      (configuredEnvFile ? path.dirname(path.resolve(configuredEnvFile)) : projectRoot),
+      (configuredEnvFile
+        ? path.dirname(path.resolve(configuredEnvFile))
+        : KINTIO_PACKAGE_ROOT),
   );
   const envFile = path.resolve(
     configuredEnvFile || path.join(initialRoot, '.env'),

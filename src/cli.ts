@@ -13,7 +13,11 @@ import {
   resolveProjectRoot,
 } from './config.ts';
 import { isPathInside, samePath } from './lib/path-identity.ts';
-import { ensurePrivateDirectory } from './lib/private-directory.ts';
+import {
+  assertTrustedDirectory,
+  ensureContainedDirectory,
+  ensurePrivateDirectory,
+} from './lib/private-directory.ts';
 import {
   daemonRecordPath,
   readDaemonRecord,
@@ -25,6 +29,7 @@ import {
   processIsAlive,
   SingleInstanceLockError,
 } from './runtime/single-instance-lock.ts';
+import { installManagedSkill } from './runtime/managed-skill.ts';
 import { KINTIO_VERSION } from './version.ts';
 
 interface ProcessRequest {
@@ -171,46 +176,6 @@ function instanceLocation(
   return Object.freeze(location);
 }
 
-function containedDirectory(root: string, directory: string): void {
-  if (!isPathInside(root, directory)) {
-    throw new Error(`Instance path escapes through a symbolic link: ${directory}`);
-  }
-}
-
-function assertTrustedDirectory(
-  directory: string,
-  label: string,
-  privateContents: boolean,
-): void {
-  const stat = fs.lstatSync(directory);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw new Error(`${label} is not a regular directory: ${directory}`);
-  }
-  if (process.platform === 'win32') return;
-  const uid = process.getuid?.();
-  if (uid !== undefined && stat.uid !== uid) {
-    throw new Error(`${label} is not owned by the current user: ${directory}`);
-  }
-  const forbidden = privateContents ? 0o077 : 0o022;
-  if ((stat.mode & forbidden) !== 0) {
-    throw new Error(`${label} has unsafe permissions: ${directory}`);
-  }
-}
-
-function ensureContainedDirectory(root: string, directory: string): string {
-  const target = path.resolve(directory);
-  let ancestor = target;
-  while (!fs.existsSync(ancestor)) {
-    const parent = path.dirname(ancestor);
-    if (parent === ancestor) break;
-    ancestor = parent;
-  }
-  containedDirectory(root, ancestor);
-  const created = ensurePrivateDirectory(target);
-  containedDirectory(root, created);
-  return created;
-}
-
 function regularFile(filePath: string, label: string): fs.Stats | undefined {
   try {
     const stat = fs.lstatSync(filePath);
@@ -273,28 +238,6 @@ function writeNewFile(
   }
 }
 
-function writeManagedFile(
-  filePath: string,
-  content: string,
-  containmentRoot: string,
-): 'created' | 'updated' | 'current' {
-  ensureContainedDirectory(containmentRoot, path.dirname(filePath));
-  assertTrustedDirectory(path.dirname(filePath), 'Managed directory', true);
-  const existing = regularFile(filePath, 'Managed file');
-  if (existing && fs.readFileSync(filePath, 'utf8') === content) return 'current';
-  const temporary = path.join(
-    path.dirname(filePath),
-    `.${path.basename(filePath)}.${process.pid}.${randomBytes(8).toString('hex')}.tmp`,
-  );
-  fs.writeFileSync(temporary, content, { flag: 'wx', mode: 0o600 });
-  try {
-    fs.renameSync(temporary, filePath);
-  } finally {
-    fs.rmSync(temporary, { force: true });
-  }
-  return existing ? 'updated' : 'created';
-}
-
 function prepareDirectories(home: string): void {
   assertTrustedDirectory(
     ensurePrivateDirectory(home),
@@ -306,11 +249,29 @@ function prepareDirectories(home: string): void {
     'Kintio data directory',
     true,
   );
-  assertTrustedDirectory(
-    ensureContainedDirectory(home, path.join(home, 'codex-workspace')),
-    'Kintio workspace directory',
-    false,
-  );
+}
+
+function loadInstanceConfig(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+  environment: NodeJS.ProcessEnv = runtime.env,
+): ReturnType<typeof loadConfig> {
+  return loadConfig({
+    environment: { ...environment },
+    envFile: location.configFile,
+    root: location.home,
+  });
+}
+
+function refreshManagedSkill(
+  workingDirectory: string,
+  runtime: CliRuntime,
+) {
+  return installManagedSkill({
+    packageRoot: runtime.packageRoot,
+    workingDirectory,
+    userHome: runtime.homeDirectory,
+  });
 }
 
 function setup(location: InstanceLocation, runtime: CliRuntime): number {
@@ -326,18 +287,9 @@ function setup(location: InstanceLocation, runtime: CliRuntime): number {
   const configStat = privateFile(location.configFile, 'Kintio config');
   if (!configStat) throw new Error(`Kintio config was not created: ${location.configFile}`);
 
-  const bundledSkill = path.join(
-    runtime.packageRoot,
-    'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
-  );
-  const installedSkill = path.join(
-    location.home,
-    'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
-  );
-  const skillState = writeManagedFile(
-    installedSkill,
-    fs.readFileSync(bundledSkill, 'utf8'),
-    location.home,
+  const skill = refreshManagedSkill(
+    loadInstanceConfig(location, runtime).codex.workingDirectory,
+    runtime,
   );
   const defaultHome = path.join(runtime.homeDirectory, '.kintio');
   const defaultConfig = path.join(defaultHome, '.env');
@@ -350,7 +302,7 @@ function setup(location: InstanceLocation, runtime: CliRuntime): number {
     `Kintio setup complete.\n` +
     `Home: ${location.home}\n` +
     `Config: ${location.configFile} (${configCreated ? 'created' : 'kept'})\n` +
-    `Agent skill: ${installedSkill} (${skillState})\n` +
+    `Agent skill: ${skill.file} (${skill.state})\n` +
     `Edit the config, run "codex login status", then ${nextStep}\n`,
   );
   return 0;
@@ -371,11 +323,8 @@ function processEnvironment(
     KINTIO_CONFIG_FILE: location.configFile,
     NODE_ENV: 'production',
   };
-  loadConfig({
-    environment: { ...environment },
-    envFile: location.configFile,
-    root: location.home,
-  });
+  const config = loadInstanceConfig(location, runtime, environment);
+  refreshManagedSkill(config.codex.workingDirectory, runtime);
   return environment;
 }
 

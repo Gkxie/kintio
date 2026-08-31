@@ -27,14 +27,17 @@ Kintio uses the local Codex CLI session directly. It does not copy API keys or m
 
 The global command is installed from the checked-out source during the `0.x`
 phase. `kintio setup` creates `~/.kintio` with private directories, installs the
-bundled Agent skill, and writes `~/.kintio/.env`. On macOS and Linux the file is
+bundled Agent skill in the effective `CODEX_WORKING_DIRECTORY`, and writes
+`~/.kintio/.env`. On macOS and Linux the file is
 created with mode `0600`; on Windows the instance and config must stay inside
 the current user's profile and use its ACL boundary. Kintio refuses to overwrite
 an existing config. Use `--home` or `--config` for an explicit instance location;
 runtime state never defaults to the global package directory.
 The installed `wechat-kf-reply-sop` file is a Kintio-managed asset and is
-atomically refreshed when `setup` runs after an upgrade. Keep local Agent
-customizations outside that managed Skill path.
+atomically refreshed by `setup` and again before every process launch. Changing
+`CODEX_WORKING_DIRECTORY` therefore moves the active managed Skill boundary to
+that workspace instead of leaving a dangling prompt reference. Keep local Agent
+customizations outside the managed Skill path.
 
 The instance path is a security boundary. For custom locations, every mutable
 parent must be trusted: use owner-controlled directories (or a sticky shared
@@ -48,6 +51,7 @@ Configure the shared settings in `~/.kintio/.env`:
 ```dotenv
 PORT=8888
 CODEX_ENABLED=true
+# CODEX_WORKING_DIRECTORY=./codex-workspace
 ```
 
 Kintio registers MCP with Codex as local stdio processes. Behind stdio it uses a

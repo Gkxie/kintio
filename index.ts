@@ -1,7 +1,16 @@
-import { FORCE_ABORT_TIMEOUT_MS, loadConfig } from './src/config.ts';
+import {
+  FORCE_ABORT_TIMEOUT_MS,
+  KINTIO_PACKAGE_ROOT,
+  loadConfig,
+} from './src/config.ts';
+import { installManagedSkill } from './src/runtime/managed-skill.ts';
 import { KintioSupervisor } from './src/supervisor.ts';
 
 const config = loadConfig();
+installManagedSkill({
+  packageRoot: KINTIO_PACKAGE_ROOT,
+  workingDirectory: config.codex.workingDirectory,
+});
 let rejectFatal!: (error: Error) => void;
 const fatal = new Promise<never>((_resolve, reject) => { rejectFatal = reject; });
 const supervisor = new KintioSupervisor({ config, onFatal: rejectFatal });

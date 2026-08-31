@@ -4,6 +4,10 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Installed and refreshed the managed conversation Skill in the effective
+  configured Agent workspace, so a custom `CODEX_WORKING_DIRECTORY` cannot
+  leave a dangling session-level Skill reference
+  ([#30](https://github.com/Gkxie/kintio/issues/30)).
 - Moved MCP actions off HTTP entirely: Codex now starts true stdio relays backed
   by a private Unix-domain socket or Windows named pipe, with no MCP TCP port or
   static URL/Bearer configuration. The Codex adapter continues to inherit host
