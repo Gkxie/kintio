@@ -40,7 +40,10 @@ class ImageBoundary implements CodexBoundary {
   executeArtifact?: (
     session: string,
     mediaRef: string,
-  ) => Promise<{ readonly attemptId: string; readonly msgid: string }>;
+  ) => Promise<{
+    readonly attemptId: string;
+    readonly providerMessageId: string;
+  }>;
 
   constructor(png: Buffer) {
     this.thread = {
@@ -171,7 +174,7 @@ test('generated image flows through the channel runtime and a same-thread delta 
   function ingest(raw: Record<string, unknown>): string {
     const next = `${cursor}-${String(raw.msgid)}`;
     const page = store.ingestSyncPage({
-      openKfId: 'wk-image', expectedCursor: cursor, nextCursor: next,
+      accountKey: 'wk-image', expectedCursor: cursor, nextCursor: next,
       messages: [normalizeWecomMessage(raw, 'wk-image', { cursor, index: 0 })],
     });
     cursor = next;
@@ -216,8 +219,9 @@ test('generated image flows through the channel runtime and a same-thread delta 
   });
   assert.match(sent[0]?.messageId || '', /^wb_[a-f0-9]{29}$/u);
   const imageAttempt = store.listRecentConversationAttempts({
-    openKfId: 'wk-image',
-    externalUserId: 'wm-image',
+    channel: 'wechat_kf',
+    accountKey: 'wk-image',
+    peerId: 'wm-image',
   }).find((attempt) => attempt.messageKey === primaryKey);
   assert.equal(imageAttempt?.status, 'accepted');
   assert.equal(imageAttempt?.source, 'mcp_tool');

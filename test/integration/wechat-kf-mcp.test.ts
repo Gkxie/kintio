@@ -53,7 +53,7 @@ async function harness(
     text: { content: '测试' },
   }, 'wk-one');
   const page = store.ingestSyncPage({
-    openKfId: 'wk-one',
+    accountKey: 'wk-one',
     nextCursor: 'cursor-one',
     messages: [normalized],
   });
@@ -152,7 +152,7 @@ describe('WeChat MCP receipt boundary', () => {
         attemptId: 'sa_provider_rejected',
         sendIndex: 0,
         type: 'text',
-        msgid: '',
+        providerMessageId: '',
         error: {
           kind: 'wechat_delivery_failed',
           message: 'provider-secret-canary /www/private',
@@ -164,7 +164,7 @@ describe('WeChat MCP receipt boundary', () => {
         attemptId: 'sa_provider_uncertain',
         sendIndex: 1,
         type: 'text',
-        msgid: '',
+        providerMessageId: '',
         error: {
           kind: 'uncertain_result',
           message: 'transport-secret-canary /home/private',
@@ -190,7 +190,7 @@ describe('WeChat MCP receipt boundary', () => {
       attemptId: '',
       sendIndex: -1,
       type: 'text',
-      msgid: '',
+      providerMessageId: '',
       error: {
         kind: 'stale_agent_session',
         message: 'This conversation direction is stale. Continue from the participant\'s latest message.',
@@ -201,7 +201,7 @@ describe('WeChat MCP receipt boundary', () => {
       attemptId: 'sa_provider_rejected',
       sendIndex: 0,
       type: 'text',
-      msgid: '',
+      providerMessageId: '',
       error: {
         kind: 'wechat_delivery_failed',
         message: 'The channel rejected this message.',
@@ -213,7 +213,7 @@ describe('WeChat MCP receipt boundary', () => {
       attemptId: 'sa_provider_uncertain',
       sendIndex: 1,
       type: 'text',
-      msgid: '',
+      providerMessageId: '',
       error: {
         kind: 'uncertain_result',
         message: 'The delivery result is uncertain and the message may already have been sent. Do not retry merely because the outcome is unknown.',
@@ -234,7 +234,7 @@ describe('WeChat MCP receipt boundary', () => {
       attemptId: 'sa_malformed',
       sendIndex: 0,
       type: 'text',
-      msgid: '',
+      providerMessageId: '',
       error: {
         kind: 'wechat_delivery_failed',
         message: 'must-not-leak',
@@ -250,7 +250,7 @@ describe('WeChat MCP receipt boundary', () => {
       attemptId: '',
       sendIndex: -1,
       type: 'text',
-      msgid: '',
+      providerMessageId: '',
       error: {
         kind: 'wechat_tool_error',
         message: 'The adapter tool could not execute this operation.',
@@ -334,7 +334,7 @@ test('a standard MCP Client executes send_text and receives accepted facts', asy
     attemptId: store.listMessageAttempts(messageKey)[0]?.attemptId,
     sendIndex: 0,
     type: 'text',
-    msgid: 'wx-1',
+    providerMessageId: 'wx-1',
   });
   assert.deepEqual(sends, [{
     toUser: 'wm-one',
@@ -351,9 +351,9 @@ test('fail_type=13 enters context only through the tool result as sensitive-cont
     observeMs: 100,
     sleep: async () => {
       const attempt = store?.listMessageAttempts(messageKey)[0];
-      if (attempt?.wecomMsgId && attempt.status === 'accepted') {
+      if (attempt?.providerMessageId && attempt.status === 'accepted') {
         store?.markSendMsgFailed({
-          wecomMsgId: attempt.wecomMsgId,
+          providerMessageId: attempt.providerMessageId,
           failType: 13,
         });
       }
@@ -371,7 +371,7 @@ test('fail_type=13 enters context only through the tool result as sensitive-cont
     attemptId: store.listMessageAttempts(messageKey)[0]?.attemptId,
     sendIndex: 0,
     type: 'text',
-    msgid: 'wx-1',
+    providerMessageId: 'wx-1',
     error: {
       kind: 'sensitive_content',
       message:
@@ -386,7 +386,7 @@ test('a failure callback that precedes send_msg response reconciles during compl
   const created = await harness(t, {
     sendPreparedMessage: async () => {
       raceStore?.markSendMsgFailed({
-        wecomMsgId: 'wx-early-failure',
+        providerMessageId: 'wx-early-failure',
         failType: 13,
       });
       return { msgid: 'wx-early-failure' };
@@ -413,7 +413,7 @@ test('a failure callback that precedes send_msg response reconciles during compl
 test('a stale direction session fails before the channel call without consuming quota', async (t) => {
   const { client, store, session, sends, messageKey } = await harness(t);
   store.ingestSyncPage({
-    openKfId: 'wk-one',
+    accountKey: 'wk-one',
     expectedCursor: 'cursor-one',
     nextCursor: 'cursor-two',
     messages: [normalizeWecomMessage({

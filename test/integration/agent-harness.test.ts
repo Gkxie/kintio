@@ -26,12 +26,15 @@ test('the harness accepts delivery attempts from any Agent through the channel M
       },
       activePrimary() { return undefined; },
       async submit(input: AgentInput): Promise<AgentSubmission> {
+        assert.equal(input.channel, 'wechat_kf');
         const attempt = store.reserveAgentSend({
           sessionToken: input.toolSessionToken,
           sentType: 'text',
           payload: { msgtype: 'text', text: { content: 'agent-neutral' } },
         });
-        store.completeSend(attempt.attemptId, { wecomMsgId: 'wx-neutral' });
+        store.completeSend(attempt.attemptId, {
+          providerMessageId: 'wx-neutral',
+        });
         return {
           kind: 'started',
           primaryMessageKey: input.message.messageKey,
@@ -61,7 +64,7 @@ test('the harness accepts delivery attempts from any Agent through the channel M
   });
 
   const page = store.ingestSyncPage({
-    openKfId: 'wk-one',
+    accountKey: 'wk-one',
     nextCursor: 'cursor-one',
     messages: [normalizeWecomMessage({
       msgid: 'customer-one',
@@ -81,6 +84,10 @@ test('the harness accepts delivery attempts from any Agent through the channel M
   assert.deepEqual(store.listMessageAttempts(messageKey).map((attempt) => ({
     source: attempt.source,
     status: attempt.status,
-    msgid: attempt.wecomMsgId,
-  })), [{ source: 'mcp_tool', status: 'accepted', msgid: 'wx-neutral' }]);
+    providerMessageId: attempt.providerMessageId,
+  })), [{
+    source: 'mcp_tool',
+    status: 'accepted',
+    providerMessageId: 'wx-neutral',
+  }]);
 });

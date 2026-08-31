@@ -44,9 +44,8 @@ test('iLink inbound traverses the shared Harness and replies through its bound M
     create_time_ms: now - 1_000,
     context_token: 'harness-context-token',
     item_list: [{ type: IlinkMessageItemType.TEXT, text_item: { text: 'hello' } }],
-  }, { accountKey, botId, ownerUserId: peerId }, { cursor: 'initial', index: 0 });
+  }, { accountKey, botId, ownerUserId: peerId }, { cursor: '', index: 0 });
   assert.ok(normalized);
-  const candidate = { ...normalized, sync: { cursor: '', index: 0 } };
   const normalizedFollowup = normalizeIlinkInboundMessage({
     message_id: 42,
     seq: 42,
@@ -69,9 +68,8 @@ test('iLink inbound traverses the shared Harness and replies through its bound M
         },
       },
     ],
-  }, { accountKey, botId, ownerUserId: peerId }, { cursor: 'initial', index: 1 });
+  }, { accountKey, botId, ownerUserId: peerId }, { cursor: '', index: 1 });
   assert.ok(normalizedFollowup);
-  const followup = { ...normalizedFollowup, sync: { cursor: '', index: 1 } };
   const page = ilinkStore.commitPollPage({
     accountKey,
     expectedGeneration: 1,
@@ -79,19 +77,25 @@ test('iLink inbound traverses the shared Harness and replies through its bound M
     nextCursor: 'cursor-harness',
     messages: [
       {
-        candidate,
+        message: normalized.message,
+        ...(normalized.facts.providerSeq === undefined
+          ? {}
+          : { providerSeq: normalized.facts.providerSeq }),
         secretGeneration: 41,
-        sealedContextToken: box.seal(candidate.contextToken, {
+        sealedContextToken: box.seal(normalized.facts.contextToken, {
           secretKind: 'context_token', accountId: accountKey, peerId, generation: 41,
         }),
       },
       {
-        candidate: followup,
+        message: normalizedFollowup.message,
+        ...(normalizedFollowup.facts.providerSeq === undefined
+          ? {}
+          : { providerSeq: normalizedFollowup.facts.providerSeq }),
         secretGeneration: 42,
-        sealedContextToken: box.seal(followup.contextToken, {
+        sealedContextToken: box.seal(normalizedFollowup.facts.contextToken, {
           secretKind: 'context_token', accountId: accountKey, peerId, generation: 42,
         }),
-        sealedImages: followup.images.map((image) => ({
+        sealedImages: normalizedFollowup.facts.images.map((image) => ({
           position: image.position,
           secretGeneration: 4_200 + image.position,
           sealedLocator: box.seal(JSON.stringify({
@@ -162,7 +166,10 @@ test('iLink inbound traverses the shared Harness and replies through its bound M
   await processor.enqueue(messageKey);
   await processor.waitForIdle();
   assert.equal(store.getInbound(messageKey)?.status, 'completed');
-  assert.equal(store.getConversation(accountKey, peerId)?.threadId, 'thread-ilink-independent');
+  assert.equal(
+    store.getConversation('weixin_ilink', accountKey, peerId)?.threadId,
+    'thread-ilink-independent',
+  );
   assert.equal(calls.length, 1);
   assert.equal(store.listMessageAttempts(messageKey)[0]?.channel, 'weixin_ilink');
 });
@@ -198,18 +205,21 @@ test('a newer iLink direction atomically absorbs older unprocessed input', async
       context_token: `context-${id}`,
       item_list: [{ type: IlinkMessageItemType.TEXT, text_item: { text } }],
     }, { accountKey, botId, ownerUserId: peerId }, {
-      cursor: cursor || 'bootstrap',
+      cursor,
       index: 0,
     });
     assert.ok(value);
-    return { ...value, sync: { cursor, index: 0 } };
+    return value;
   };
-  const entry = (candidate: ReturnType<typeof normalized>) => ({
-    candidate,
-    secretGeneration: candidate.seq!,
-    sealedContextToken: box.seal(candidate.contextToken, {
+  const entry = (value: NonNullable<ReturnType<typeof normalized>>) => ({
+    message: value.message,
+    ...(value.facts.providerSeq === undefined
+      ? {}
+      : { providerSeq: value.facts.providerSeq }),
+    secretGeneration: value.facts.providerSeq!,
+    sealedContextToken: box.seal(value.facts.contextToken, {
       secretKind: 'context_token', accountId: accountKey, peerId,
-      generation: candidate.seq!,
+      generation: value.facts.providerSeq!,
     }),
   });
   const oldPage = ilinkStore.commitPollPage({

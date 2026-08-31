@@ -8,6 +8,7 @@ import {
   renderMessageForAgent,
 } from '../domain/message.ts';
 import type {
+  ChannelIdentity,
   ChatChannel,
   Logger,
   NormalizedMessage,
@@ -58,6 +59,7 @@ interface ProcessorOptions {
 
 type UnboundAgentInput = Omit<
   AgentInput,
+  | 'channel'
   | 'mode'
   | 'conversationId'
   | 'threadId'
@@ -71,18 +73,19 @@ function errorMessage(error: unknown): string {
 function messageFromRecord(record: InboundRecord): ChannelMessage {
   const payload = (record.payload || {}) as unknown as Partial<NormalizedMessage>;
   if (
+    (payload.providerMessageId &&
+      payload.providerMessageId !== record.providerMessageId) ||
     (payload.conversation?.channel &&
       payload.conversation.channel !== record.channel) ||
     (payload.conversation?.accountKey &&
-      payload.conversation.accountKey !== record.openKfId) ||
+      payload.conversation.accountKey !== record.accountKey) ||
     (payload.conversation?.peerId &&
-      payload.conversation.peerId !== record.externalUserId)
+      payload.conversation.peerId !== record.peerId)
   ) {
     throw new Error(`Inbound payload identity mismatch: ${record.messageKey}`);
   }
   return Object.freeze({
-    ...payload,
-    id: payload.id || record.msgid,
+    providerMessageId: record.providerMessageId,
     messageKey: record.messageKey,
     origin: record.origin,
     type: record.type,
@@ -91,8 +94,8 @@ function messageFromRecord(record: InboundRecord): ChannelMessage {
     sync: payload.sync || { cursor: '', index: 0 },
     conversation: {
       channel: record.channel,
-      accountKey: record.openKfId,
-      peerId: record.externalUserId,
+      accountKey: record.accountKey,
+      peerId: record.peerId,
     },
     text: payload.text || '',
     summary: payload.summary || payload.text || '[Channel message: no readable summary]',
@@ -109,9 +112,9 @@ function agentMessage(message: ChannelMessage): AgentMessage {
   };
 }
 
-function conversationId(record: Pick<InboundRecord, 'openKfId' | 'externalUserId'>): string {
+function conversationId(record: ChannelIdentity): string {
   return `cv_${createHash('sha256')
-    .update(`${record.openKfId}\0${record.externalUserId}`)
+    .update(`${record.channel}\0${record.accountKey}\0${record.peerId}`)
     .digest('hex').slice(0, 32)}`;
 }
 
@@ -181,16 +184,17 @@ export class ConversationProcessor {
     }
   }
 
-  #mediaCatalog(record: Pick<InboundRecord, 'openKfId' | 'externalUserId'>) {
+  #mediaCatalog(record: ChannelIdentity) {
     return this.#store.listRecentMedia({
-      openKfId: record.openKfId,
-      externalUserId: record.externalUserId,
+      channel: record.channel,
+      accountKey: record.accountKey,
+      peerId: record.peerId,
       limit: 10,
     }).map(({ ref, kind, messageKey }) => ({ ref, kind, messageKey }));
   }
 
-  #conversationKey(record: Pick<InboundRecord, 'openKfId' | 'externalUserId'>): string {
-    return `${record.openKfId}\0${record.externalUserId}`;
+  #conversationKey(record: ChannelIdentity): string {
+    return `${record.channel}\0${record.accountKey}\0${record.peerId}`;
   }
 
   #notifyQueued(record: InboundRecord): void {
@@ -296,7 +300,7 @@ export class ConversationProcessor {
     return waiting;
   }
 
-  #release(record: Pick<InboundRecord, 'openKfId' | 'externalUserId'>): void {
+  #release(record: ChannelIdentity): void {
     const key = this.#conversationKey(record);
     this.#activeConversations.delete(key);
     this.#queueNotified.delete(key);
@@ -313,7 +317,7 @@ export class ConversationProcessor {
     if (!this.#accepting) return Promise.resolve();
     const record = this.#store.getInbound(messageKey) as InboundRecord | undefined;
     if (!record) return Promise.resolve();
-    const key = `${record.openKfId}\0${record.externalUserId}`;
+    const key = this.#conversationKey(record);
     const task = (this.#queues.get(key) || this.#recoveries.get(key) || Promise.resolve())
       .catch(() => undefined)
       .then(() => this.#processRecoverably(record.messageKey))
@@ -349,8 +353,9 @@ export class ConversationProcessor {
         if (!['processing', 'preparing'].includes(record.status)) return;
         const group = this.#store.listPendingInbound({
           statuses: ['received', 'processing', 'preparing', 'steering', 'steered'],
-          openKfId: record.openKfId,
-          externalUserId: record.externalUserId,
+          channel: record.channel,
+          accountKey: record.accountKey,
+          peerId: record.peerId,
           limit: 1000,
         }).filter((candidate) =>
           candidate.messageKey === messageKey ||
@@ -385,8 +390,9 @@ export class ConversationProcessor {
       const inbound = this.#store.getInbound(messageKey);
       const superseded = inbound && this.#store.listPendingInbound({
         statuses: ['received'],
-        openKfId: inbound.openKfId,
-        externalUserId: inbound.externalUserId,
+        channel: inbound.channel,
+        accountKey: inbound.accountKey,
+        peerId: inbound.peerId,
         limit: 1000,
       }).some((candidate) =>
         candidate.inboxSeq > inbound.inboxSeq && candidate.origin === 'customer',
@@ -439,17 +445,20 @@ export class ConversationProcessor {
         boundaryMessageKey: record.messageKey,
       });
       const memoryThreadId = this.#store.getConversation(
-        record.openKfId,
-        record.externalUserId,
+        record.channel,
+        record.accountKey,
+        record.peerId,
       )?.memoryThreadId || '';
       try {
         const submission = await this.#pipeline.agent.submit({
           ...input,
+          channel: record.channel,
           mode: 'steer',
           conversationId: opaqueConversationId,
           threadId: this.#store.getConversation(
-            record.openKfId,
-            record.externalUserId,
+            record.channel,
+            record.accountKey,
+            record.peerId,
           )?.threadId || '',
           ...(memoryThreadId ? { archivedThreadId: memoryThreadId } : {}),
           toolSessionToken: session.token,
@@ -481,8 +490,9 @@ export class ConversationProcessor {
     });
     const boundaryMessageKey = options.boundaryMessageKey || record.messageKey;
     const conversationBefore = this.#store.getConversation(
-      record.openKfId,
-      record.externalUserId,
+      record.channel,
+      record.accountKey,
+      record.peerId,
     );
     const ensuredThreadId = await this.#pipeline.agent.ensureThread(
       opaqueConversationId,
@@ -492,15 +502,17 @@ export class ConversationProcessor {
       this.#pipeline.agent.takePendingMemoryThread?.(opaqueConversationId) || '';
     if (!conversationBefore || ensuredThreadId !== conversationBefore.threadId) {
       this.#store.setConversationThread({
-        openKfId: record.openKfId,
-        externalUserId: record.externalUserId,
+        channel: record.channel,
+        accountKey: record.accountKey,
+        peerId: record.peerId,
         threadId: ensuredThreadId,
         memoryThreadId: pendingMemoryThreadId,
       });
     }
     const memoryThreadId = this.#store.getConversation(
-      record.openKfId,
-      record.externalUserId,
+      record.channel,
+      record.accountKey,
+      record.peerId,
     )?.memoryThreadId || '';
     const session = this.#store.createAgentSession({
       messageKey: record.messageKey,
@@ -520,6 +532,7 @@ export class ConversationProcessor {
     try {
       submission = await this.#pipeline.agent.submit({
         ...input,
+        channel: record.channel,
         ...(artifactCatalog.length ? { artifactCatalog } : {}),
         mode: 'start',
         conversationId: opaqueConversationId,
@@ -569,24 +582,23 @@ export class ConversationProcessor {
       this.#systemEvent(record, message);
       return;
     }
-    const { channel, accountKey: openKfId, peerId: externalUserId } =
-      message.conversation;
-    if (message.origin !== MESSAGE_ORIGINS.CUSTOMER || !externalUserId || !openKfId) {
+    const { channel, accountKey, peerId } = message.conversation;
+    if (message.origin !== MESSAGE_ORIGINS.CUSTOMER || !peerId || !accountKey) {
       this.#store.markInboundIgnored(messageKey);
       return;
     }
     if (
       channel === 'wechat_kf' &&
-      !this.#allowedUsers.has(externalUserId) &&
-      this.#store.getAuthorization(externalUserId)?.authorized !== true
+      !this.#allowedUsers.has(peerId) &&
+      this.#store.getAuthorization(peerId)?.authorized !== true
     ) {
       const isTrigger = Boolean(this.#authorization.trigger) &&
         message.type === COMMON_MESSAGE_TYPES.TEXT &&
         message.text === this.#authorization.trigger;
       const result = this.#store.evaluateAuthorization({
         messageKey,
-        openKfId,
-        externalUserId,
+        accountKey,
+        peerId,
         isTrigger,
         requiredConsecutive: this.#authorization.requiredConsecutive,
         confirmationText: this.#authorization.confirmationText,
@@ -613,8 +625,9 @@ export class ConversationProcessor {
     }
     const mediaCatalog = this.#mediaCatalog(record);
     const latestImage = this.#store.listRecentConversationAttempts({
-      openKfId,
-      externalUserId,
+      channel,
+      accountKey,
+      peerId,
       limit: 5,
     }).find((attempt) =>
       attempt.type === 'image' &&
@@ -622,7 +635,6 @@ export class ConversationProcessor {
       ['accepted', 'uncertain'].includes(attempt.status),
     );
     await this.#submit(record, {
-      channel,
       message: agentMessage(message),
       resolvedMedia: await this.#pipeline.mediaGateway.resolveForCodex(message),
       mediaCatalog,
@@ -647,8 +659,9 @@ export class ConversationProcessor {
   ): Promise<void> {
     const later = this.#store.listPendingInbound({
       statuses: ['received'],
-      openKfId: record.openKfId,
-      externalUserId: record.externalUserId,
+      channel: record.channel,
+      accountKey: record.accountKey,
+      peerId: record.peerId,
       limit: 1000,
     }).filter((candidate) => candidate.inboxSeq > record.inboxSeq);
     let customerFollowupArrived = false;
@@ -692,8 +705,9 @@ export class ConversationProcessor {
   #finalizeAttempts(record: InboundRecord, attemptIds: readonly string[]): void {
     const group = this.#store.listPendingInbound({
       statuses: ['steering', 'steered'],
-      openKfId: record.openKfId,
-      externalUserId: record.externalUserId,
+      channel: record.channel,
+      accountKey: record.accountKey,
+      peerId: record.peerId,
       limit: 100,
     }).filter((item) => item.primaryMessageKey === record.messageKey);
     if (group.some((item) => item.status === 'steering')) {
@@ -730,7 +744,7 @@ export class ConversationProcessor {
     const event = message.attributes;
     if (event.event_type === 'msg_send_fail') {
       this.#store.markSendMsgFailed({
-        wecomMsgId: String(event.fail_msgid || ''),
+        providerMessageId: String(event.fail_msgid || ''),
         failType: Number(event.fail_type || 0),
       });
       this.#store.markInboundCompleted(record.messageKey);
@@ -747,7 +761,7 @@ export class ConversationProcessor {
     for (const record of [...records].sort(
       (left, right) => left.inboxSeq - right.inboxSeq,
     )) {
-      const key = `${record.openKfId}\0${record.externalUserId}`;
+      const key = this.#conversationKey(record);
       const group = conversations.get(key) || [];
       group.push(record);
       conversations.set(key, group);
@@ -836,7 +850,11 @@ export class ConversationProcessor {
     )?.message;
     if (!primaryMessage) return;
     const validGroup = decoded.map(({ record }) => record);
-    const conversation = this.#store.getConversation(primary.openKfId, primary.externalUserId);
+    const conversation = this.#store.getConversation(
+      primary.channel,
+      primary.accountKey,
+      primary.peerId,
+    );
     const mediaCatalog = this.#mediaCatalog(primary);
     const ids = validGroup.map((record) => record.clientInputId || record.messageKey);
     const latestId = ids.at(-1) || primary.clientInputId;
@@ -901,7 +919,6 @@ export class ConversationProcessor {
     const boundaryMessageKey =
       recoveryBoundary || validGroup.at(-1)?.messageKey || primary.messageKey;
     await this.#submit(primary, {
-      channel: primaryMessage.conversation.channel,
       message: agentMessage(primaryMessage),
       resolvedMedia,
       mediaCatalog,

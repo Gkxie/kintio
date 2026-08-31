@@ -51,7 +51,7 @@ test('iLink media gateway decrypts only the bound locator and returns image byte
     /Invalid iLink image reference/u,
   );
   const resolved = await gateway.resolveForCodex({
-    id: 'provider',
+    providerMessageId: 'provider',
     messageKey: 'im-media',
     origin: 'customer',
     type: 'image',
@@ -66,7 +66,7 @@ test('iLink media gateway decrypts only the bound locator and returns image byte
   });
   assert.equal(resolved.length, 1);
   await assert.rejects(() => gateway.resolveForCodex({
-    id: 'provider-many',
+    providerMessageId: 'provider-many',
     messageKey: 'im-media',
     origin: 'customer',
     type: 'image',

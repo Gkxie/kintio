@@ -77,7 +77,7 @@ const EXECUTOR_RECEIPT_SCHEMA = z.strictObject({
   attemptId: z.string().regex(ATTEMPT_ID),
   sendIndex: z.number().int().min(0).max(999),
   type: z.enum(SEND_TYPES),
-  msgid: z.string().max(512),
+  providerMessageId: z.string().max(512),
   error: EXECUTOR_ERROR_SCHEMA.optional(),
 });
 const ERROR_OUTPUT_SCHEMA = z.strictObject({
@@ -94,7 +94,7 @@ const RECEIPT_SCHEMA = z.strictObject({
   attemptId: z.string().max(128),
   sendIndex: z.number().int().min(-1).max(999),
   type: z.enum(SEND_TYPES),
-  msgid: z.string().max(512),
+  providerMessageId: z.string().max(512),
   error: ERROR_OUTPUT_SCHEMA.optional(),
 });
 
@@ -162,7 +162,7 @@ function toolFailure(error: unknown, type: SendType): CallToolResult {
     attemptId: '',
     sendIndex: -1,
     type,
-    msgid: '',
+    providerMessageId: '',
     error: { kind, message: SAFE_ERROR_MESSAGES[kind] },
   };
   return response(result, true);

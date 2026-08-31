@@ -30,7 +30,7 @@ export interface AgentImageArtifact extends AgentArtifact {
 }
 
 export interface AgentInput {
-  readonly channel?: ChatChannel;
+  readonly channel: ChatChannel;
   readonly mode: 'start' | 'steer';
   readonly conversationId: string;
   readonly threadId: string;

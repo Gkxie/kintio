@@ -30,7 +30,7 @@ export interface WechatToolReceipt {
   readonly attemptId: string;
   readonly sendIndex: number;
   readonly type: string;
-  readonly msgid: string;
+  readonly providerMessageId: string;
   readonly error?: WechatToolError;
 }
 
@@ -124,7 +124,7 @@ function receipt(attempt: AttemptRecord): WechatToolReceipt {
     attemptId: attempt.attemptId,
     sendIndex: attempt.sendIndex,
     type: attempt.type,
-    msgid: attempt.wecomMsgId,
+    providerMessageId: attempt.providerMessageId,
     ...(error ? { error } : {}),
   };
 }
@@ -259,15 +259,17 @@ export class WechatKfToolExecutor {
     try {
       if (!attempt.payload) throw new Error('Pending channel attempt has no payload');
       const result = await this.#api.sendPreparedMessage({
-        toUser: attempt.externalUserId,
-        openKfId: attempt.openKfId,
+        toUser: attempt.peerId,
+        openKfId: attempt.accountKey,
         payload: attempt.payload,
         messageId: attempt.clientMessageId,
       });
-      const msgid = String(result.msgid || '');
-      if (!msgid) throw new Error('The channel API accepted the request without returning msgid');
+      const providerMessageId = String(result.msgid || '');
+      if (!providerMessageId) {
+        throw new Error('The channel API accepted the request without returning msgid');
+      }
       completed = this.#store.completeSend(attempt.attemptId, {
-        wecomMsgId: msgid,
+        providerMessageId,
       });
     } catch (error: unknown) {
       return definitive(error)
@@ -373,7 +375,7 @@ export class WechatKfToolExecutor {
 
   async #drain(): Promise<void> {
     while (!this.#closed) {
-      const attempt = this.#store.beginNextSend();
+      const attempt = this.#store.beginNextSend('wechat_kf');
       if (!attempt) return;
       const settled = await this.#transmit(attempt, false);
       if (settled.status === 'accepted') {

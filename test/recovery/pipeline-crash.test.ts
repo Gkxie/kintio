@@ -57,9 +57,9 @@ function ingest(
 ): string {
   const openKfId = message.conversation.accountKey;
   const [key] = store.ingestSyncPage({
-    openKfId,
+    accountKey: openKfId,
     expectedCursor: store.getCursor(openKfId),
-    nextCursor: `${store.getCursor(openKfId)}-${message.id}`,
+    nextCursor: `${store.getCursor(openKfId)}-${message.providerMessageId}`,
     messages: [message],
   }).insertedMessageKeys;
   if (!key) throw new Error('Expected inserted message key');
@@ -108,15 +108,19 @@ async function seedWorker(databaseFile: string, scenario: string): Promise<void>
     const ids = reserve(store, key, scenario === 'partial' ? ['first', 'second'] : ['only']);
     attempts.push(...ids);
     if (scenario === 'sending') {
-      store.beginNextSend();
+      store.beginNextSend('wechat_kf');
     } else if (scenario === 'accepted') {
-      const attempt = store.beginNextSend();
+      const attempt = store.beginNextSend('wechat_kf');
       if (!attempt) throw new Error('Expected accepted attempt');
-      store.completeSend(attempt.attemptId, { wecomMsgId: 'wx-accepted' });
+      store.completeSend(attempt.attemptId, {
+        providerMessageId: 'wx-accepted',
+      });
     } else if (scenario === 'partial') {
-      const attempt = store.beginNextSend();
+      const attempt = store.beginNextSend('wechat_kf');
       if (!attempt) throw new Error('Expected partial attempt');
-      store.completeSend(attempt.attemptId, { wecomMsgId: 'wx-first' });
+      store.completeSend(attempt.attemptId, {
+        providerMessageId: 'wx-first',
+      });
     }
   }
   sendParent({ type: 'seeded', scenario, keys, attempts });

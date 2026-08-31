@@ -187,6 +187,7 @@ test('API acceptance and customer observation remain distinct image facts', asyn
   for (const [index, channelState] of states.entries()) {
     const msgid = `channel-${index}`;
     const submission = await agent.submit({
+      channel: 'wechat_kf',
       mode: 'start',
       conversationId: 'cv-channel',
       threadId: '',

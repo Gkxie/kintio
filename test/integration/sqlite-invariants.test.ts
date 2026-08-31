@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -52,11 +53,186 @@ function schemaVersion(filePath: string): number {
   ));
 }
 
+function createLegacyDatabase(
+  t: TestContext,
+  version: 11 | 12 | 13,
+  seed: (database: DatabaseSync) => void,
+): string {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), `sqlite-v${version}-`));
+  const filePath = path.join(directory, 'state.sqlite');
+  const database = new DatabaseSync(filePath);
+  const inboundStatuses = version === 11
+    ? "'received','processing','preparing','ready','completed','steering','steered','absorbed','failed','ignored','suppressed','held'"
+    : "'received','processing','preparing','ready','completed','steering','steered','absorbed','failed','ignored','suppressed'";
+  database.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE sync_cursors (
+      open_kfid TEXT PRIMARY KEY,
+      cursor TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE conversations (
+      open_kfid TEXT NOT NULL,
+      external_userid TEXT NOT NULL,
+      thread_id TEXT NOT NULL DEFAULT '',
+      ${version === 11 ? `
+      mode TEXT NOT NULL DEFAULT 'bot' CHECK (mode IN ('bot', 'human', 'ended')),
+      automation_epoch INTEGER NOT NULL DEFAULT 0,
+      servicer_userid TEXT NOT NULL DEFAULT '',
+      session_source TEXT NOT NULL DEFAULT '',
+      change_type INTEGER NOT NULL DEFAULT 0,
+      ` : ''}
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (open_kfid, external_userid)
+    ) STRICT, WITHOUT ROWID;
+    CREATE TABLE authorizations (
+      external_userid TEXT PRIMARY KEY,
+      authorized INTEGER NOT NULL DEFAULT 0 CHECK (authorized IN (0, 1)),
+      consecutive_matches INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_matches >= 0),
+      last_open_kfid TEXT NOT NULL DEFAULT '',
+      last_message_key TEXT NOT NULL DEFAULT '',
+      authorized_at INTEGER NOT NULL DEFAULT 0,
+      updated_at INTEGER NOT NULL
+    ) STRICT;
+    CREATE TABLE inbound_messages (
+      inbox_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_key TEXT NOT NULL UNIQUE,
+      open_kfid TEXT NOT NULL,
+      msgid TEXT NOT NULL,
+      external_userid TEXT NOT NULL DEFAULT '',
+      origin TEXT NOT NULL,
+      msg_type TEXT NOT NULL,
+      sent_at INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL CHECK (status IN (${inboundStatuses})),
+      ${version >= 13
+        ? 'deferred INTEGER NOT NULL DEFAULT 0 CHECK (deferred IN (0, 1)),'
+        : ''}
+      primary_message_key TEXT,
+      payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+      codex_turn_id TEXT NOT NULL DEFAULT '',
+      client_input_id TEXT NOT NULL DEFAULT '',
+      steering_boundary INTEGER NOT NULL DEFAULT 0,
+      error_message TEXT NOT NULL DEFAULT '',
+      ${version === 11 ? `
+      context_status TEXT NOT NULL DEFAULT 'none'
+        CHECK (context_status IN ('none', 'pending', 'consumed')),
+      claimed_conversation_epoch INTEGER NOT NULL DEFAULT 0,
+      ` : ''}
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE (open_kfid, msgid),
+      UNIQUE (message_key, open_kfid, external_userid),
+      FOREIGN KEY (primary_message_key) REFERENCES inbound_messages(message_key)
+    ) STRICT;
+    CREATE TABLE inbound_media (
+      media_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      message_key TEXT NOT NULL,
+      open_kfid TEXT NOT NULL,
+      external_userid TEXT NOT NULL,
+      position INTEGER NOT NULL CHECK (position >= 0),
+      kind TEXT NOT NULL,
+      media_id TEXT NOT NULL,
+      filename TEXT NOT NULL DEFAULT '',
+      sent_at INTEGER NOT NULL DEFAULT 0,
+      remembered_at INTEGER NOT NULL,
+      UNIQUE (message_key, position),
+      FOREIGN KEY (message_key, open_kfid, external_userid)
+        REFERENCES inbound_messages(message_key, open_kfid, external_userid)
+        ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE send_attempts (
+      attempt_key TEXT PRIMARY KEY,
+      source_message_key TEXT NOT NULL,
+      open_kfid TEXT NOT NULL,
+      external_userid TEXT NOT NULL,
+      send_index INTEGER NOT NULL CHECK (send_index >= 0 AND send_index < 1000),
+      source TEXT NOT NULL,
+      sent_type TEXT NOT NULL,
+      payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+      metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+      fingerprint TEXT NOT NULL,
+      client_message_id TEXT NOT NULL UNIQUE,
+      status TEXT NOT NULL CHECK (status IN ('pending','sending','accepted','failed','uncertain')),
+      wecom_msgid TEXT NOT NULL DEFAULT '',
+      error_code TEXT NOT NULL DEFAULT '',
+      error_message TEXT NOT NULL DEFAULT '',
+      fail_type INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE (source_message_key, send_index),
+      FOREIGN KEY (source_message_key, open_kfid, external_userid)
+        REFERENCES inbound_messages(message_key, open_kfid, external_userid)
+    ) STRICT;
+    CREATE TABLE agent_sessions (
+      token_hash TEXT PRIMARY KEY,
+      source_message_key TEXT NOT NULL,
+      open_kfid TEXT NOT NULL,
+      external_userid TEXT NOT NULL,
+      boundary_inbox_seq INTEGER NOT NULL CHECK (boundary_inbox_seq >= 0),
+      ${version === 11
+        ? 'conversation_epoch INTEGER NOT NULL DEFAULT 0,'
+        : ''}
+      media_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(media_json)),
+      expires_at INTEGER NOT NULL,
+      closed_at INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (source_message_key, open_kfid, external_userid)
+        REFERENCES inbound_messages(message_key, open_kfid, external_userid)
+        ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE delivery_failures (
+      wecom_msgid TEXT PRIMARY KEY,
+      fail_type INTEGER NOT NULL,
+      observed_at INTEGER NOT NULL,
+      matched_attempt_key TEXT NOT NULL DEFAULT '',
+      matched_at INTEGER NOT NULL DEFAULT 0
+    ) STRICT;
+    CREATE TABLE agent_artifacts (
+      token_hash TEXT NOT NULL,
+      ref TEXT NOT NULL,
+      bytes BLOB NOT NULL,
+      filename TEXT NOT NULL,
+      content_type TEXT NOT NULL,
+      metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (token_hash, ref),
+      FOREIGN KEY (token_hash) REFERENCES agent_sessions(token_hash)
+        ON DELETE CASCADE
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX inbound_pending_idx
+      ON inbound_messages(status, open_kfid, external_userid, inbox_seq);
+    CREATE INDEX inbound_primary_idx
+      ON inbound_messages(primary_message_key, inbox_seq);
+    ${version >= 13
+      ? 'CREATE INDEX inbound_deferred_idx ON inbound_messages(deferred, status, inbox_seq);'
+      : ''}
+    CREATE UNIQUE INDEX conversation_thread_idx
+      ON conversations(thread_id) WHERE thread_id <> '';
+    CREATE INDEX send_status_idx
+      ON send_attempts(status, created_at, send_index);
+    CREATE UNIQUE INDEX send_wecom_msgid_idx
+      ON send_attempts(wecom_msgid) WHERE wecom_msgid <> '';
+    CREATE INDEX send_conversation_idx
+      ON send_attempts(open_kfid, external_userid, updated_at DESC);
+    CREATE INDEX media_conversation_idx
+      ON inbound_media(open_kfid, external_userid, remembered_at DESC);
+    CREATE INDEX agent_session_source_idx
+      ON agent_sessions(source_message_key, closed_at, expires_at);
+    PRAGMA user_version = ${version};
+  `);
+  seed(database);
+  assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
+  database.close();
+  t.onTestFinished(() => fs.rmSync(directory, { recursive: true, force: true }));
+  return filePath;
+}
+
 function ingest(store: CoreState, values: readonly NormalizedMessage[]): string[] {
   return store.ingestSyncPage({
-    openKfId: 'wk-one',
+    accountKey: 'wk-one',
     expectedCursor: store.getCursor('wk-one'),
-    nextCursor: `cursor-${values.map((item) => item.id).join('-')}`,
+    nextCursor: `cursor-${values.map((item) => item.providerMessageId).join('-')}`,
     messages: values,
   }).insertedMessageKeys;
 }
@@ -102,69 +278,61 @@ test('invalid journal mode and newer schema fail before runtime use', (t) => {
 });
 
 test('schema v11 removes retired state without losing durable facts', (t) => {
-  const { persistence, store, filePath } = harness(t);
-  const messageKey = reserveText(store, 'v11-preserved');
-  const attempt = store.beginNextSend();
-  assert.ok(attempt);
-  store.completeSend(attempt.attemptId, { wecomMsgId: 'wx-v11-preserved' });
-  const [activeMessageKey] = ingest(store, [message('v11-active-session')]);
-  assert.ok(activeMessageKey);
-  store.claimInbound({ messageKey: activeMessageKey });
-  const session = store.createAgentSession({ messageKey: activeMessageKey });
-  const [staleAttempt] = seedPendingAttempts(store, activeMessageKey, [{
-    sendIndex: 0,
-    sentType: 'text',
-    payload: { msgtype: 'text', text: { content: 'must not send' } },
-  }]);
-  assert.ok(staleAttempt);
-  const [absorbedMessageKey] = ingest(store, [message('v11-absorbed-context')]);
-  assert.ok(absorbedMessageKey);
-  withTestDatabase(filePath, (database) => {
+  const messageKey = 'message-one';
+  const activeMessageKey = 'message-two';
+  const absorbedMessageKey = 'message-three';
+  const sessionToken = `ws_${'a'.repeat(32)}`;
+  const filePath = createLegacyDatabase(t, 11, (database) => {
     database.prepare(`
-      UPDATE inbound_messages SET status = 'absorbed' WHERE message_key = ?
-    `).run(absorbedMessageKey);
+      INSERT INTO conversations (
+        open_kfid, external_userid, thread_id, mode, automation_epoch, updated_at
+      ) VALUES ('wk-one', 'wm-one', '', 'human', 1, 1)
+    `).run();
+    const insertInbound = database.prepare(`
+      INSERT INTO inbound_messages (
+        inbox_seq, message_key, open_kfid, msgid, external_userid,
+        origin, msg_type, sent_at, status, payload_json,
+        claimed_conversation_epoch, created_at, updated_at
+      ) VALUES (?, ?, 'wk-one', ?, 'wm-one', 'customer', 'text', 1, ?, ?, ?, 1, 1)
+    `);
+    insertInbound.run(
+      1, messageKey, 'v11-preserved', 'completed', null, 1,
+    );
+    insertInbound.run(
+      2, activeMessageKey, 'v11-active-session', 'processing',
+      JSON.stringify({ id: 'v11-active-session' }), 0,
+    );
+    insertInbound.run(
+      3, absorbedMessageKey, 'v11-absorbed-context', 'absorbed',
+      JSON.stringify({ id: 'v11-absorbed-context' }), 1,
+    );
+    database.prepare(`
+      INSERT INTO agent_sessions (
+        token_hash, source_message_key, open_kfid, external_userid,
+        boundary_inbox_seq, conversation_epoch, media_json,
+        expires_at, closed_at, created_at, updated_at
+      ) VALUES (?, ?, 'wk-one', 'wm-one', 2, 1, '[]', 9999999999999, 0, 1, 1)
+    `).run(
+      createHash('sha256').update(sessionToken).digest('hex'),
+      activeMessageKey,
+    );
+    const insertAttempt = database.prepare(`
+      INSERT INTO send_attempts (
+        attempt_key, source_message_key, open_kfid, external_userid,
+        send_index, source, sent_type, payload_json, fingerprint,
+        client_message_id, status, wecom_msgid, created_at, updated_at
+      ) VALUES (?, ?, 'wk-one', 'wm-one', 0, 'test', 'text', ?, ?, ?, ?, ?, 1, 1)
+    `);
+    insertAttempt.run(
+      'legacy-v11-accepted-attempt', messageKey, null,
+      'accepted-fingerprint', 'accepted-client', 'accepted', 'wx-v11-preserved',
+    );
+    insertAttempt.run(
+      'legacy-v11-pending-attempt', activeMessageKey,
+      JSON.stringify({ content: 'must not send' }),
+      'pending-fingerprint', 'pending-client', 'pending', '',
+    );
   });
-  persistence.close();
-
-  const v11 = new DatabaseSync(filePath);
-  v11.exec(`
-    DROP TRIGGER ilink_session_window_insert_guard;
-    DROP TRIGGER ilink_session_window_update_guard;
-    DROP TRIGGER ilink_attempt_window_insert_guard;
-    DROP TRIGGER ilink_attempt_window_update_guard;
-    DROP TRIGGER ilink_window_source_insert_guard;
-    DROP TRIGGER ilink_window_source_update_guard;
-    DROP TRIGGER ilink_window_delete_guard;
-    DROP TABLE ilink_login_offers;
-    DROP TABLE ilink_inbound_images;
-    DROP TABLE ilink_reply_window_secrets;
-    DROP TABLE ilink_reply_windows;
-    DROP TABLE ilink_account_secrets;
-    DROP TABLE ilink_accounts;
-    ALTER TABLE inbound_messages
-      ADD COLUMN context_status TEXT NOT NULL DEFAULT 'none'
-        CHECK (context_status IN ('none', 'pending', 'consumed'));
-    ALTER TABLE inbound_messages
-      ADD COLUMN claimed_conversation_epoch INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE agent_sessions
-      ADD COLUMN conversation_epoch INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE conversations
-      ADD COLUMN mode TEXT NOT NULL DEFAULT 'bot'
-        CHECK (mode IN ('bot', 'human', 'ended'));
-    ALTER TABLE conversations
-      ADD COLUMN automation_epoch INTEGER NOT NULL DEFAULT 0;
-    ALTER TABLE conversations
-      ADD COLUMN servicer_userid TEXT NOT NULL DEFAULT '';
-    ALTER TABLE conversations
-      ADD COLUMN session_source TEXT NOT NULL DEFAULT '';
-    ALTER TABLE conversations
-      ADD COLUMN change_type INTEGER NOT NULL DEFAULT 0;
-    UPDATE conversations
-    SET mode = 'human', automation_epoch = 1
-    WHERE open_kfid = 'wk-one' AND external_userid = 'wm-one';
-    PRAGMA user_version = 11;
-  `);
-  v11.close();
 
   const upgradedPersistence = new StatePersistence({ filePath });
   const upgraded = upgradedPersistence.core;
@@ -173,9 +341,9 @@ test('schema v11 removes retired state without losing durable facts', (t) => {
     withTestDatabase(filePath, (database) =>
       (database.prepare('PRAGMA user_version').get() as { user_version: number })
         .user_version),
-    21,
+    22,
   );
-  assert.throws(() => upgraded.getAgentSession(session.token), /closed/u);
+  assert.throws(() => upgraded.getAgentSession(sessionToken), /closed/u);
   const inboundSql = withTestDatabase(filePath, (database) => String((database.prepare(`
       SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inbound_messages'
     `).get() as { sql: string }).sql));
@@ -195,79 +363,57 @@ test('schema v11 removes retired state without losing durable facts', (t) => {
 });
 
 test('schema v12 adds durable deferred priority without losing inbox rows', (t) => {
-  const { persistence, store, filePath } = harness(t);
-  const [messageKey] = ingest(store, [message('v12-priority')]);
-  assert.ok(messageKey);
-  persistence.close();
-  const v12 = new DatabaseSync(filePath);
-  v12.exec(`
-    DROP TRIGGER ilink_session_window_insert_guard;
-    DROP TRIGGER ilink_session_window_update_guard;
-    DROP TRIGGER ilink_attempt_window_insert_guard;
-    DROP TRIGGER ilink_attempt_window_update_guard;
-    DROP TRIGGER ilink_window_source_insert_guard;
-    DROP TRIGGER ilink_window_source_update_guard;
-    DROP TRIGGER ilink_window_delete_guard;
-    DROP TABLE ilink_login_offers;
-    DROP TABLE ilink_inbound_images;
-    DROP TABLE ilink_reply_window_secrets;
-    DROP TABLE ilink_reply_windows;
-    DROP TABLE ilink_account_secrets;
-    DROP TABLE ilink_accounts;
-    DROP INDEX inbound_deferred_idx;
-    ALTER TABLE inbound_messages DROP COLUMN deferred;
-    ALTER TABLE inbound_messages DROP COLUMN channel;
-    ALTER TABLE conversations DROP COLUMN memory_thread_id;
-    ALTER TABLE agent_sessions DROP COLUMN memory_thread_id;
-    ALTER TABLE agent_sessions DROP COLUMN channel;
-    ALTER TABLE agent_sessions DROP COLUMN reply_window_id;
-    PRAGMA user_version = 12;
-  `);
-  v12.close();
+  const messageKey = 'message-one';
+  const filePath = createLegacyDatabase(t, 12, (database) => {
+    database.prepare(`
+      INSERT INTO conversations (open_kfid, external_userid, updated_at)
+      VALUES ('wk-one', 'wm-one', 1)
+    `).run();
+    database.prepare(`
+      INSERT INTO inbound_messages (
+        message_key, open_kfid, msgid, external_userid,
+        origin, msg_type, status, created_at, updated_at
+      ) VALUES (
+        ?, 'wk-one', 'v12-priority', 'wm-one',
+        'customer', 'text', 'received', 1, 1
+      )
+    `).run(messageKey);
+  });
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 21);
+  assert.equal(schemaVersion(filePath), 22);
   assert.equal(upgraded.getInbound(messageKey)?.deferred, false);
   assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
 });
 
 test('schema v13 adds durable archived-memory bindings', (t) => {
-  const { persistence, store, filePath } = harness(t);
-  const [messageKey] = ingest(store, [message('v13-memory')]);
-  assert.ok(messageKey);
-  store.setConversationThread({
-    openKfId: 'wk-one',
-    externalUserId: 'wm-one',
-    threadId: '01900000-0000-7000-8000-000000000002',
+  const messageKey = 'legacy-v13-memory';
+  const filePath = createLegacyDatabase(t, 13, (database) => {
+    database.prepare(`
+      INSERT INTO conversations (
+        open_kfid, external_userid, thread_id, updated_at
+      ) VALUES (
+        'wk-one', 'wm-one',
+        '01900000-0000-7000-8000-000000000002', 1
+      )
+    `).run();
+    database.prepare(`
+      INSERT INTO inbound_messages (
+        message_key, open_kfid, msgid, external_userid,
+        origin, msg_type, status, deferred, created_at, updated_at
+      ) VALUES (
+        ?, 'wk-one', 'v13-memory', 'wm-one',
+        'customer', 'text', 'received', 0, 1, 1
+      )
+    `).run(messageKey);
   });
-  persistence.close();
-  const v13 = new DatabaseSync(filePath);
-  v13.exec(`
-    DROP TRIGGER ilink_session_window_insert_guard;
-    DROP TRIGGER ilink_session_window_update_guard;
-    DROP TRIGGER ilink_attempt_window_insert_guard;
-    DROP TRIGGER ilink_attempt_window_update_guard;
-    DROP TRIGGER ilink_window_source_insert_guard;
-    DROP TRIGGER ilink_window_source_update_guard;
-    DROP TRIGGER ilink_window_delete_guard;
-    DROP TABLE ilink_login_offers;
-    DROP TABLE ilink_inbound_images;
-    DROP TABLE ilink_reply_window_secrets;
-    DROP TABLE ilink_reply_windows;
-    DROP TABLE ilink_account_secrets;
-    DROP TABLE ilink_accounts;
-    ALTER TABLE inbound_messages DROP COLUMN channel;
-    ALTER TABLE conversations DROP COLUMN memory_thread_id;
-    ALTER TABLE agent_sessions DROP COLUMN memory_thread_id;
-    ALTER TABLE agent_sessions DROP COLUMN channel;
-    ALTER TABLE agent_sessions DROP COLUMN reply_window_id;
-    PRAGMA user_version = 13;
-  `);
-  v13.close();
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 21);
-  assert.equal(upgraded.getConversation('wk-one', 'wm-one')?.memoryThreadId, '');
+  assert.equal(schemaVersion(filePath), 22);
+  assert.equal(
+    upgraded.getConversation('wechat_kf', 'wk-one', 'wm-one')?.memoryThreadId,
+    '',
+  );
   assert.ok(upgraded.getInbound(messageKey));
   assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
   assert.deepEqual(upgraded.foreignKeyCheck(), []);
@@ -294,7 +440,7 @@ test('schema v17 adds iLink invariant triggers and enrollment audit without rewr
   v17.close();
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 21);
+  assert.equal(schemaVersion(filePath), 22);
   assert.ok(upgraded.getInbound(messageKey));
   withTestDatabase(filePath, (database) => {
     assert.equal(Number((database.prepare(`
@@ -326,7 +472,7 @@ test('schema v19 adds cleanup indexes without rewriting iLink tables', (t) => {
   `);
   v19.close();
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 21);
+  assert.equal(schemaVersion(filePath), 22);
   assert.equal(withTestDatabase(filePath, (database) => Number((database.prepare(`
       SELECT COUNT(*) AS count FROM sqlite_master
       WHERE type = 'index' AND name IN (
@@ -361,9 +507,11 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
     },
   ]);
   const retiredAttempt = store.listMessageAttempts(messageKey)[0]!;
-  const sending = store.beginNextSend();
+  const sending = store.beginNextSend('wechat_kf');
   assert.equal(sending?.attemptId, retiredAttempt.attemptId);
-  store.completeSend(retiredAttempt.attemptId, { wecomMsgId: 'retired-accepted' });
+  store.completeSend(retiredAttempt.attemptId, {
+    providerMessageId: 'retired-accepted',
+  });
   withTestDatabase(filePath, (database) => {
     database.prepare(`
       INSERT INTO delivery_failures (
@@ -394,7 +542,7 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
   v20.close();
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 21);
+  assert.equal(schemaVersion(filePath), 22);
   assert.equal(withTestDatabase(filePath, (database) => Number((database.prepare(`
       SELECT COUNT(*) AS count FROM sqlite_master
       WHERE type = 'table' AND name = 'maintainer_binding'
@@ -425,9 +573,12 @@ test('status CHECK rejects invalid rows and filters remain parameterized', (t) =
     assert.throws(() =>
       database.prepare(`
         INSERT INTO inbound_messages (
-          message_key, open_kfid, msgid, origin, msg_type, status,
+          message_key, open_kfid, msgid, channel, origin, msg_type, status,
           created_at, updated_at
-        ) VALUES ('bad', 'wk-one', 'bad', 'customer', 'text', 'bogus', 1, 1)
+        ) VALUES (
+          'bad', 'wk-one', 'bad', 'wechat_kf',
+          'customer', 'text', 'bogus', 1, 1
+        )
       `).run(),
     /CHECK constraint/u);
   });
@@ -526,8 +677,8 @@ test('late failures cannot overwrite suppressed ready or completed states', (t) 
 
 test('MCP finalization rejects duplicate and cross-message receipts atomically', (t) => {
   const { store } = harness(t);
-  const createAttempt = (id: string, externalUserId: string) => {
-    const [messageKey] = ingest(store, [message(id, externalUserId)]);
+  const createAttempt = (id: string, peerId: string) => {
+    const [messageKey] = ingest(store, [message(id, peerId)]);
     assert.ok(messageKey);
     store.claimInbound({ messageKey });
     const session = store.createAgentSession({ messageKey });
@@ -536,7 +687,9 @@ test('MCP finalization rejects duplicate and cross-message receipts atomically',
       sentType: 'text',
       payload: { msgtype: 'text', text: { content: id } },
     });
-    store.completeSend(attempt.attemptId, { wecomMsgId: `wx-${id}` });
+    store.completeSend(attempt.attemptId, {
+      providerMessageId: `wx-${id}`,
+    });
     store.closeAgentSession(session.token);
     return { messageKey, attempt };
   };
@@ -560,22 +713,29 @@ test('MCP finalization rejects duplicate and cross-message receipts atomically',
 
 test('send terminal states cannot reverse and unknown attempts reject', (t) => {
   const { store } = harness(t);
-  assert.throws(() => store.completeSend('missing', { wecomMsgId: 'wx' }), /Unknown/u);
+  assert.throws(
+    () => store.completeSend('missing', { providerMessageId: 'wx' }),
+    /Unknown/u,
+  );
   assert.throws(() => store.failSend('missing', new Error('x')), /Unknown/u);
   assert.throws(() => store.markSendUncertain('missing', new Error('x')), /Unknown/u);
   assert.equal(store.getAttempt('missing'), undefined);
 
   const messageKey = reserveText(store, 'terminal');
-  const attempt = store.beginNextSend();
+  const attempt = store.beginNextSend('wechat_kf');
   assert.ok(attempt);
-  store.completeSend(attempt.attemptId, { wecomMsgId: 'wx-terminal' });
-  assert.equal(store.completeSend(attempt.attemptId, { wecomMsgId: 'wx-terminal' }).status, 'accepted');
+  store.completeSend(attempt.attemptId, {
+    providerMessageId: 'wx-terminal',
+  });
+  assert.equal(store.completeSend(attempt.attemptId, {
+    providerMessageId: 'wx-terminal',
+  }).status, 'accepted');
   assert.throws(() => store.failSend(attempt.attemptId, new Error('late')), /status accepted/u);
   assert.throws(
     () => store.markSendUncertain(attempt.attemptId, new Error('late')),
     /status accepted/u,
   );
-  assert.equal(store.markSendMsgFailed({ wecomMsgId: '', failType: 1 }), false);
+  assert.equal(store.markSendMsgFailed({ providerMessageId: '', failType: 1 }), false);
   assert.equal(store.getInbound(messageKey)?.status, 'completed');
 });
 
@@ -601,23 +761,25 @@ test('media writes validate owner attachment and expiry inputs', (t) => {
   });
   assert.equal(remembered[0]?.mediaId, 'media-id');
   assert.deepEqual(store.listRecentMedia({
-    openKfId: 'wk-one', externalUserId: 'wm-one', maxAgeMs: -1,
+    channel: 'wechat_kf', accountKey: 'wk-one', peerId: 'wm-one', maxAgeMs: -1,
   }), []);
 });
 
 test('one nonempty Codex thread belongs to exactly one conversation', (t) => {
   const { store } = harness(t);
   store.setConversationThread({
-    openKfId: 'wk-one', externalUserId: 'wm-one', threadId: 'thread-shared',
+    channel: 'wechat_kf', accountKey: 'wk-one', peerId: 'wm-one',
+    threadId: 'thread-shared',
   });
   assert.throws(
     () => store.setConversationThread({
-      openKfId: 'wk-two', externalUserId: 'wm-two', threadId: 'thread-shared',
+      channel: 'wechat_kf', accountKey: 'wk-two', peerId: 'wm-two',
+      threadId: 'thread-shared',
     }),
     /UNIQUE constraint failed/u,
   );
   assert.equal(
-    store.getConversation('wk-two', 'wm-two')?.threadId,
+    store.getConversation('wechat_kf', 'wk-two', 'wm-two')?.threadId,
     undefined,
   );
 });

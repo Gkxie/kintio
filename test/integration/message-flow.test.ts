@@ -130,7 +130,7 @@ async function createHarness(
     const expectedCursor = cursors.get(service) || '';
     const nextCursor = `${service}-${String(raw.msgid)}`;
     const result = store.ingestSyncPage({
-      openKfId: service,
+      accountKey: service,
       expectedCursor,
       nextCursor,
       messages: [normalizeWecomMessage(raw, service, { cursor: expectedCursor, index: 0 })],
@@ -212,7 +212,7 @@ test('unauthorized image does zero work; third trigger confirms and authorizatio
   await harness.idle();
   assert.equal(
     codexInputs[0]?.threadId,
-    harness.store.getConversation('wk-two', 'wm-one')?.threadId,
+    harness.store.getConversation('wechat_kf', 'wk-two', 'wm-one')?.threadId,
   );
   assert.ok(codexInputs[0]?.threadId);
   assert.equal(harness.sent[1]?.payload.text instanceof Object, true);
@@ -283,7 +283,8 @@ test('recovery keeps an old primary and newer unlinked message independent', asy
   const primaryKey = harness.ingest(customer('recover-primary', '原始问题'));
   const followKey = harness.ingest(customer('recover-follow', '最新调整'));
   harness.store.setConversationThread({
-    openKfId: 'wk-one', externalUserId: 'wm-one', threadId: 'thread-old',
+    channel: 'wechat_kf', accountKey: 'wk-one', peerId: 'wm-one',
+    threadId: 'thread-old',
   });
   harness.store.claimInbound({ messageKey: primaryKey, clientInputId: primaryKey });
   harness.store.markInboundPreparing(primaryKey, 'turn-old');
@@ -297,5 +298,8 @@ test('recovery keeps an old primary and newer unlinked message independent', asy
   assert.equal(harness.store.getInbound(primaryKey)?.status, 'completed');
   assert.equal(harness.store.getInbound(followKey)?.status, 'completed');
   assert.equal(harness.sent.length, 2);
-  assert.equal(stableMessageKey('wk-one', 'recover-primary'), primaryKey);
+  assert.equal(
+    stableMessageKey('wechat_kf', 'wk-one', 'recover-primary'),
+    primaryKey,
+  );
 });

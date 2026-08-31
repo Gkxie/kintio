@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { truncateUtf8 } from '../lib/text.ts';
 import type { NormalizedMessage } from '../types.ts';
 import {
@@ -45,6 +47,32 @@ type RawMessage = LooseObject & {
   note?: LooseObject;
   event?: LooseObject;
 };
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (!value || typeof value !== 'object') return value;
+  const source = value as Record<string, unknown>;
+  return Object.fromEntries(
+    Object.keys(source).sort().flatMap((key) =>
+      source[key] === undefined ? [] : [[key, canonicalValue(source[key])]],
+    ),
+  );
+}
+
+function stableEventProviderId(
+  accountKey: string,
+  cursor: string,
+  index: number,
+  message: Omit<NormalizedMessage, 'providerMessageId'>,
+): string {
+  // Preserve the v21 fallback identity so an old no-msgid event replay remains
+  // a duplicate after the Provider ID moves out of the persistence layer.
+  const legacyPayload = { id: '', ...message };
+  const digest = createHash('sha256').update(
+    `${accountKey}\0${cursor}\0${index}\0${JSON.stringify(canonicalValue(legacyPayload))}`,
+  ).digest('hex');
+  return `event_${digest.slice(0, 40)}`;
+}
 
 interface MergedItem {
   readonly sendTime: number;
@@ -290,8 +318,16 @@ export function normalizeWecomMessage(
     type === MESSAGE_TYPES.IMAGE ? String(raw.image?.media_id || '') : '';
   const text =
     type === MESSAGE_TYPES.TEXT ? String(raw.text?.content || '') : '';
-  const message = {
-    id: String(raw.msgid || ''),
+  const sync = Object.freeze({
+    cursor: String(cursor || ''),
+    index: Number.isInteger(index) && index >= 0 ? index : 0,
+  });
+  const conversation = Object.freeze({
+    channel: 'wechat_kf' as const,
+    accountKey: String(raw.open_kfid || event.open_kfid || fallbackOpenKfId),
+    peerId: String(raw.external_userid || event.external_userid || ''),
+  });
+  const normalized = {
     origin: origin === 3
       ? MESSAGE_ORIGINS.CUSTOMER
       : origin === 4
@@ -300,15 +336,8 @@ export function normalizeWecomMessage(
     type,
     rawType,
     sentAt: Number(raw.send_time || 0),
-    sync: Object.freeze({
-      cursor: String(cursor || ''),
-      index: Number.isInteger(index) && index >= 0 ? index : 0,
-    }),
-    conversation: Object.freeze({
-      channel: 'wechat_kf',
-      accountKey: String(raw.open_kfid || event.open_kfid || fallbackOpenKfId),
-      peerId: String(raw.external_userid || event.external_userid || ''),
-    }),
+    sync,
+    conversation,
     text,
     summary:
       type === MESSAGE_TYPES.EVENT
@@ -320,6 +349,14 @@ export function normalizeWecomMessage(
         ? [Object.freeze({ kind: 'image', mediaId, status: 'unresolved' })]
         : [],
     ),
-  };
-  return Object.freeze(message);
+  } satisfies Omit<NormalizedMessage, 'providerMessageId'>;
+  return Object.freeze({
+    providerMessageId: String(raw.msgid || '') || stableEventProviderId(
+      conversation.accountKey,
+      sync.cursor,
+      sync.index,
+      normalized,
+    ),
+    ...normalized,
+  });
 }

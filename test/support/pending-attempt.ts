@@ -49,11 +49,11 @@ export function seedPendingAttempts(
   try {
     const insert = database.prepare(`
       INSERT INTO send_attempts (
-        attempt_key, source_message_key, open_kfid, external_userid,
+        attempt_key, source_message_key, channel, open_kfid, external_userid,
         send_index, source, sent_type, payload_json, metadata_json,
         fingerprint, client_message_id, status, wecom_msgid,
         error_code, error_message, fail_type, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', '', '', 0, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', '', '', 0, ?, ?)
     `);
     for (const attempt of attempts) {
       const payloadJson = JSON.stringify(canonical(attempt.payload));
@@ -61,8 +61,9 @@ export function seedPendingAttempts(
       insert.run(
         `sa_${sha256(`${messageKey}\0${index}`).slice(0, 29)}`,
         messageKey,
-        inbound.openKfId,
-        inbound.externalUserId,
+        inbound.channel,
+        inbound.accountKey,
+        inbound.peerId,
         index,
         attempt.source || 'test_fixture',
         attempt.sentType,

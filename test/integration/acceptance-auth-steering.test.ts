@@ -213,7 +213,7 @@ async function createHarness(
       index: 0,
     });
     const result = store.ingestSyncPage({
-      openKfId,
+      accountKey: openKfId,
       expectedCursor,
       nextCursor,
       messages: [normalized],
@@ -329,8 +329,9 @@ test('every known unauthorized customer type is silent before Codex and media wo
   assert.ok(keys.every((key) => {
     const inbound = harness.store.getInbound(key);
     return inbound && harness.store.getConversation(
-      inbound.openKfId,
-      inbound.externalUserId,
+      inbound.channel,
+      inbound.accountKey,
+      inbound.peerId,
     )?.threadId === '';
   }));
 });
@@ -675,18 +676,22 @@ test('a slow customer does not block another isolated thread or media catalog', 
   assert.equal(harness.sent[0]?.toUser, 'wm-b');
   assert.equal(agent.inputs.length, 2);
   assert.notEqual(
-    harness.store.getConversation('wk-one', 'wm-a')?.threadId,
-    harness.store.getConversation('wk-one', 'wm-b')?.threadId,
+    harness.store.getConversation('wechat_kf', 'wk-one', 'wm-a')?.threadId,
+    harness.store.getConversation('wechat_kf', 'wk-one', 'wm-b')?.threadId,
   );
   assert.deepEqual(
     harness.store
-      .listRecentMedia({ openKfId: 'wk-one', externalUserId: 'wm-a' })
+      .listRecentMedia({
+        channel: 'wechat_kf', accountKey: 'wk-one', peerId: 'wm-a',
+      })
       .map((item) => item.mediaId),
     ['media-a'],
   );
   assert.deepEqual(
     harness.store
-      .listRecentMedia({ openKfId: 'wk-one', externalUserId: 'wm-b' })
+      .listRecentMedia({
+        channel: 'wechat_kf', accountKey: 'wk-one', peerId: 'wm-b',
+      })
       .map((item) => item.mediaId),
     ['media-b'],
   );
@@ -818,7 +823,7 @@ test('identical raw msgids remain isolated across MCP sessions attempts and clie
       openKfId,
     );
     const ingested = store.ingestSyncPage({
-      openKfId,
+      accountKey: openKfId,
       nextCursor: `cursor-${index}`,
       messages: [message],
     });
@@ -835,8 +840,8 @@ test('identical raw msgids remain isolated across MCP sessions attempts and clie
   }
 
   assert.notEqual(keys[0], keys[1]);
-  assert.equal(keys[0], stableMessageKey('wk-a', sameMsgid));
-  assert.equal(keys[1], stableMessageKey('wk-b', sameMsgid));
+  assert.equal(keys[0], stableMessageKey('wechat_kf', 'wk-a', sameMsgid));
+  assert.equal(keys[1], stableMessageKey('wechat_kf', 'wk-b', sameMsgid));
   const attemptsA = store.listMessageAttempts(keys[0]!);
   const attemptsB = store.listMessageAttempts(keys[1]!);
   assert.equal(attemptsA.length, 1);

@@ -24,7 +24,7 @@ async function harness(t: TestContext, memoryThreadId = '01900000-0000-7000-8000
   });
   const store = persistence.core;
   const page = store.ingestSyncPage({
-    openKfId: 'wk-memory',
+    accountKey: 'wk-memory',
     nextCursor: 'memory-one',
     messages: [normalizeWecomMessage({
       msgid: 'memory-message',
@@ -38,8 +38,9 @@ async function harness(t: TestContext, memoryThreadId = '01900000-0000-7000-8000
   const messageKey = page.insertedMessageKeys[0]!;
   store.claimInbound({ messageKey });
   store.setConversationThread({
-    openKfId: 'wk-memory',
-    externalUserId: 'wm-memory',
+    channel: 'wechat_kf',
+    accountKey: 'wk-memory',
+    peerId: 'wm-memory',
     threadId: '01900000-0000-7000-8000-000000000002',
     memoryThreadId,
   });
@@ -109,8 +110,8 @@ describe('archived channel delivery facts', () => {
     const session: AgentSessionRecord = {
       token: sessionToken,
       messageKey: 'im_ilink_memory',
-      openKfId: 'ia_ilink_memory',
-      externalUserId: 'peer-ilink-memory',
+      accountKey: 'ia_ilink_memory',
+      peerId: 'peer-ilink-memory',
       channel: 'weixin_ilink',
       replyWindowId: 17,
       boundaryInboxSeq: 1,

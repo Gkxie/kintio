@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { describe, test } from 'vitest';
 
 import {
-  ILINK_INBOUND_PROVIDER,
   IlinkMessageNormalizationError,
   normalizeIlinkInboundMessage,
   type IlinkInboundPair,
@@ -53,34 +52,40 @@ function normalize(
   return normalizeIlinkInboundMessage(message, activePair, position);
 }
 
-test('normalizes valid text into an isolated iLink candidate', () => {
-  const candidate = normalize();
+test('normalizes valid text and isolates provider facts from the common message', () => {
+  const normalized = normalize();
 
-  assert.ok(candidate);
-  assert.equal(candidate.provider, ILINK_CHANNEL);
-  assert.equal(candidate.provider, ILINK_INBOUND_PROVIDER);
-  assert.equal(candidate.accountKey, pair.accountKey);
-  assert.equal(candidate.providerAccountId, pair.botId);
-  assert.equal(candidate.peerId, pair.ownerUserId);
-  assert.equal(candidate.providerMessageId, 'message:42');
-  assert.deepEqual(candidate.messageKeyMaterial, {
-    accountKey: pair.accountKey,
-    providerMessageId: 'message:42',
+  assert.ok(normalized);
+  const { message, facts } = normalized;
+  assert.equal(message.conversation.channel, ILINK_CHANNEL);
+  assert.equal(message.conversation.accountKey, pair.accountKey);
+  assert.equal(message.conversation.peerId, pair.ownerUserId);
+  assert.equal(message.providerMessageId, 'message:42');
+  assert.deepEqual(message.sync, sync);
+  assert.equal(message.origin, 'customer');
+  assert.equal(message.type, 'text');
+  assert.equal(message.rawType, 'ilink_text');
+  assert.equal(message.text, '你好，iLink');
+  assert.equal(message.summary, '你好，iLink');
+  assert.equal(message.sentAt, 1_700_000_000_123);
+  assert.deepEqual(message.attributes, {
+    itemTypes: [IlinkMessageItemType.TEXT],
   });
-  assert.deepEqual(candidate.sync, sync);
-  assert.equal(candidate.kind, 'text');
-  assert.equal(candidate.text, '你好，iLink');
-  assert.equal(candidate.summary, '你好，iLink');
-  assert.deepEqual(candidate.itemTypes, [IlinkMessageItemType.TEXT]);
-  assert.equal(candidate.contextToken, 'context-secret');
-  assert.equal(candidate.createTime, 1_700_000_000_123);
-  assert.equal(candidate.seq, 8);
-  assert.equal('conversation' in candidate, false);
-  assert.equal('openKfId' in candidate, false);
-  assert.equal('externalUserId' in candidate, false);
-  assert.ok(Object.isFrozen(candidate));
-  assert.ok(Object.isFrozen(candidate.messageKeyMaterial));
-  assert.ok(Object.isFrozen(candidate.sync));
+  assert.deepEqual(message.attachments, []);
+  assert.equal(facts.contextToken, 'context-secret');
+  assert.equal(facts.providerSeq, 8);
+  assert.deepEqual(facts.images, []);
+  assert.equal('contextToken' in message, false);
+  assert.equal('providerAccountId' in message, false);
+  assert.doesNotMatch(JSON.stringify(message), /context-secret/u);
+  assert.ok(Object.isFrozen(normalized));
+  assert.ok(Object.isFrozen(message));
+  assert.ok(Object.isFrozen(message.conversation));
+  assert.ok(Object.isFrozen(message.sync));
+  assert.ok(Object.isFrozen(message.attributes));
+  assert.ok(Object.isFrozen(message.attachments));
+  assert.ok(Object.isFrozen(facts));
+  assert.ok(Object.isFrozen(facts.images));
 });
 
 test('strictly rejects messages outside the active owner/bot USER-FINISH envelope', () => {
@@ -112,17 +117,23 @@ test('strictly rejects messages outside the active owner/bot USER-FINISH envelop
   );
 });
 
-test('derives stable provider IDs without putting raw provider identities in key material', () => {
+test('derives stable provider IDs without embedding raw provider identities', () => {
   const byMessageIdA = normalize(base, pair, { cursor: 'cursor-a', index: 0 });
   const byMessageIdB = normalize(base, pair, { cursor: 'cursor-b', index: 9 });
-  assert.equal(byMessageIdA?.providerMessageId, 'message:42');
-  assert.equal(byMessageIdB?.providerMessageId, 'message:42');
+  assert.equal(byMessageIdA?.message.providerMessageId, 'message:42');
+  assert.equal(byMessageIdB?.message.providerMessageId, 'message:42');
 
   const { message_id: _messageId, ...withoutMessageId } = base;
   const byClientA = normalize({ ...withoutMessageId, client_id: 'client-stable' });
   const byClientB = normalize({ ...withoutMessageId, client_id: 'client-stable' });
-  assert.match(byClientA?.providerMessageId ?? '', /^client:[0-9a-f]{64}$/u);
-  assert.equal(byClientA?.providerMessageId, byClientB?.providerMessageId);
+  assert.match(
+    byClientA?.message.providerMessageId ?? '',
+    /^client:[0-9a-f]{64}$/u,
+  );
+  assert.equal(
+    byClientA?.message.providerMessageId,
+    byClientB?.message.providerMessageId,
+  );
 
   const { client_id: _clientId, ...withoutClientId } = {
     ...withoutMessageId,
@@ -142,8 +153,14 @@ test('derives stable provider IDs without putting raw provider identities in key
       { type: IlinkMessageItemType.IMAGE, msg_id: 'item-two' },
     ],
   });
-  assert.match(byItemsA?.providerMessageId ?? '', /^items:[0-9a-f]{64}$/u);
-  assert.equal(byItemsA?.providerMessageId, byItemsB?.providerMessageId);
+  assert.match(
+    byItemsA?.message.providerMessageId ?? '',
+    /^items:[0-9a-f]{64}$/u,
+  );
+  assert.equal(
+    byItemsA?.message.providerMessageId,
+    byItemsB?.message.providerMessageId,
+  );
 
   const fallbackA = normalize({
     ...withoutClientId,
@@ -158,17 +175,23 @@ test('derives stable provider IDs without putting raw provider identities in key
     pair,
     { cursor: sync.cursor, index: sync.index + 1 },
   );
-  assert.equal(fallbackA?.providerMessageId, `seq:${base.seq}`);
-  assert.equal(fallbackA?.providerMessageId, fallbackB?.providerMessageId);
-  assert.equal(fallbackA?.providerMessageId, fallbackOtherIndex?.providerMessageId);
+  assert.equal(fallbackA?.message.providerMessageId, `seq:${base.seq}`);
+  assert.equal(
+    fallbackA?.message.providerMessageId,
+    fallbackB?.message.providerMessageId,
+  );
+  assert.equal(
+    fallbackA?.message.providerMessageId,
+    fallbackOtherIndex?.message.providerMessageId,
+  );
   const { seq: _seq, ...withoutStableSequence } = withoutClientId;
   assert.equal(normalize({
     ...withoutStableSequence,
     item_list: [{ type: IlinkMessageItemType.TEXT, text_item: { text: 'no-id' } }],
   }), null);
 
-  const material = JSON.stringify(fallbackA?.messageKeyMaterial);
-  assert.doesNotMatch(material, /bot-one@im\.bot|owner-one@im\.wechat/u);
+  const providerId = fallbackA?.message.providerMessageId ?? '';
+  assert.doesNotMatch(providerId, /bot-one@im\.bot|owner-one@im\.wechat/u);
 });
 
 test('non-text items produce bounded safe summaries and retain no download material', () => {
@@ -226,11 +249,11 @@ test('non-text items produce bounded safe summaries and retain no download mater
   };
   const before = structuredClone(message);
 
-  const candidate = normalize(message);
+  const normalized = normalize(message);
 
-  assert.ok(candidate);
-  assert.equal(candidate.kind, 'non_text');
-  assert.equal(candidate.text, '');
+  assert.ok(normalized);
+  assert.equal(normalized.message.type, 'non_text');
+  assert.equal(normalized.message.text, '');
   for (const expected of [
     'image: not downloaded or viewed',
     'voice: not downloaded, played, or transcribed',
@@ -241,7 +264,7 @@ test('non-text items produce bounded safe summaries and retain no download mater
     'type 99',
     'unknown type',
   ]) {
-    assert.match(candidate.summary, new RegExp(expected, 'u'));
+    assert.match(normalized.message.summary, new RegExp(expected, 'u'));
   }
   for (const secret of [
     'untrusted.example',
@@ -257,15 +280,16 @@ test('non-text items produce bounded safe summaries and retain no download mater
     'private-result',
     'unknown-payload-secret',
   ]) {
-    assert.doesNotMatch(candidate.summary, new RegExp(secret, 'u'));
+    assert.doesNotMatch(normalized.message.summary, new RegExp(secret, 'u'));
   }
   assert.deepEqual(message, before);
-  assert.equal('attachments' in candidate, false);
-  assert.equal('media' in candidate, false);
+  assert.deepEqual(normalized.message.attachments, []);
+  assert.deepEqual(normalized.facts.images, []);
+  assert.equal('media' in normalized.message, false);
 });
 
 test('mixed messages expose only text as text and render media as placeholders', () => {
-  const candidate = normalize({
+  const normalized = normalize({
     ...base,
     item_list: [
       {
@@ -283,18 +307,21 @@ test('mixed messages expose only text as text and render media as placeholders',
     ],
   });
 
-  assert.ok(candidate);
-  assert.equal(candidate.kind, 'mixed');
-  assert.equal(candidate.text, '第一段 \n第二段');
-  assert.match(candidate.summary, /第一段 /u);
-  assert.match(candidate.summary, /image: not downloaded or viewed/u);
-  assert.match(candidate.summary, /第二段/u);
-  assert.doesNotMatch(candidate.summary, /quoted-image-secret|image-secret/u);
+  assert.ok(normalized);
+  assert.equal(normalized.message.type, 'mixed');
+  assert.equal(normalized.message.text, '第一段 \n第二段');
+  assert.match(normalized.message.summary, /第一段 /u);
+  assert.match(normalized.message.summary, /image: not downloaded or viewed/u);
+  assert.match(normalized.message.summary, /第二段/u);
+  assert.doesNotMatch(
+    normalized.message.summary,
+    /quoted-image-secret|image-secret/u,
+  );
 });
 
 test('valid iLink images expose only a minimal in-memory locator for host sealing', () => {
   const key = Buffer.alloc(16, 5);
-  const candidate = normalize({
+  const normalized = normalize({
     ...base,
     item_list: [{
       type: IlinkMessageItemType.IMAGE,
@@ -307,18 +334,32 @@ test('valid iLink images expose only a minimal in-memory locator for host sealin
       },
     }],
   });
-  assert.ok(candidate);
-  assert.deepEqual(candidate.images, [{
+  assert.ok(normalized);
+  assert.deepEqual(normalized.facts.images, [{
     position: 0,
     downloadUrl:
       'https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=x',
     aesKey: key.toString('base64url'),
   }]);
-  assert.doesNotMatch(candidate.summary, /encrypted_query_param/u);
+  assert.deepEqual(normalized.message.attachments, [{
+    kind: 'image',
+    mediaId: 'ilink:0',
+    filename: 'ilink-image-0',
+    status: 'unresolved',
+  }]);
+  assert.doesNotMatch(normalized.message.summary, /encrypted_query_param/u);
+  const serialized = JSON.stringify(normalized.message);
+  for (const secret of [
+    'context-secret',
+    'encrypted_query_param',
+    key.toString('base64url'),
+  ]) {
+    assert.doesNotMatch(serialized, new RegExp(secret, 'u'));
+  }
 });
 
 test('iLink image extraction keeps only the latest four locators', () => {
-  const candidate = normalize({
+  const normalized = normalize({
     ...base,
     item_list: Array.from({ length: 5 }, (_, index) => ({
       type: IlinkMessageItemType.IMAGE,
@@ -331,7 +372,14 @@ test('iLink image extraction keeps only the latest four locators', () => {
       },
     })),
   });
-  assert.deepEqual(candidate?.images.map((image) => image.position), [1, 2, 3, 4]);
+  assert.deepEqual(
+    normalized?.facts.images.map((image) => image.position),
+    [1, 2, 3, 4],
+  );
+  assert.deepEqual(
+    normalized?.message.attachments.map((attachment) => attachment.mediaId),
+    ['ilink:1', 'ilink:2', 'ilink:3', 'ilink:4'],
+  );
 });
 
 test('empty and whitespace-only text remain explicit', () => {
@@ -344,13 +392,13 @@ test('empty and whitespace-only text remain explicit', () => {
     }],
   });
 
-  assert.equal(empty?.kind, 'empty');
-  assert.equal(empty?.text, '');
-  assert.equal(empty?.summary, '[iLink message: no readable content]');
-  assert.equal(empty?.seq, 8);
-  assert.equal(whitespace?.kind, 'text');
-  assert.equal(whitespace?.text, '   ');
-  assert.equal(whitespace?.summary, '[iLink text: empty]');
+  assert.equal(empty?.message.type, 'empty');
+  assert.equal(empty?.message.text, '');
+  assert.equal(empty?.message.summary, '[iLink message: no readable content]');
+  assert.equal(empty?.facts.providerSeq, 8);
+  assert.equal(whitespace?.message.type, 'text');
+  assert.equal(whitespace?.message.text, '   ');
+  assert.equal(whitespace?.message.summary, '[iLink text: empty]');
 });
 
 describe('normalizer input boundaries', () => {
@@ -370,9 +418,15 @@ describe('normalizer input boundaries', () => {
     }
   });
 
+  test('the legitimate initial empty cursor is preserved', () => {
+    const normalized = normalize(base, pair, { cursor: '', index: 0 });
+
+    assert.deepEqual(normalized?.message.sync, { cursor: '', index: 0 });
+  });
+
   test('invalid cursor/index configuration is rejected', () => {
     for (const position of [
-      { cursor: '', index: 0 },
+      { cursor: 'bad\0cursor', index: 0 },
       { cursor: 'cursor', index: -1 },
       { cursor: 'cursor', index: 1.5 },
     ]) {
@@ -403,10 +457,10 @@ describe('normalizer input boundaries', () => {
 
     assert.ok(text);
     assert.ok(file);
-    assert.ok(Buffer.byteLength(text.text, 'utf8') <= 32 * 1_024);
-    assert.ok(Buffer.byteLength(text.summary, 'utf8') <= 48 * 1_024);
-    assert.ok(Buffer.byteLength(file.summary, 'utf8') < 512);
-    assert.match(text.text, /…$/u);
-    assert.match(file.summary, /…/u);
+    assert.ok(Buffer.byteLength(text.message.text, 'utf8') <= 32 * 1_024);
+    assert.ok(Buffer.byteLength(text.message.summary, 'utf8') <= 48 * 1_024);
+    assert.ok(Buffer.byteLength(file.message.summary, 'utf8') < 512);
+    assert.match(text.message.text, /…$/u);
+    assert.match(file.message.summary, /…/u);
   });
 });

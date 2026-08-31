@@ -48,8 +48,8 @@ function finishWorker(persistence: StatePersistence, message: Serializable): voi
 function evaluateThird(store: CoreState, messageKey: string): void {
   store.evaluateAuthorization({
     messageKey,
-    openKfId,
-    externalUserId,
+    accountKey: openKfId,
+    peerId: externalUserId,
     isTrigger: true,
     requiredConsecutive: 3,
     confirmationText,
@@ -104,7 +104,7 @@ function runAuthorizationWorker(databaseFile: string, messageKey: string): void 
 function runSendWorker(databaseFile: string, behavior: string): void {
   const persistence = new StatePersistence({ filePath: databaseFile });
   const store = persistence.core;
-  const attempt = store.beginNextSend();
+  const attempt = store.beginNextSend('wechat_kf');
   if (!attempt) {
     finishWorker(persistence, { type: 'no-send' });
     return;
@@ -119,7 +119,7 @@ function runSendWorker(databaseFile: string, behavior: string): void {
     return;
   }
   const accepted = store.completeSend(attempt.attemptId, {
-    wecomMsgId: `wecom-${attempt.clientMessageId}`,
+    providerMessageId: `wecom-${attempt.clientMessageId}`,
   });
   const message = {
     type: 'send-accepted',
@@ -160,7 +160,7 @@ function seedAuthorizationPrelude(store: CoreState, suffix: string): string {
     const msgid = `${suffix}-${index}`;
     const nextCursor = `${suffix}-cursor-${index}`;
     store.ingestSyncPage({
-      openKfId,
+      accountKey: openKfId,
       expectedCursor: cursor,
       nextCursor,
       messages: [testWecomMessage({
@@ -172,12 +172,12 @@ function seedAuthorizationPrelude(store: CoreState, suffix: string): string {
       })],
     });
     cursor = nextCursor;
-    const messageKey = stableMessageKey(openKfId, msgid);
+    const messageKey = stableMessageKey('wechat_kf', openKfId, msgid);
     if (index < 3) {
       const result = store.evaluateAuthorization({
         messageKey,
-        openKfId,
-        externalUserId,
+        accountKey: openKfId,
+        peerId: externalUserId,
         isTrigger: true,
         requiredConsecutive: 3,
         confirmationText,
@@ -186,7 +186,7 @@ function seedAuthorizationPrelude(store: CoreState, suffix: string): string {
       assert.equal(result.decision, 'blocked');
     }
   }
-  return stableMessageKey(openKfId, `${suffix}-3`);
+  return stableMessageKey('wechat_kf', openKfId, `${suffix}-3`);
 }
 
 async function seedDatabase(
@@ -245,11 +245,13 @@ if (workerMode === '--atomic-worker') {
       const recovered = recoveredPersistence.core;
       subtest.onTestFinished(() => recoveredPersistence.close());
       assert.deepEqual(recovered.getAuthorization(externalUserId), {
-        externalUserId,
+        peerId: externalUserId,
         authorized: false,
         consecutiveMatches: 2,
-        lastOpenKfId: openKfId,
-        lastMessageKey: stableMessageKey(openKfId, 'atomic-2'),
+        lastAccountKey: openKfId,
+        lastMessageKey: stableMessageKey(
+          'wechat_kf', openKfId, 'atomic-2',
+        ),
         authorizedAt: 0,
         updatedAt: recovered.getAuthorization(externalUserId)?.updatedAt,
       });
@@ -323,7 +325,7 @@ if (workerMode === '--atomic-worker') {
       assert.equal(recovered.getAttempt(attempt.attemptId)?.status, 'sending');
       assert.equal(recovered.recoverStartup().uncertainSends, 1);
       assert.equal(recovered.getAttempt(attempt.attemptId)?.status, 'uncertain');
-      assert.equal(recovered.beginNextSend(), undefined);
+      assert.equal(recovered.beginNextSend('wechat_kf'), undefined);
       recoveredPersistence.close();
       await assertNoChildSend(subtest, seeded.filePath);
     });
@@ -352,7 +354,7 @@ if (workerMode === '--atomic-worker') {
       const recovered = recoveredPersistence.core;
       assert.equal(recovered.recoverStartup().uncertainSends, 0);
       assert.equal(recovered.getAttempt(attempt.attemptId)?.status, 'accepted');
-      assert.equal(recovered.beginNextSend(), undefined);
+      assert.equal(recovered.beginNextSend('wechat_kf'), undefined);
       recoveredPersistence.close();
       await assertNoChildSend(subtest, seeded.filePath);
     });

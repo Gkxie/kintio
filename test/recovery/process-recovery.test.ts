@@ -68,7 +68,7 @@ async function runLockWorker(lockFile: string): Promise<void> {
 async function runSendingWorker(databaseFile: string): Promise<void> {
   const persistence = new StatePersistence({ filePath: databaseFile });
   const store = persistence.core;
-  const attempt = store.beginNextSend();
+  const attempt = store.beginNextSend('wechat_kf');
   if (!attempt) {
     persistence.close();
     sendToParent({ type: 'send-claim-failed' }, () => process.exit(1));
@@ -101,7 +101,7 @@ test('two real processes reject a live owner and recover its stale lock after SI
     const seedPersistence = temporary.openPersistence();
     const seed = seedPersistence.core;
     seed.ingestSyncPage({
-      openKfId: 'wk-lock-sentinel',
+      accountKey: 'wk-lock-sentinel',
       nextCursor: 'intact',
       messages: [],
     });
@@ -161,7 +161,7 @@ test('SIGKILL after claiming a send changes sending to uncertain on startup with
     const firstPersistence = temporary.openPersistence();
     const first = firstPersistence.core;
     first.ingestSyncPage({
-      openKfId: 'wk-recovery',
+      accountKey: 'wk-recovery',
       nextCursor: 'cursor-one',
       messages: [testWecomMessage({
         id: 'message-one',
@@ -170,7 +170,9 @@ test('SIGKILL after claiming a send changes sending to uncertain on startup with
         text: 'send once',
       })],
     });
-    const messageKey = stableMessageKey('wk-recovery', 'message-one');
+    const messageKey = stableMessageKey(
+      'wechat_kf', 'wk-recovery', 'message-one',
+    );
     first.claimInbound({ messageKey });
     const finalized = seedPendingAttempts(first, messageKey, [
         {
@@ -199,7 +201,7 @@ test('SIGKILL after claiming a send changes sending to uncertain on startup with
     const summary = recovered.recoverStartup();
     assert.equal(summary.uncertainSends, 1);
     assert.equal(recovered.getAttempt(attemptId)?.status, 'uncertain');
-    assert.equal(recovered.beginNextSend(), undefined);
+    assert.equal(recovered.beginNextSend('wechat_kf'), undefined);
     assert.equal(recovered.getInbound(messageKey)?.status, 'completed');
     assert.deepEqual(recovered.integrityCheck().map(Object.values), [['ok']]);
   });

@@ -6,7 +6,7 @@ export interface Logger {
 
 export type ChatChannel = 'wechat_kf' | 'weixin_ilink';
 
-interface ConversationRef {
+export interface ChannelIdentity {
   readonly channel: ChatChannel;
   readonly accountKey: string;
   readonly peerId: string;
@@ -20,14 +20,13 @@ export interface ImageAttachment {
 }
 
 export interface NormalizedMessage {
-  readonly id: string;
-  readonly messageKey?: string;
+  readonly providerMessageId: string;
   readonly origin: string;
   readonly type: string;
   readonly rawType: string;
   readonly sentAt: number;
   readonly sync: { readonly cursor: string; readonly index: number };
-  readonly conversation: ConversationRef;
+  readonly conversation: ChannelIdentity;
   readonly text: string;
   readonly summary: string;
   readonly attributes: Readonly<Record<string, unknown>>;
@@ -40,11 +39,9 @@ export interface ResolvedImage {
   readonly contentType: string;
 }
 
-export interface MediaCatalogEntry {
+export interface MediaCatalogEntry extends ChannelIdentity {
   readonly ref: string;
   readonly messageKey: string;
-  readonly openKfId: string;
-  readonly externalUserId: string;
   readonly kind: 'image';
   readonly mediaId: string;
   readonly filename: string;

@@ -118,7 +118,9 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
       await sync.close();
       await processor.waitForIdle();
       await channel.waitForIdle();
-      const threadId = store.getConversation(targetOpenKfId, targetUserId)?.threadId;
+      const threadId = store.getConversation(
+        'wechat_kf', targetOpenKfId, targetUserId,
+      )?.threadId;
       if (threadId) {
         if (!codex.deleteThread) throw new Error('Codex thread deletion is unavailable');
         await codex.deleteThread(threadId);
@@ -141,7 +143,9 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
   });
   await processor.waitForIdle();
   await channel.waitForIdle();
-  const messageKey = stableMessageKey(targetOpenKfId, sourceMessageId);
+  const messageKey = stableMessageKey(
+    'wechat_kf', targetOpenKfId, sourceMessageId,
+  );
   const attempts = store.listMessageAttempts(messageKey);
   assert.equal(syncCalls, 1);
   assert.equal(attempts.length, 1, 'live test refuses split or fallback sends');

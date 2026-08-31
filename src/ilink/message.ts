@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 
+import { MESSAGE_ORIGINS } from '../domain/message.ts';
 import { truncateUtf8 } from '../lib/text.ts';
+import type { NormalizedMessage } from '../types.ts';
 import {
   IlinkMessageItemType,
   IlinkMessageState,
@@ -14,8 +16,6 @@ import {
   ILINK_MAX_PROVIDER_ID_BYTES,
   type IlinkAccountKey,
 } from './store-types.ts';
-
-export const ILINK_INBOUND_PROVIDER = ILINK_CHANNEL;
 
 const MAX_ID_CHARACTERS = 1_024;
 const MAX_CURSOR_CHARACTERS = 256 * 1_024;
@@ -39,43 +39,27 @@ export interface IlinkInboundSyncPosition {
   readonly index: number;
 }
 
-interface IlinkMessageKeyMaterial {
-  readonly accountKey: IlinkAccountKey;
-  readonly providerMessageId: string;
-}
-
 type IlinkInboundContentKind =
   | 'text'
   | 'mixed'
   | 'non_text'
   | 'empty';
 
-/**
- * Provider-specific candidate for the future channel-neutral inbox boundary.
- * It deliberately does not implement the WeChat-KF-specific NormalizedMessage.
- */
-export interface IlinkInboundCandidate {
-  readonly provider: typeof ILINK_INBOUND_PROVIDER;
-  readonly accountKey: IlinkAccountKey;
-  readonly providerAccountId: string;
-  readonly peerId: string;
-  readonly providerMessageId: string;
-  readonly messageKeyMaterial: IlinkMessageKeyMaterial;
-  readonly sync: IlinkInboundSyncPosition;
-  readonly kind: IlinkInboundContentKind;
-  readonly text: string;
-  readonly summary: string;
-  readonly itemTypes: readonly number[];
-  readonly images: readonly IlinkInboundImageCandidate[];
-  readonly contextToken: string;
-  readonly createTime: number;
-  readonly seq?: number;
-}
-
-interface IlinkInboundImageCandidate {
+interface IlinkInboundImageFact {
   readonly position: number;
   readonly downloadUrl: string;
   readonly aesKey: string;
+}
+
+interface IlinkInboundFacts {
+  readonly contextToken: string;
+  readonly providerSeq?: number;
+  readonly images: readonly IlinkInboundImageFact[];
+}
+
+export interface IlinkNormalizedInbound {
+  readonly message: NormalizedMessage;
+  readonly facts: IlinkInboundFacts;
 }
 
 export class IlinkMessageNormalizationError extends Error {
@@ -144,12 +128,17 @@ function normalizePair(pair: IlinkInboundPair): IlinkInboundPair {
 function normalizeSync(
   sync: IlinkInboundSyncPosition,
 ): IlinkInboundSyncPosition {
-  const cursor = requiredBoundedString(
-    sync?.cursor,
-    'iLink cursor',
-    MAX_CURSOR_CHARACTERS,
-    'invalid_sync',
-  );
+  const cursor = sync?.cursor;
+  if (
+    typeof cursor !== 'string' ||
+    cursor.length > MAX_CURSOR_CHARACTERS ||
+    cursor.includes('\0')
+  ) {
+    throw new IlinkMessageNormalizationError(
+      'invalid_sync',
+      'iLink cursor is invalid',
+    );
+  }
   if (!Number.isSafeInteger(sync?.index) || sync.index < 0) {
     throw new IlinkMessageNormalizationError(
       'invalid_sync',
@@ -275,13 +264,14 @@ function validOptionalSafeInteger(value: unknown): boolean {
 
 /**
  * Returns null for messages outside the active one-to-one pair or for malformed
- * provider envelopes. No media field, URL, key, or attachment is retained.
+ * provider envelopes. Provider reply and media secrets remain isolated in facts
+ * so the host can seal them before persistence.
  */
 export function normalizeIlinkInboundMessage(
   message: IlinkMessage,
   activePair: IlinkInboundPair,
   syncPosition: IlinkInboundSyncPosition,
-): IlinkInboundCandidate | null {
+): IlinkNormalizedInbound | null {
   const pair = normalizePair(activePair);
   const sync = normalizeSync(syncPosition);
   if (!isRecord(message)) return null;
@@ -340,26 +330,44 @@ export function normalizeIlinkInboundMessage(
     }
   }).slice(-MAX_NATIVE_IMAGES);
 
-  return Object.freeze({
-    provider: ILINK_INBOUND_PROVIDER,
-    accountKey: pair.accountKey,
-    providerAccountId: pair.botId,
-    peerId: pair.ownerUserId,
+  const imageFacts = Object.freeze(
+    images.map((image) => Object.freeze(image)),
+  );
+  const itemTypes = Object.freeze(
+    items.flatMap((item) => item.type === undefined ? [] : [item.type]),
+  );
+  const normalizedMessage: NormalizedMessage = Object.freeze({
     providerMessageId: stableProviderMessageId,
-    messageKeyMaterial: Object.freeze({
-      accountKey: pair.accountKey,
-      providerMessageId: stableProviderMessageId,
-    }),
+    origin: MESSAGE_ORIGINS.CUSTOMER,
+    type: kind,
+    rawType: `ilink_${kind}`,
+    sentAt: createTime,
     sync,
-    kind,
+    conversation: Object.freeze({
+      channel: ILINK_CHANNEL,
+      accountKey: pair.accountKey,
+      peerId: pair.ownerUserId,
+    }),
     text,
     summary,
-    itemTypes: Object.freeze(
-      items.flatMap((item) => item.type === undefined ? [] : [item.type]),
+    attributes: Object.freeze({
+      itemTypes,
+    }),
+    attachments: Object.freeze(
+      imageFacts.map((image) => Object.freeze({
+        kind: 'image' as const,
+        mediaId: `ilink:${image.position}`,
+        filename: `ilink-image-${image.position}`,
+        status: 'unresolved' as const,
+      })),
     ),
-    images: Object.freeze(images.map((image) => Object.freeze(image))),
-    contextToken,
-    createTime,
-    ...(seq === undefined ? {} : { seq }),
+  });
+  return Object.freeze({
+    message: normalizedMessage,
+    facts: Object.freeze({
+      contextToken,
+      ...(seq === undefined ? {} : { providerSeq: seq }),
+      images: imageFacts,
+    }),
   });
 }

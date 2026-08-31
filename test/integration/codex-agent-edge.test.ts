@@ -127,6 +127,7 @@ async function harness(t: TestContext, boundary: Boundary) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-agent-edge-'));
   function input(messageKey: string): AgentInput {
     return {
+      channel: 'wechat_kf',
       mode: 'start',
       conversationId: 'cv-edge',
       threadId: '',

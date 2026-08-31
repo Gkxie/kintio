@@ -27,7 +27,7 @@ test('completed Agent image artifact recovers through send_image MCP without hos
   const store = persistence.core;
   const png = Buffer.from('89504e470d0a1a0a09090909', 'hex');
   const page = store.ingestSyncPage({
-    openKfId: 'wk-image',
+    accountKey: 'wk-image',
     nextCursor: 'cursor-one',
     messages: [normalizeWecomMessage({
       msgid: 'image-request', open_kfid: 'wk-image', external_userid: 'wm-image',
@@ -39,7 +39,8 @@ test('completed Agent image artifact recovers through send_image MCP without hos
   store.claimInbound({ messageKey });
   store.markInboundPreparing(messageKey, 'turn-image');
   store.setConversationThread({
-    openKfId: 'wk-image', externalUserId: 'wm-image', threadId: 'thread-image',
+    channel: 'wechat_kf', accountKey: 'wk-image', peerId: 'wm-image',
+    threadId: 'thread-image',
   });
 
   const sent: Record<string, unknown>[] = [];
@@ -136,8 +137,11 @@ test('completed Agent image artifact recovers through send_image MCP without hos
   assert.deepEqual(store.listMessageAttempts(messageKey).map((attempt) => ({
     source: attempt.source,
     status: attempt.status,
-    msgid: attempt.wecomMsgId,
-  })), [{ source: 'mcp_tool', status: 'accepted', msgid: 'wx-image-recovered' }]);
+    providerMessageId: attempt.providerMessageId,
+  })), [{
+    source: 'mcp_tool', status: 'accepted',
+    providerMessageId: 'wx-image-recovered',
+  }]);
 });
 
 test('accepted iLink generated image finalizes after restart without another send', async (t) => {
@@ -177,16 +181,22 @@ test('accepted iLink generated image finalizes after restart without another sen
     }],
   }, { accountKey, botId, ownerUserId: peerId }, { cursor: 'initial', index: 0 });
   assert.ok(normalized);
-  const candidate = { ...normalized, sync: { cursor: '', index: 0 } };
+  const message = {
+    ...normalized.message,
+    sync: { cursor: '', index: 0 },
+  };
   const page = ilink.commitPollPage({
     accountKey,
     expectedGeneration: 1,
     expectedCursor: '',
     nextCursor: 'image-recovery-cursor',
     messages: [{
-      candidate,
+      message,
+      ...(normalized.facts.providerSeq === undefined
+        ? {}
+        : { providerSeq: normalized.facts.providerSeq }),
       secretGeneration: 91,
-      sealedContextToken: secretBox.seal(candidate.contextToken, {
+      sealedContextToken: secretBox.seal(normalized.facts.contextToken, {
         secretKind: 'context_token', accountId: accountKey, peerId, generation: 91,
       }),
     }],
@@ -195,8 +205,9 @@ test('accepted iLink generated image finalizes after restart without another sen
   store.claimInbound({ messageKey });
   store.markInboundPreparing(messageKey, 'turn-ilink-image');
   store.setConversationThread({
-    openKfId: accountKey,
-    externalUserId: peerId,
+    channel: 'weixin_ilink',
+    accountKey,
+    peerId,
     threadId: 'thread-ilink-image',
   });
   const session = store.createAgentSession({ messageKey });

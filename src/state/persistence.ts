@@ -108,6 +108,7 @@ export class StatePersistence {
     this.#assertOpen();
     return new IlinkSqliteStore({
       database: this.#database,
+      inbox: this.core,
       ...(options.clock ? { clock: options.clock } : {}),
     });
   }

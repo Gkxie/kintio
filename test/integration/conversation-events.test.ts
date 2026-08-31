@@ -41,7 +41,7 @@ async function createHarness(t: TestContext) {
   function ingest(raw: Record<string, unknown>): string {
     const nextCursor = `cursor-${String(raw.msgid)}`;
     const result = store.ingestSyncPage({
-      openKfId: 'wk-one',
+      accountKey: 'wk-one',
       expectedCursor: cursor,
       nextCursor,
       messages: [normalizeWecomMessage(raw, 'wk-one', { cursor, index: 0 })],
@@ -73,9 +73,10 @@ function event(msgid: string, attributes: Record<string, unknown>) {
   };
 }
 
-test('persisted inbox identity rejects payload account peer or channel mismatch', async (t) => {
+test('persisted inbox identity rejects payload provider account peer or channel mismatch', async (t) => {
   const harness = await createHarness(t);
   for (const [field, value] of [
+    ['providerMessageId', 'provider-payload'],
     ['accountKey', 'wk-payload'],
     ['peerId', 'wm-payload'],
     ['channel', 'weixin_ilink'],
@@ -89,12 +90,21 @@ test('persisted inbox identity rejects payload account peer or channel mismatch'
         UPDATE inbound_messages
         SET payload_json = json_set(payload_json, ?, ?)
         WHERE message_key = ?
-      `).run(`$.conversation.${field}`, value, key);
+      `).run(
+        field === 'providerMessageId'
+          ? '$.providerMessageId'
+          : `$.conversation.${field}`,
+        value,
+        key,
+      );
     });
     await harness.processor.enqueue(key);
     assert.equal(harness.store.getInbound(key)?.status, 'ignored', field);
   }
-  assert.equal(harness.store.getConversation('wk-one', 'wm-one')?.threadId, '');
+  assert.equal(
+    harness.store.getConversation('wechat_kf', 'wk-one', 'wm-one')?.threadId,
+    '',
+  );
 });
 
 test('msg_send_fail reports the failed fact without automatic resend', async (t) => {
@@ -103,15 +113,17 @@ test('msg_send_fail reports the failed fact without automatic resend', async (t)
     msgid: 'source', open_kfid: 'wk-one', external_userid: 'wm-one',
     origin: 3, msgtype: 'text', text: { content: 'source' },
   });
-  assert.equal(sourceKey, stableMessageKey('wk-one', 'source'));
+  assert.equal(sourceKey, stableMessageKey('wechat_kf', 'wk-one', 'source'));
   harness.store.claimInbound({ messageKey: sourceKey });
   const finalized = seedPendingAttempts(harness.store, sourceKey, [{
       sendIndex: 0, sentType: 'location',
       payload: { msgtype: 'location', location: { name: '地点' } },
     }]);
-  const sending = harness.store.beginNextSend();
+  const sending = harness.store.beginNextSend('wechat_kf');
   if (!sending) throw new Error('Expected pending primary attempt');
-  harness.store.completeSend(sending.attemptId, { wecomMsgId: 'wecom-failed' });
+  harness.store.completeSend(sending.attemptId, {
+    providerMessageId: 'wecom-failed',
+  });
 
   const foreign = harness.ingest(event('foreign-event', {
     event_type: 'msg_send_fail', fail_msgid: 'wecom-failed', fail_type: 13,

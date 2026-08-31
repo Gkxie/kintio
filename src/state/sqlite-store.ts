@@ -15,7 +15,7 @@ import type {
   NormalizedMessage,
 } from '../types.ts';
 
-const SCHEMA_VERSION = 21;
+const SCHEMA_VERSION = 22;
 const INBOUND_STATUSES = [
   'received',
   'processing',
@@ -48,10 +48,10 @@ export interface JsonObject {
 export interface InboundRecord {
   inboxSeq: number;
   messageKey: string;
-  openKfId: string;
-  msgid: string;
-  externalUserId: string;
   channel: ChatChannel;
+  accountKey: string;
+  providerMessageId: string;
+  peerId: string;
   origin: string;
   type: string;
   sentAt: number;
@@ -66,19 +66,31 @@ export interface InboundRecord {
   updatedAt: number;
 }
 
+export interface InboxInsertEntry {
+  readonly message: NormalizedMessage;
+  readonly deferred?: boolean;
+}
+
+export interface InboxInsertResult {
+  readonly messageKey: string;
+  readonly inboxSeq: number;
+  readonly inserted: boolean;
+}
+
 export interface ConversationRecord {
-  openKfId: string;
-  externalUserId: string;
+  channel: ChatChannel;
+  accountKey: string;
+  peerId: string;
   threadId: string;
   memoryThreadId: string;
   updatedAt: number;
 }
 
 export interface AuthorizationRecord {
-  externalUserId: string;
+  peerId: string;
   authorized: boolean;
   consecutiveMatches: number;
-  lastOpenKfId: string;
+  lastAccountKey: string;
   lastMessageKey: string;
   authorizedAt: number;
   updatedAt: number;
@@ -92,9 +104,9 @@ export interface AuthorizationEvaluation {
 export interface AttemptRecord {
   attemptId: string;
   messageKey: string;
-  openKfId: string;
-  externalUserId: string;
   channel: ChatChannel;
+  accountKey: string;
+  peerId: string;
   replyWindowId: number;
   sendIndex: number;
   source: string;
@@ -104,7 +116,7 @@ export interface AttemptRecord {
   fingerprint: string;
   clientMessageId: string;
   status: SendStatus;
-  wecomMsgId: string;
+  providerMessageId: string;
   errorCode: string;
   errorMessage: string;
   failType: number;
@@ -115,9 +127,9 @@ export interface AttemptRecord {
 export interface AgentSessionRecord {
   token: string;
   messageKey: string;
-  openKfId: string;
-  externalUserId: string;
   channel: ChatChannel;
+  accountKey: string;
+  peerId: string;
   replyWindowId: number;
   boundaryInboxSeq: number;
   memoryThreadId: string;
@@ -155,6 +167,7 @@ interface InboundRow {
 }
 
 interface ConversationRow {
+  channel: ChatChannel;
   open_kfid: string;
   external_userid: string;
   thread_id: string;
@@ -203,8 +216,8 @@ interface AgentSessionRow {
 
 interface InsertAttemptInput {
   sourceMessageKey: string;
-  openKfId: string;
-  externalUserId: string;
+  accountKey: string;
+  peerId: string;
   channel?: ChatChannel;
   replyWindowId?: number;
   sendIndex: number;
@@ -307,16 +320,29 @@ function objectJson(value: string | null): JsonObject | undefined {
     : undefined;
 }
 
+function inboundPayload(row: InboundRow): JsonObject | undefined {
+  const payload = objectJson(row.payload_json);
+  if (!payload) return undefined;
+  const legacyProviderMessageId = payload.id;
+  const { id: _legacyId, messageKey: _legacyMessageKey, ...normalized } = payload;
+  return {
+    ...normalized,
+    providerMessageId: String(
+      normalized.providerMessageId || legacyProviderMessageId || row.msgid,
+    ),
+  };
+}
+
 function mapInbound(row: InboundRow | undefined): InboundRecord | undefined {
   if (!row) return undefined;
-  const payload = objectJson(row.payload_json);
+  const payload = inboundPayload(row);
   return {
     inboxSeq: row.inbox_seq,
     messageKey: row.message_key,
-    openKfId: row.open_kfid,
-    msgid: row.msgid,
-    externalUserId: row.external_userid,
     channel: row.channel,
+    accountKey: row.open_kfid,
+    providerMessageId: row.msgid,
+    peerId: row.external_userid,
     origin: row.origin,
     type: row.msg_type,
     sentAt: row.sent_at,
@@ -337,8 +363,9 @@ function mapConversation(
 ): ConversationRecord | undefined {
   if (!row) return undefined;
   return {
-    openKfId: row.open_kfid,
-    externalUserId: row.external_userid,
+    channel: row.channel,
+    accountKey: row.open_kfid,
+    peerId: row.external_userid,
     threadId: row.thread_id,
     memoryThreadId: row.memory_thread_id,
     updatedAt: row.updated_at,
@@ -352,9 +379,9 @@ function mapAttempt(row: AttemptRow | undefined): AttemptRecord | undefined {
   return {
     attemptId: row.attempt_key,
     messageKey: row.source_message_key,
-    openKfId: row.open_kfid,
-    externalUserId: row.external_userid,
     channel: row.channel,
+    accountKey: row.open_kfid,
+    peerId: row.external_userid,
     replyWindowId: Number(row.reply_window_id || 0),
     sendIndex: row.send_index,
     source: row.source,
@@ -364,7 +391,7 @@ function mapAttempt(row: AttemptRow | undefined): AttemptRecord | undefined {
     fingerprint: row.fingerprint,
     clientMessageId: row.client_message_id,
     status: row.status,
-    wecomMsgId: row.wecom_msgid,
+    providerMessageId: row.wecom_msgid,
     errorCode: row.error_code,
     errorMessage: row.error_message,
     failType: row.fail_type,
@@ -373,25 +400,62 @@ function mapAttempt(row: AttemptRow | undefined): AttemptRecord | undefined {
   };
 }
 
+function mapSessionMedia(
+  value: JsonValue | undefined,
+  row: AgentSessionRow,
+): MediaCatalogEntry[] {
+  if (!Array.isArray(value)) {
+    throw new AgentSessionError('Agent session media catalog is invalid');
+  }
+  return value.map((item) => {
+    if (!item || Array.isArray(item) || typeof item !== 'object') {
+      throw new AgentSessionError('Agent session media catalog is invalid');
+    }
+    const legacy = item as JsonObject;
+    const channel = String(legacy.channel || row.channel);
+    const accountKey = String(
+      legacy.accountKey || legacy.openKfId || row.open_kfid,
+    );
+    const peerId = String(
+      legacy.peerId || legacy.externalUserId || row.external_userid,
+    );
+    if (
+      channel !== row.channel ||
+      accountKey !== row.open_kfid ||
+      peerId !== row.external_userid
+    ) {
+      throw new AgentSessionError('Agent session media identity is invalid');
+    }
+    const {
+      openKfId: _legacyAccountKey,
+      externalUserId: _legacyPeerId,
+      ...normalized
+    } = legacy;
+    return {
+      ...normalized,
+      channel: row.channel,
+      accountKey,
+      peerId,
+    } as unknown as MediaCatalogEntry;
+  });
+}
+
 function mapAgentSession(
   row: AgentSessionRow | undefined,
   token: string,
 ): AgentSessionRecord | undefined {
   if (!row) return undefined;
   const media = decodeJson(row.media_json);
-  if (!Array.isArray(media)) {
-    throw new AgentSessionError('Agent session media catalog is invalid');
-  }
   return {
     token,
     messageKey: row.source_message_key,
-    openKfId: row.open_kfid,
-    externalUserId: row.external_userid,
     channel: row.channel,
+    accountKey: row.open_kfid,
+    peerId: row.external_userid,
     replyWindowId: Number(row.reply_window_id || 0),
     boundaryInboxSeq: row.boundary_inbox_seq,
     memoryThreadId: row.memory_thread_id,
-    mediaCatalog: media as unknown as MediaCatalogEntry[],
+    mediaCatalog: mapSessionMedia(media, row),
     expiresAt: row.expires_at,
     closedAt: row.closed_at,
     createdAt: row.created_at,
@@ -400,14 +464,13 @@ function mapAgentSession(
 }
 
 function inboundInsert(
-  openKfId: string,
+  accountKey: string,
   message: NormalizedMessage,
-  { cursor = '', index = 0 }: { cursor?: string; index?: number } = {},
 ): {
   messageKey: string;
-  openKfId: string;
-  msgid: string;
-  externalUserId: string;
+  accountKey: string;
+  providerMessageId: string;
+  peerId: string;
   channel: ChatChannel;
   origin: string;
   type: string;
@@ -418,17 +481,20 @@ function inboundInsert(
   if (!message || typeof message !== 'object' || Array.isArray(message)) {
     throw new Error('Inbound message must be an object');
   }
-  if (message.conversation.accountKey !== openKfId) {
+  if (message.conversation.accountKey !== accountKey) {
     throw new Error('Inbound message account does not match its sync source');
   }
-  const msgid = String(message.id || '') ||
-    stableEventId({ openKfId, cursor, index, payload: message });
+  const channel = message.conversation.channel;
+  const msgid = requiredText(
+    message.providerMessageId,
+    'providerMessageId',
+  );
   return {
-    messageKey: stableMessageKey(openKfId, msgid),
-    openKfId,
-    msgid,
-    externalUserId: String(message.conversation.peerId || ''),
-    channel: message.conversation.channel,
+    messageKey: stableMessageKey(channel, accountKey, msgid),
+    accountKey,
+    providerMessageId: msgid,
+    peerId: requiredText(message.conversation.peerId, 'peerId'),
+    channel,
     origin: String(message.origin || 'unknown'),
     type: String(message.type || 'unknown'),
     sentAt: Number(message.sentAt || 0),
@@ -437,27 +503,18 @@ function inboundInsert(
   };
 }
 
-export function stableMessageKey(openKfId: string, msgid: string): string {
-  const service = requiredText(openKfId, 'openKfId');
-  const message = requiredText(msgid, 'msgid');
-  return `im_${sha256(`${service}\0${message}`).slice(0, 40)}`;
-}
-
-function stableEventId({
-  openKfId,
-  cursor = '',
-  index = 0,
-  payload,
-}: {
-  openKfId: string;
-  cursor?: string;
-  index?: number;
-  payload: unknown;
-}): string {
-  const digest = sha256(
-    `${requiredText(openKfId, 'openKfId')}\0${cursor}\0${Number(index)}\0${encodeJson(payload)}`,
-  );
-  return `event_${digest.slice(0, 40)}`;
+export function stableMessageKey(
+  channel: ChatChannel,
+  accountKey: string,
+  providerMessageId: string,
+): string {
+  const selectedChannel = requiredText(channel, 'channel') as ChatChannel;
+  if (!['wechat_kf', 'weixin_ilink'].includes(selectedChannel)) {
+    throw new Error(`Unsupported chat channel: ${selectedChannel}`);
+  }
+  const service = requiredText(accountKey, 'accountKey');
+  const message = requiredText(providerMessageId, 'providerMessageId');
+  return `im_${sha256(`${selectedChannel}\0${service}\0${message}`).slice(0, 40)}`;
 }
 
 export function stableClientMessageId(
@@ -476,9 +533,9 @@ export class CursorConflictError extends Error {
   readonly expected: string;
   readonly actual: string;
 
-  constructor(openKfId: string, expected: string, actual: string) {
+  constructor(accountKey: string, expected: string, actual: string) {
     super(
-      `Cursor conflict for ${openKfId}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
+      `Cursor conflict for ${accountKey}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`,
     );
     this.name = 'CursorConflictError';
     this.expected = expected;
@@ -558,10 +615,10 @@ export class SqliteStore {
       version !== 0 && version !== 11 && version !== 12 &&
       version !== 13 && version !== 14 && version !== 15 &&
       version !== 16 && version !== 17 && version !== 18 && version !== 19 &&
-      version !== 20
+      version !== 20 && version !== 21
     ) {
       throw new Error(
-        `SQLite schema version ${version} is no longer supported; migrate to version 11, 12, 13, 14, 15, 16, 17, 18, 19, or 20 first`,
+        `SQLite schema version ${version} is no longer supported; migrate to version 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, or 21 first`,
       );
     }
 
@@ -1160,11 +1217,465 @@ export class SqliteStore {
           PRAGMA user_version = 21;
           COMMIT;
         `);
-        return;
+        version = 21;
       } catch (error) {
         this.#database.exec('ROLLBACK');
         throw error;
       }
+    }
+
+    if (version === 21) {
+      if (this.foreignKeyCheck().length) {
+        throw new Error(
+          'SQLite schema v21 contains foreign-key violations; repair the database before upgrading',
+        );
+      }
+      this.#database.exec(`
+        PRAGMA foreign_keys = OFF;
+        PRAGMA legacy_alter_table = ON;
+        BEGIN IMMEDIATE;
+      `);
+      try {
+        this.#database.exec(`
+          DROP TRIGGER IF EXISTS ilink_session_window_insert_guard;
+          DROP TRIGGER IF EXISTS ilink_session_window_update_guard;
+          DROP TRIGGER IF EXISTS ilink_attempt_window_insert_guard;
+          DROP TRIGGER IF EXISTS ilink_attempt_window_update_guard;
+          DROP TRIGGER IF EXISTS ilink_window_source_insert_guard;
+          DROP TRIGGER IF EXISTS ilink_window_source_update_guard;
+          DROP TRIGGER IF EXISTS ilink_window_delete_guard;
+
+          DROP INDEX inbound_pending_idx;
+          DROP INDEX inbound_primary_idx;
+          DROP INDEX inbound_deferred_idx;
+          DROP INDEX conversation_thread_idx;
+          DROP INDEX send_status_idx;
+          DROP INDEX send_wecom_msgid_idx;
+          DROP INDEX send_conversation_idx;
+          DROP INDEX media_conversation_idx;
+          DROP INDEX agent_session_source_idx;
+
+          ALTER TABLE agent_sessions RENAME TO agent_sessions_v21;
+          ALTER TABLE send_attempts RENAME TO send_attempts_v21;
+          ALTER TABLE inbound_media RENAME TO inbound_media_v21;
+          ALTER TABLE conversations RENAME TO conversations_v21;
+          ALTER TABLE inbound_messages RENAME TO inbound_messages_v21;
+
+          CREATE TABLE inbound_messages (
+            inbox_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_key TEXT NOT NULL UNIQUE,
+            open_kfid TEXT NOT NULL,
+            msgid TEXT NOT NULL,
+            external_userid TEXT NOT NULL DEFAULT '',
+            channel TEXT NOT NULL
+              CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+            origin TEXT NOT NULL,
+            msg_type TEXT NOT NULL,
+            sent_at INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL CHECK (status IN (${sqlList(INBOUND_STATUSES)})),
+            deferred INTEGER NOT NULL DEFAULT 0 CHECK (deferred IN (0, 1)),
+            primary_message_key TEXT,
+            payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+            codex_turn_id TEXT NOT NULL DEFAULT '',
+            client_input_id TEXT NOT NULL DEFAULT '',
+            steering_boundary INTEGER NOT NULL DEFAULT 0,
+            error_message TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE (channel, open_kfid, msgid),
+            UNIQUE (message_key, open_kfid, external_userid),
+            UNIQUE (message_key, channel, open_kfid, external_userid),
+            FOREIGN KEY (
+              primary_message_key, channel, open_kfid, external_userid
+            ) REFERENCES inbound_messages(
+              message_key, channel, open_kfid, external_userid
+            )
+          ) STRICT;
+          INSERT INTO inbound_messages (
+            inbox_seq, message_key, open_kfid, msgid, external_userid,
+            channel, origin, msg_type, sent_at, status, deferred,
+            primary_message_key, payload_json, codex_turn_id, client_input_id,
+            steering_boundary, error_message, created_at, updated_at
+          )
+          SELECT
+            old.inbox_seq, old.message_key, old.open_kfid, old.msgid,
+            old.external_userid, old.channel, old.origin, old.msg_type,
+            old.sent_at,
+            CASE
+              WHEN old.primary_message_key IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM inbound_messages_v21 AS primary_message
+                  WHERE primary_message.message_key = old.primary_message_key
+                    AND primary_message.channel = old.channel
+                    AND primary_message.open_kfid = old.open_kfid
+                    AND primary_message.external_userid = old.external_userid
+                )
+                AND old.status IN ('steering', 'steered')
+              THEN 'received'
+              ELSE old.status
+            END,
+            old.deferred,
+            CASE
+              WHEN old.primary_message_key IS NULL OR EXISTS (
+                SELECT 1 FROM inbound_messages_v21 AS primary_message
+                WHERE primary_message.message_key = old.primary_message_key
+                  AND primary_message.channel = old.channel
+                  AND primary_message.open_kfid = old.open_kfid
+                  AND primary_message.external_userid = old.external_userid
+              ) THEN old.primary_message_key
+              ELSE NULL
+            END,
+            old.payload_json,
+            CASE
+              WHEN old.primary_message_key IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM inbound_messages_v21 AS primary_message
+                  WHERE primary_message.message_key = old.primary_message_key
+                    AND primary_message.channel = old.channel
+                    AND primary_message.open_kfid = old.open_kfid
+                    AND primary_message.external_userid = old.external_userid
+                )
+              THEN ''
+              ELSE old.codex_turn_id
+            END,
+            CASE
+              WHEN old.primary_message_key IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM inbound_messages_v21 AS primary_message
+                  WHERE primary_message.message_key = old.primary_message_key
+                    AND primary_message.channel = old.channel
+                    AND primary_message.open_kfid = old.open_kfid
+                    AND primary_message.external_userid = old.external_userid
+                )
+              THEN ''
+              ELSE old.client_input_id
+            END,
+            CASE
+              WHEN old.primary_message_key IS NOT NULL
+                AND NOT EXISTS (
+                  SELECT 1 FROM inbound_messages_v21 AS primary_message
+                  WHERE primary_message.message_key = old.primary_message_key
+                    AND primary_message.channel = old.channel
+                    AND primary_message.open_kfid = old.open_kfid
+                    AND primary_message.external_userid = old.external_userid
+                )
+              THEN 0
+              ELSE old.steering_boundary
+            END,
+            old.error_message, old.created_at, old.updated_at
+          FROM inbound_messages_v21 AS old;
+
+          CREATE TABLE conversations (
+            channel TEXT NOT NULL
+              CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+            open_kfid TEXT NOT NULL,
+            external_userid TEXT NOT NULL,
+            thread_id TEXT NOT NULL DEFAULT '',
+            memory_thread_id TEXT NOT NULL DEFAULT '',
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (channel, open_kfid, external_userid)
+          ) STRICT, WITHOUT ROWID;
+          CREATE TEMP TABLE conversation_identities_v22 (
+            channel TEXT NOT NULL,
+            open_kfid TEXT NOT NULL,
+            external_userid TEXT NOT NULL,
+            latest_inbox_seq INTEGER NOT NULL,
+            latest_updated_at INTEGER NOT NULL,
+            PRIMARY KEY (channel, open_kfid, external_userid)
+          ) STRICT, WITHOUT ROWID;
+          INSERT INTO conversation_identities_v22 (
+            channel, open_kfid, external_userid,
+            latest_inbox_seq, latest_updated_at
+          )
+          SELECT
+            channel, open_kfid, external_userid,
+            MAX(inbox_seq), MAX(updated_at)
+          FROM inbound_messages_v21
+          WHERE external_userid <> ''
+          GROUP BY channel, open_kfid, external_userid;
+          INSERT INTO conversation_identities_v22 (
+            channel, open_kfid, external_userid,
+            latest_inbox_seq, latest_updated_at
+          )
+          SELECT
+            'wechat_kf', old.open_kfid, old.external_userid, 0, old.updated_at
+          FROM conversations_v21 AS old
+          WHERE NOT EXISTS (
+            SELECT 1 FROM conversation_identities_v22 AS identity
+            WHERE identity.open_kfid = old.open_kfid
+              AND identity.external_userid = old.external_userid
+          );
+          INSERT INTO conversations (
+            channel, open_kfid, external_userid,
+            thread_id, memory_thread_id, updated_at
+          )
+          SELECT
+            identity.channel, identity.open_kfid, identity.external_userid,
+            CASE
+              WHEN old.open_kfid IS NOT NULL AND identity.channel = (
+                SELECT owner.channel
+                FROM conversation_identities_v22 AS owner
+                WHERE owner.open_kfid = identity.open_kfid
+                  AND owner.external_userid = identity.external_userid
+                ORDER BY owner.latest_inbox_seq DESC, owner.channel
+                LIMIT 1
+              ) THEN old.thread_id
+              ELSE ''
+            END,
+            CASE
+              WHEN old.open_kfid IS NOT NULL AND identity.channel = (
+                SELECT owner.channel
+                FROM conversation_identities_v22 AS owner
+                WHERE owner.open_kfid = identity.open_kfid
+                  AND owner.external_userid = identity.external_userid
+                ORDER BY owner.latest_inbox_seq DESC, owner.channel
+                LIMIT 1
+              ) THEN old.memory_thread_id
+              ELSE ''
+            END,
+            COALESCE(old.updated_at, identity.latest_updated_at)
+          FROM conversation_identities_v22 AS identity
+          LEFT JOIN conversations_v21 AS old
+            ON old.open_kfid = identity.open_kfid
+           AND old.external_userid = identity.external_userid;
+          DROP TABLE conversation_identities_v22;
+
+          CREATE TABLE inbound_media (
+            media_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_key TEXT NOT NULL,
+            channel TEXT NOT NULL
+              CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+            open_kfid TEXT NOT NULL,
+            external_userid TEXT NOT NULL,
+            position INTEGER NOT NULL CHECK (position >= 0),
+            kind TEXT NOT NULL,
+            media_id TEXT NOT NULL,
+            filename TEXT NOT NULL DEFAULT '',
+            sent_at INTEGER NOT NULL DEFAULT 0,
+            remembered_at INTEGER NOT NULL,
+            UNIQUE (message_key, position),
+            FOREIGN KEY (
+              message_key, channel, open_kfid, external_userid
+            ) REFERENCES inbound_messages(
+              message_key, channel, open_kfid, external_userid
+            ) ON DELETE CASCADE
+          ) STRICT;
+          INSERT INTO inbound_media (
+            media_seq, message_key, channel, open_kfid, external_userid,
+            position, kind, media_id, filename, sent_at, remembered_at
+          )
+          SELECT
+            media.media_seq, media.message_key, inbound.channel,
+            media.open_kfid, media.external_userid, media.position,
+            media.kind, media.media_id, media.filename,
+            media.sent_at, media.remembered_at
+          FROM inbound_media_v21 AS media
+          JOIN inbound_messages AS inbound
+            ON inbound.message_key = media.message_key;
+
+          CREATE TABLE send_attempts (
+            attempt_key TEXT PRIMARY KEY,
+            source_message_key TEXT NOT NULL,
+            open_kfid TEXT NOT NULL,
+            external_userid TEXT NOT NULL,
+            channel TEXT NOT NULL
+              CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+            reply_window_id INTEGER,
+            send_index INTEGER NOT NULL CHECK (send_index >= 0 AND send_index < 1000),
+            source TEXT NOT NULL,
+            sent_type TEXT NOT NULL,
+            payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+            metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+            fingerprint TEXT NOT NULL,
+            client_message_id TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL CHECK (status IN (${sqlList(SEND_STATUSES)})),
+            wecom_msgid TEXT NOT NULL DEFAULT '',
+            error_code TEXT NOT NULL DEFAULT '',
+            error_message TEXT NOT NULL DEFAULT '',
+            fail_type INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            UNIQUE (source_message_key, send_index),
+            FOREIGN KEY (
+              source_message_key, channel, open_kfid, external_userid
+            ) REFERENCES inbound_messages(
+              message_key, channel, open_kfid, external_userid
+            ),
+            FOREIGN KEY (reply_window_id)
+              REFERENCES ilink_reply_windows(reply_window_id)
+          ) STRICT;
+          INSERT INTO send_attempts (
+            attempt_key, source_message_key, open_kfid, external_userid,
+            channel, reply_window_id, send_index, source, sent_type,
+            payload_json, metadata_json, fingerprint, client_message_id,
+            status, wecom_msgid, error_code, error_message, fail_type,
+            created_at, updated_at
+          )
+          SELECT
+            attempt.attempt_key, attempt.source_message_key,
+            attempt.open_kfid, attempt.external_userid, inbound.channel,
+            attempt.reply_window_id, attempt.send_index, attempt.source,
+            attempt.sent_type, attempt.payload_json, attempt.metadata_json,
+            attempt.fingerprint, attempt.client_message_id, attempt.status,
+            attempt.wecom_msgid, attempt.error_code, attempt.error_message,
+            attempt.fail_type, attempt.created_at, attempt.updated_at
+          FROM send_attempts_v21 AS attempt
+          JOIN inbound_messages AS inbound
+            ON inbound.message_key = attempt.source_message_key;
+
+          CREATE TABLE agent_sessions (
+            token_hash TEXT PRIMARY KEY,
+            source_message_key TEXT NOT NULL,
+            open_kfid TEXT NOT NULL,
+            external_userid TEXT NOT NULL,
+            channel TEXT NOT NULL
+              CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+            reply_window_id INTEGER,
+            boundary_inbox_seq INTEGER NOT NULL CHECK (boundary_inbox_seq >= 0),
+            memory_thread_id TEXT NOT NULL DEFAULT '',
+            media_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(media_json)),
+            expires_at INTEGER NOT NULL,
+            closed_at INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            FOREIGN KEY (
+              source_message_key, channel, open_kfid, external_userid
+            ) REFERENCES inbound_messages(
+              message_key, channel, open_kfid, external_userid
+            ) ON DELETE CASCADE
+          ) STRICT;
+          INSERT INTO agent_sessions (
+            token_hash, source_message_key, open_kfid, external_userid,
+            channel, reply_window_id, boundary_inbox_seq, memory_thread_id,
+            media_json, expires_at, closed_at, created_at, updated_at
+          )
+          SELECT
+            session.token_hash, session.source_message_key,
+            session.open_kfid, session.external_userid, inbound.channel,
+            session.reply_window_id, session.boundary_inbox_seq,
+            session.memory_thread_id, session.media_json, session.expires_at,
+            session.closed_at, session.created_at, session.updated_at
+          FROM agent_sessions_v21 AS session
+          JOIN inbound_messages AS inbound
+            ON inbound.message_key = session.source_message_key;
+
+          DROP TABLE agent_sessions_v21;
+          DROP TABLE send_attempts_v21;
+          DROP TABLE inbound_media_v21;
+          DROP TABLE conversations_v21;
+          DROP TABLE inbound_messages_v21;
+
+          CREATE INDEX inbound_pending_idx
+            ON inbound_messages(
+              status, channel, open_kfid, external_userid, inbox_seq
+            );
+          CREATE INDEX inbound_primary_idx
+            ON inbound_messages(primary_message_key, inbox_seq);
+          CREATE INDEX inbound_deferred_idx
+            ON inbound_messages(deferred, status, inbox_seq);
+          CREATE UNIQUE INDEX conversation_thread_idx
+            ON conversations(thread_id) WHERE thread_id <> '';
+          CREATE INDEX send_status_idx
+            ON send_attempts(channel, status, created_at, send_index);
+          CREATE UNIQUE INDEX send_wecom_msgid_idx
+            ON send_attempts(channel, wecom_msgid) WHERE wecom_msgid <> '';
+          CREATE INDEX send_conversation_idx
+            ON send_attempts(
+              channel, open_kfid, external_userid, updated_at DESC
+            );
+          CREATE INDEX media_conversation_idx
+            ON inbound_media(
+              channel, open_kfid, external_userid, remembered_at DESC
+            );
+          CREATE INDEX agent_session_source_idx
+            ON agent_sessions(source_message_key, closed_at, expires_at);
+
+          CREATE TRIGGER ilink_session_window_insert_guard
+          BEFORE INSERT ON agent_sessions WHEN (
+            (NEW.channel = 'wechat_kf' AND NEW.reply_window_id IS NOT NULL) OR
+            (NEW.channel = 'weixin_ilink' AND (NEW.reply_window_id IS NULL OR NOT EXISTS (
+              SELECT 1 FROM ilink_reply_windows AS window
+              WHERE window.reply_window_id = NEW.reply_window_id
+                AND window.account_key = NEW.open_kfid
+                AND window.peer_id = NEW.external_userid
+                AND window.source_inbox_seq = NEW.boundary_inbox_seq
+                AND window.state = 'open'
+            )))
+          ) BEGIN SELECT RAISE(ABORT, 'agent session channel/window mismatch'); END;
+          CREATE TRIGGER ilink_session_window_update_guard
+          BEFORE UPDATE OF channel, reply_window_id, open_kfid,
+            external_userid, boundary_inbox_seq ON agent_sessions WHEN (
+            (NEW.channel = 'wechat_kf' AND NEW.reply_window_id IS NOT NULL) OR
+            (NEW.channel = 'weixin_ilink' AND (NEW.reply_window_id IS NULL OR NOT EXISTS (
+              SELECT 1 FROM ilink_reply_windows AS window
+              WHERE window.reply_window_id = NEW.reply_window_id
+                AND window.account_key = NEW.open_kfid
+                AND window.peer_id = NEW.external_userid
+                AND window.source_inbox_seq = NEW.boundary_inbox_seq
+                AND window.state = 'open'
+            )))
+          ) BEGIN SELECT RAISE(ABORT, 'agent session channel/window mismatch'); END;
+          CREATE TRIGGER ilink_attempt_window_insert_guard
+          BEFORE INSERT ON send_attempts WHEN (
+            (NEW.channel = 'wechat_kf' AND NEW.reply_window_id IS NOT NULL) OR
+            (NEW.channel = 'weixin_ilink' AND (NEW.reply_window_id IS NULL OR NOT EXISTS (
+              SELECT 1 FROM ilink_reply_windows AS window
+              WHERE window.reply_window_id = NEW.reply_window_id
+                AND window.account_key = NEW.open_kfid
+                AND window.peer_id = NEW.external_userid
+            )))
+          ) BEGIN SELECT RAISE(ABORT, 'send attempt channel/window mismatch'); END;
+          CREATE TRIGGER ilink_attempt_window_update_guard
+          BEFORE UPDATE OF channel, reply_window_id, open_kfid,
+            external_userid ON send_attempts WHEN (
+            (NEW.channel = 'wechat_kf' AND NEW.reply_window_id IS NOT NULL) OR
+            (NEW.channel = 'weixin_ilink' AND (NEW.reply_window_id IS NULL OR NOT EXISTS (
+              SELECT 1 FROM ilink_reply_windows AS window
+              WHERE window.reply_window_id = NEW.reply_window_id
+                AND window.account_key = NEW.open_kfid
+                AND window.peer_id = NEW.external_userid
+            )))
+          ) BEGIN SELECT RAISE(ABORT, 'send attempt channel/window mismatch'); END;
+          CREATE TRIGGER ilink_window_source_insert_guard
+          BEFORE INSERT ON ilink_reply_windows WHEN NOT EXISTS (
+            SELECT 1 FROM inbound_messages AS inbound
+            WHERE inbound.message_key = NEW.source_message_key
+              AND inbound.open_kfid = NEW.account_key
+              AND inbound.external_userid = NEW.peer_id
+              AND inbound.channel = 'weixin_ilink'
+          ) BEGIN SELECT RAISE(ABORT, 'reply window source mismatch'); END;
+          CREATE TRIGGER ilink_window_source_update_guard
+          BEFORE UPDATE OF source_message_key, account_key, peer_id
+            ON ilink_reply_windows WHEN NOT EXISTS (
+            SELECT 1 FROM inbound_messages AS inbound
+            WHERE inbound.message_key = NEW.source_message_key
+              AND inbound.open_kfid = NEW.account_key
+              AND inbound.external_userid = NEW.peer_id
+              AND inbound.channel = 'weixin_ilink'
+          ) BEGIN SELECT RAISE(ABORT, 'reply window source mismatch'); END;
+          CREATE TRIGGER ilink_window_delete_guard
+          BEFORE DELETE ON ilink_reply_windows WHEN EXISTS (
+            SELECT 1 FROM agent_sessions WHERE reply_window_id = OLD.reply_window_id
+          ) BEGIN SELECT RAISE(ABORT, 'reply window still has agent sessions'); END;
+        `);
+        const violations = this.foreignKeyCheck();
+        if (violations.length) {
+          throw new Error('SQLite migration v22 created foreign-key violations');
+        }
+        this.#database.exec(`
+          PRAGMA user_version = 22;
+          COMMIT;
+        `);
+      } catch (error) {
+        this.#database.exec('ROLLBACK');
+        throw error;
+      } finally {
+        this.#database.exec(`
+          PRAGMA legacy_alter_table = OFF;
+          PRAGMA foreign_keys = ON;
+        `);
+      }
+      return;
     }
 
     this.#database.exec('BEGIN IMMEDIATE');
@@ -1177,12 +1688,14 @@ export class SqliteStore {
         ) STRICT;
 
         CREATE TABLE conversations (
+          channel TEXT NOT NULL
+            CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
           open_kfid TEXT NOT NULL,
           external_userid TEXT NOT NULL,
           thread_id TEXT NOT NULL DEFAULT '',
           memory_thread_id TEXT NOT NULL DEFAULT '',
           updated_at INTEGER NOT NULL,
-          PRIMARY KEY (open_kfid, external_userid)
+          PRIMARY KEY (channel, open_kfid, external_userid)
         ) STRICT, WITHOUT ROWID;
 
         CREATE TABLE authorizations (
@@ -1267,7 +1780,7 @@ export class SqliteStore {
           open_kfid TEXT NOT NULL,
           msgid TEXT NOT NULL,
           external_userid TEXT NOT NULL DEFAULT '',
-          channel TEXT NOT NULL DEFAULT 'wechat_kf'
+          channel TEXT NOT NULL
             CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
           origin TEXT NOT NULL,
           msg_type TEXT NOT NULL,
@@ -1282,15 +1795,21 @@ export class SqliteStore {
           error_message TEXT NOT NULL DEFAULT '',
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
-          UNIQUE (open_kfid, msgid),
+          UNIQUE (channel, open_kfid, msgid),
           UNIQUE (message_key, open_kfid, external_userid),
-          FOREIGN KEY (primary_message_key)
-            REFERENCES inbound_messages(message_key)
+          UNIQUE (message_key, channel, open_kfid, external_userid),
+          FOREIGN KEY (
+            primary_message_key, channel, open_kfid, external_userid
+          ) REFERENCES inbound_messages(
+            message_key, channel, open_kfid, external_userid
+          )
         ) STRICT;
 
         CREATE TABLE inbound_media (
           media_seq INTEGER PRIMARY KEY AUTOINCREMENT,
           message_key TEXT NOT NULL,
+          channel TEXT NOT NULL
+            CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
           open_kfid TEXT NOT NULL,
           external_userid TEXT NOT NULL,
           position INTEGER NOT NULL CHECK (position >= 0),
@@ -1300,9 +1819,9 @@ export class SqliteStore {
           sent_at INTEGER NOT NULL DEFAULT 0,
           remembered_at INTEGER NOT NULL,
           UNIQUE (message_key, position),
-          FOREIGN KEY (message_key, open_kfid, external_userid)
+          FOREIGN KEY (message_key, channel, open_kfid, external_userid)
             REFERENCES inbound_messages(
-              message_key, open_kfid, external_userid
+              message_key, channel, open_kfid, external_userid
             ) ON DELETE CASCADE
         ) STRICT;
 
@@ -1371,7 +1890,7 @@ export class SqliteStore {
           source_message_key TEXT NOT NULL,
           open_kfid TEXT NOT NULL,
           external_userid TEXT NOT NULL,
-          channel TEXT NOT NULL DEFAULT 'wechat_kf'
+          channel TEXT NOT NULL
             CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
           reply_window_id INTEGER,
           send_index INTEGER NOT NULL CHECK (send_index >= 0 AND send_index < 1000),
@@ -1389,9 +1908,11 @@ export class SqliteStore {
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           UNIQUE (source_message_key, send_index),
-          FOREIGN KEY (source_message_key, open_kfid, external_userid)
+          FOREIGN KEY (
+            source_message_key, channel, open_kfid, external_userid
+          )
             REFERENCES inbound_messages(
-              message_key, open_kfid, external_userid
+              message_key, channel, open_kfid, external_userid
             ),
           FOREIGN KEY (reply_window_id)
             REFERENCES ilink_reply_windows(reply_window_id)
@@ -1402,7 +1923,7 @@ export class SqliteStore {
           source_message_key TEXT NOT NULL,
           open_kfid TEXT NOT NULL,
           external_userid TEXT NOT NULL,
-          channel TEXT NOT NULL DEFAULT 'wechat_kf'
+          channel TEXT NOT NULL
             CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
           reply_window_id INTEGER,
           boundary_inbox_seq INTEGER NOT NULL CHECK (boundary_inbox_seq >= 0),
@@ -1412,9 +1933,11 @@ export class SqliteStore {
           closed_at INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
-          FOREIGN KEY (source_message_key, open_kfid, external_userid)
+          FOREIGN KEY (
+            source_message_key, channel, open_kfid, external_userid
+          )
             REFERENCES inbound_messages(
-              message_key, open_kfid, external_userid
+              message_key, channel, open_kfid, external_userid
             ) ON DELETE CASCADE
         ) STRICT;
 
@@ -1440,7 +1963,9 @@ export class SqliteStore {
         ) STRICT, WITHOUT ROWID;
 
         CREATE INDEX inbound_pending_idx
-          ON inbound_messages(status, open_kfid, external_userid, inbox_seq);
+          ON inbound_messages(
+            status, channel, open_kfid, external_userid, inbox_seq
+          );
         CREATE INDEX inbound_primary_idx
           ON inbound_messages(primary_message_key, inbox_seq);
         CREATE INDEX inbound_deferred_idx
@@ -1450,11 +1975,15 @@ export class SqliteStore {
         CREATE INDEX send_status_idx
           ON send_attempts(channel, status, created_at, send_index);
         CREATE UNIQUE INDEX send_wecom_msgid_idx
-          ON send_attempts(wecom_msgid) WHERE wecom_msgid <> '';
+          ON send_attempts(channel, wecom_msgid) WHERE wecom_msgid <> '';
         CREATE INDEX send_conversation_idx
-          ON send_attempts(open_kfid, external_userid, updated_at DESC);
+          ON send_attempts(
+            channel, open_kfid, external_userid, updated_at DESC
+          );
         CREATE INDEX media_conversation_idx
-          ON inbound_media(open_kfid, external_userid, remembered_at DESC);
+          ON inbound_media(
+            channel, open_kfid, external_userid, remembered_at DESC
+          );
         CREATE INDEX agent_session_source_idx
           ON agent_sessions(source_message_key, closed_at, expires_at);
 
@@ -1548,19 +2077,20 @@ export class SqliteStore {
   }
 
   #ensureConversation(
-    openKfId: string,
-    externalUserId: string,
+    channel: ChatChannel,
+    accountKey: string,
+    peerId: string,
     now = this.#now(),
   ): void {
-    if (!externalUserId) return;
+    if (!peerId) return;
     this.#database
       .prepare(`
         INSERT INTO conversations (
-          open_kfid, external_userid, updated_at
-        ) VALUES (?, ?, ?)
-        ON CONFLICT(open_kfid, external_userid) DO NOTHING
+          channel, open_kfid, external_userid, updated_at
+        ) VALUES (?, ?, ?, ?)
+        ON CONFLICT(channel, open_kfid, external_userid) DO NOTHING
       `)
-      .run(openKfId, externalUserId, now);
+      .run(channel, accountKey, peerId, now);
   }
 
   #inboundRow(messageKey: string): InboundRow | undefined {
@@ -1601,13 +2131,18 @@ export class SqliteStore {
     const laterCustomer = inbound
       ? this.#database.prepare(`
           SELECT 1 FROM inbound_messages
-          WHERE open_kfid = ? AND external_userid = ?
+          WHERE channel = ? AND open_kfid = ? AND external_userid = ?
             AND inbox_seq > ?
             AND origin = 'customer'
             AND status <> 'ignored'
             AND NOT (channel = 'weixin_ilink' AND status = 'absorbed')
           LIMIT 1
-        `).get(row.open_kfid, row.external_userid, row.boundary_inbox_seq)
+        `).get(
+          row.channel,
+          row.open_kfid,
+          row.external_userid,
+          row.boundary_inbox_seq,
+        )
       : undefined;
     const valid =
       inbound !== undefined &&
@@ -1637,8 +2172,8 @@ export class SqliteStore {
 
   #insertAttempt({
     sourceMessageKey,
-    openKfId,
-    externalUserId,
+    accountKey,
+    peerId,
     sendIndex,
     source = 'codex_tool',
     sentType,
@@ -1650,7 +2185,14 @@ export class SqliteStore {
     const index = Number(sendIndex);
     const inbound = this.#inboundRow(sourceMessageKey);
     if (!inbound) throw new Error(`Unknown inbound message: ${sourceMessageKey}`);
-    const actualChannel = channel || inbound.channel;
+    if (
+      accountKey !== inbound.open_kfid ||
+      peerId !== inbound.external_userid ||
+      (channel !== undefined && channel !== inbound.channel)
+    ) {
+      throw new SendInvariantError('Send attempt identity does not match its source');
+    }
+    const actualChannel = inbound.channel;
     const maximum = actualChannel === 'wechat_kf' ? 5 : 1_000;
     if (!Number.isInteger(index) || index < 0 || index >= maximum) {
       throw new Error(`sendIndex must be an integer between 0 and ${maximum - 1}`);
@@ -1677,8 +2219,8 @@ export class SqliteStore {
       .run(
         actualAttemptKey,
         sourceMessageKey,
-        openKfId,
-        externalUserId,
+        accountKey,
+        peerId,
         actualChannel,
         replyWindowId || null,
         index,
@@ -1710,8 +2252,8 @@ export class SqliteStore {
       existing.fingerprint !== actualFingerprint ||
       existing.client_message_id !== stableClientId ||
       existing.sent_type !== sentType ||
-      existing.open_kfid !== openKfId ||
-      existing.external_userid !== externalUserId ||
+      existing.open_kfid !== accountKey ||
+      existing.external_userid !== peerId ||
       existing.channel !== actualChannel ||
       Number(existing.reply_window_id || 0) !== Number(replyWindowId || 0) ||
       existing.source !== String(source)
@@ -1744,14 +2286,19 @@ export class SqliteStore {
     const laterCustomer = source
       ? this.#database.prepare(`
           SELECT 1 FROM inbound_messages
-          WHERE open_kfid = ? AND external_userid = ?
+          WHERE channel = ? AND open_kfid = ? AND external_userid = ?
             AND inbox_seq > ? AND origin = 'customer'
             AND status IN (
               'received', 'processing', 'preparing', 'ready',
               'steering', 'steered', 'failed'
             )
           LIMIT 1
-        `).get(source.open_kfid, source.external_userid, source.inbox_seq)
+        `).get(
+          source.channel,
+          source.open_kfid,
+          source.external_userid,
+          source.inbox_seq,
+        )
       : undefined;
     if (laterCustomer) return;
     this.#database
@@ -1802,7 +2349,11 @@ export class SqliteStore {
   #finishSending(
     attemptId: string,
     status: 'accepted' | 'uncertain',
-    fields: { wecomMsgId?: string; errorCode?: string; errorMessage?: string },
+    fields: {
+      providerMessageId?: string;
+      errorCode?: string;
+      errorMessage?: string;
+    },
   ): AttemptRecord {
     const current = this.#attemptRow(attemptId);
     if (!current) throw new Error(`Unknown send attempt: ${attemptId}`);
@@ -1817,7 +2368,7 @@ export class SqliteStore {
           updated_at = ?
       WHERE attempt_key = ? AND status = 'sending'
     `).run(
-      status, fields.wecomMsgId || '', fields.errorCode || '',
+      status, fields.providerMessageId || '', fields.errorCode || '',
       fields.errorMessage || '', now, attemptId,
     );
     this.#settleSourceMessage(current.source_message_key, now);
@@ -1847,23 +2398,23 @@ export class SqliteStore {
     );
   }
 
-  getCursor(openKfId: string): string {
+  getCursor(accountKey: string): string {
     const cursor = rowAs<{ cursor: unknown }>(
       this.#database
         .prepare('SELECT cursor FROM sync_cursors WHERE open_kfid = ?')
-        .get(String(openKfId)),
+        .get(String(accountKey)),
     )?.cursor;
     return cursor === undefined ? '' : String(cursor);
   }
 
-  listSyncOpenKfIds(): string[] {
+  listSyncAccountKeys(): string[] {
     return rowsAs<{ open_kfid: string }>(this.#database.prepare(`
       SELECT open_kfid FROM sync_cursors ORDER BY open_kfid
     `).all()).map((row) => row.open_kfid);
   }
 
-  registerSyncOpenKfId(openKfId: string): void {
-    const service = requiredText(openKfId, 'openKfId');
+  registerSyncAccountKey(accountKey: string): void {
+    const service = requiredText(accountKey, 'accountKey');
     this.#database.prepare(`
       INSERT INTO sync_cursors (open_kfid, cursor, updated_at)
       VALUES (?, '', ?)
@@ -1871,49 +2422,46 @@ export class SqliteStore {
     `).run(service, this.#now());
   }
 
-  ingestSyncPage({
-    openKfId,
-    expectedCursor = '',
-    nextCursor = '',
-    messages,
-    deferred = false,
+  /** @internal Shared inbox boundary for channel-specific persistence stores. */
+  insertInboundMessages({
+    accountKey,
+    entries,
+    now,
   }: {
-    openKfId: string;
-    expectedCursor?: string;
-    nextCursor?: string;
-    messages: readonly NormalizedMessage[];
-    deferred?: boolean;
-  }): { insertedMessageKeys: string[]; cursor: string } {
-    const service = requiredText(openKfId, 'openKfId');
-    if (!Array.isArray(messages)) throw new Error('messages must be an array');
-    const inserts = messages.map((message, index) =>
-      inboundInsert(service, message, {
-        cursor: String(expectedCursor || ''),
-        index,
-      }),
-    );
+    accountKey: string;
+    entries: readonly InboxInsertEntry[];
+    now?: number;
+  }): InboxInsertResult[] {
+    const service = requiredText(accountKey, 'accountKey');
+    if (!Array.isArray(entries)) throw new Error('entries must be an array');
+    const timestamp = now === undefined ? this.#now() : Number(now);
+    if (!Number.isSafeInteger(timestamp) || timestamp < 0) {
+      throw new Error('now must be a non-negative safe integer');
+    }
+    const messages = entries.map(({ message, deferred = false }) => ({
+      message: inboundInsert(service, message),
+      deferred: Boolean(deferred),
+    }));
 
     return this.#transaction(() => {
-      const actualCursor = this.getCursor(service);
-      if (actualCursor !== String(expectedCursor || '')) {
-        throw new CursorConflictError(service, expectedCursor || '', actualCursor);
-      }
-      const now = this.#now();
-      const insertedMessageKeys: string[] = [];
       const statement = this.#database.prepare(`
         INSERT INTO inbound_messages (
           message_key, open_kfid, msgid, external_userid, channel, origin, msg_type,
           sent_at, status, deferred, payload_json, created_at, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(open_kfid, msgid) DO NOTHING
+        ON CONFLICT(channel, open_kfid, msgid) DO NOTHING
       `);
-
-      for (const message of inserts) {
+      const findByProviderIdentity = this.#database.prepare(`
+        SELECT message_key, inbox_seq, external_userid
+        FROM inbound_messages
+        WHERE channel = ? AND open_kfid = ? AND msgid = ?
+      `);
+      return messages.map(({ message, deferred }) => {
         const result = statement.run(
           message.messageKey,
           service,
-          message.msgid,
-          message.externalUserId,
+          message.providerMessageId,
+          message.peerId,
           message.channel,
           message.origin,
           message.type,
@@ -1921,12 +2469,64 @@ export class SqliteStore {
           message.status,
           deferred ? 1 : 0,
           encodeJson(message.payload),
-          now,
-          now,
+          timestamp,
+          timestamp,
         );
-        this.#ensureConversation(service, message.externalUserId, now);
-        if (result.changes === 1) insertedMessageKeys.push(message.messageKey);
+        this.#ensureConversation(
+          message.channel,
+          service,
+          message.peerId,
+          timestamp,
+        );
+        const row = rowAs<{
+          message_key: string;
+          inbox_seq: number;
+          external_userid: string;
+        }>(findByProviderIdentity.get(
+          message.channel,
+          service,
+          message.providerMessageId,
+        ));
+        if (!row || row.external_userid !== message.peerId) {
+          throw new Error('Inbound message dedupe identity conflicts');
+        }
+        return {
+          messageKey: row.message_key,
+          inboxSeq: Number(row.inbox_seq),
+          inserted: result.changes === 1,
+        };
+      });
+    });
+  }
+
+  ingestSyncPage({
+    accountKey,
+    expectedCursor = '',
+    nextCursor = '',
+    messages,
+    deferred = false,
+  }: {
+    accountKey: string;
+    expectedCursor?: string;
+    nextCursor?: string;
+    messages: readonly NormalizedMessage[];
+    deferred?: boolean;
+  }): { insertedMessageKeys: string[]; cursor: string } {
+    const service = requiredText(accountKey, 'accountKey');
+    if (!Array.isArray(messages)) throw new Error('messages must be an array');
+
+    return this.#transaction(() => {
+      const actualCursor = this.getCursor(service);
+      if (actualCursor !== String(expectedCursor || '')) {
+        throw new CursorConflictError(service, expectedCursor || '', actualCursor);
       }
+      const now = this.#now();
+      const insertedMessageKeys = this.insertInboundMessages({
+        accountKey: service,
+        entries: messages.map((message) => ({ message, deferred })),
+        now,
+      }).filter(({ inserted }) => inserted)
+        .map(({ messageKey }) => messageKey);
 
       this.#database
         .prepare(`
@@ -1943,26 +2543,28 @@ export class SqliteStore {
   }
 
   promoteDeferredConversation({
-    openKfId,
-    externalUserId,
+    channel,
+    accountKey,
+    peerId,
   }: {
-    openKfId: string;
-    externalUserId: string;
+    channel: ChatChannel;
+    accountKey: string;
+    peerId: string;
   }): InboundRecord[] {
     return this.#transaction(() => {
-      const service = requiredText(openKfId, 'openKfId');
-      const customer = String(externalUserId || '');
+      const service = requiredText(accountKey, 'accountKey');
+      const customer = String(peerId || '');
       this.#database.prepare(`
         UPDATE inbound_messages SET deferred = 0, updated_at = ?
-        WHERE open_kfid = ? AND external_userid = ?
+        WHERE channel = ? AND open_kfid = ? AND external_userid = ?
           AND deferred = 1 AND status = 'received'
-      `).run(this.#now(), service, customer);
+      `).run(this.#now(), channel, service, customer);
       return rowsAs<InboundRow>(this.#database.prepare(`
         SELECT * FROM inbound_messages
-        WHERE open_kfid = ? AND external_userid = ?
+        WHERE channel = ? AND open_kfid = ? AND external_userid = ?
           AND deferred = 0 AND status = 'received'
         ORDER BY inbox_seq
-      `).all(service, customer)).map((row) => mapInbound(row)!);
+      `).all(channel, service, customer)).map((row) => mapInbound(row)!);
     });
   }
 
@@ -2032,6 +2634,7 @@ export class SqliteStore {
       }
       const boundedTtl = Math.max(1_000, Math.min(Number(ttlMs) || 0, 60 * 60 * 1000));
       const memoryThreadId = this.getConversation(
+        inbound.channel,
         inbound.open_kfid,
         inbound.external_userid,
       )?.memoryThreadId || '';
@@ -2048,11 +2651,12 @@ export class SqliteStore {
       const token = `ws_${randomBytes(24).toString('base64url')}`;
       this.#database.prepare(`
         UPDATE agent_sessions SET closed_at = ?, updated_at = ?
-        WHERE open_kfid = ? AND external_userid = ?
+        WHERE channel = ? AND open_kfid = ? AND external_userid = ?
           AND closed_at = 0 AND expires_at > ?
       `).run(
         now,
         now,
+        inbound.channel,
         inbound.open_kfid,
         inbound.external_userid,
         now,
@@ -2075,8 +2679,9 @@ export class SqliteStore {
         boundary.inbox_seq,
         memoryThreadId,
         encodeJson(this.listRecentMedia({
-          openKfId: inbound.open_kfid,
-          externalUserId: inbound.external_userid,
+          channel: inbound.channel,
+          accountKey: inbound.open_kfid,
+          peerId: inbound.external_userid,
           limit: 10,
         })) || '[]',
         now + boundedTtl,
@@ -2223,8 +2828,8 @@ export class SqliteStore {
       `).get(session.messageKey, session.messageKey));
       const reserved = this.#insertAttempt({
         sourceMessageKey: session.messageKey,
-        openKfId: session.openKfId,
-        externalUserId: session.externalUserId,
+        accountKey: session.accountKey,
+        peerId: session.peerId,
         sendIndex,
         source: 'mcp_tool',
         sentType,
@@ -2270,8 +2875,8 @@ export class SqliteStore {
       `).get(messageKey));
       return this.#insertAttempt({
         sourceMessageKey: messageKey,
-        openKfId: inbound.open_kfid,
-        externalUserId: inbound.external_userid,
+        accountKey: inbound.open_kfid,
+        peerId: inbound.external_userid,
         sendIndex: Number(next?.send_index || 0),
         source: 'queue_notice',
         sentType: 'text',
@@ -2385,8 +2990,13 @@ export class SqliteStore {
       `).run(now, now, messageKey);
       this.#database.prepare(`
         UPDATE conversations SET memory_thread_id = '', updated_at = ?
-        WHERE open_kfid = ? AND external_userid = ?
-      `).run(now, primary.open_kfid, primary.external_userid);
+        WHERE channel = ? AND open_kfid = ? AND external_userid = ?
+      `).run(
+        now,
+        primary.channel,
+        primary.open_kfid,
+        primary.external_userid,
+      );
       return this.getInbound(messageKey)!;
     });
   }
@@ -2400,26 +3010,42 @@ export class SqliteStore {
       'steered',
       'ready',
     ],
-    openKfId,
-    externalUserId,
+    channel,
+    accountKey,
+    peerId,
     limit = 100,
   }: {
     statuses?: readonly InboundStatus[];
-    openKfId?: string;
-    externalUserId?: string;
+    channel?: ChatChannel;
+    accountKey?: string;
+    peerId?: string;
     limit?: number;
   } = {}): InboundRecord[] {
     const selected = [...new Set(statuses)];
     if (!selected.length) return [];
+    const hasIdentity = channel !== undefined || accountKey !== undefined ||
+      peerId !== undefined;
+    if (
+      hasIdentity &&
+      (channel === undefined || !accountKey || !peerId)
+    ) {
+      throw new Error(
+        'channel, accountKey, and peerId must be provided together',
+      );
+    }
     const clauses = [`status IN (${selected.map(() => '?').join(',')})`];
     const parameters: SqlInputValue[] = [...selected];
-    if (openKfId) {
-      clauses.push('open_kfid = ?');
-      parameters.push(String(openKfId));
+    if (channel) {
+      clauses.push('channel = ?');
+      parameters.push(channel);
     }
-    if (externalUserId) {
+    if (accountKey) {
+      clauses.push('open_kfid = ?');
+      parameters.push(String(accountKey));
+    }
+    if (peerId) {
       clauses.push('external_userid = ?');
-      parameters.push(String(externalUserId));
+      parameters.push(String(peerId));
     }
     parameters.push(Math.max(1, Math.min(Number(limit) || 100, 1000)));
     return rowsAs<InboundRow>(this.#database
@@ -2434,29 +3060,32 @@ export class SqliteStore {
   }
 
   getConversation(
-    openKfId: string,
-    externalUserId: string,
+    channel: ChatChannel,
+    accountKey: string,
+    peerId: string,
   ): ConversationRecord | undefined {
     return mapConversation(
       rowAs<ConversationRow>(
         this.#database
           .prepare(`
             SELECT * FROM conversations
-            WHERE open_kfid = ? AND external_userid = ?
+            WHERE channel = ? AND open_kfid = ? AND external_userid = ?
           `)
-          .get(String(openKfId), String(externalUserId)),
+          .get(channel, String(accountKey), String(peerId)),
       ),
     );
   }
 
   setConversationThread({
-    openKfId,
-    externalUserId,
+    channel,
+    accountKey,
+    peerId,
     threadId,
     memoryThreadId = '',
   }: {
-    openKfId: string;
-    externalUserId: string;
+    channel: ChatChannel;
+    accountKey: string;
+    peerId: string;
     threadId: string;
     memoryThreadId?: string;
   }): ConversationRecord {
@@ -2465,25 +3094,27 @@ export class SqliteStore {
       this.#database
         .prepare(`
           INSERT INTO conversations (
-            open_kfid, external_userid, thread_id, memory_thread_id, updated_at
-          ) VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(open_kfid, external_userid) DO UPDATE SET
+            channel, open_kfid, external_userid,
+            thread_id, memory_thread_id, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(channel, open_kfid, external_userid) DO UPDATE SET
             thread_id = excluded.thread_id,
             memory_thread_id = excluded.memory_thread_id,
             updated_at = excluded.updated_at
         `)
         .run(
-          openKfId,
-          externalUserId,
+          channel,
+          accountKey,
+          peerId,
           String(threadId || ''),
           String(memoryThreadId || ''),
           now,
         );
-      return this.getConversation(openKfId, externalUserId)!;
+      return this.getConversation(channel, accountKey, peerId)!;
     });
   }
 
-  getAuthorization(externalUserId: string): AuthorizationRecord | undefined {
+  getAuthorization(peerId: string): AuthorizationRecord | undefined {
     const row = rowAs<{
       external_userid: string;
       authorized: number;
@@ -2495,14 +3126,14 @@ export class SqliteStore {
     }>(
       this.#database
         .prepare('SELECT * FROM authorizations WHERE external_userid = ?')
-        .get(String(externalUserId)),
+        .get(String(peerId)),
     );
     if (!row) return undefined;
     return {
-      externalUserId: row.external_userid,
+      peerId: row.external_userid,
       authorized: row.authorized === 1,
       consecutiveMatches: row.consecutive_matches,
-      lastOpenKfId: row.last_open_kfid,
+      lastAccountKey: row.last_open_kfid,
       lastMessageKey: row.last_message_key,
       authorizedAt: row.authorized_at,
       updatedAt: row.updated_at,
@@ -2511,15 +3142,15 @@ export class SqliteStore {
 
   evaluateAuthorization({
     messageKey,
-    openKfId,
-    externalUserId,
+    accountKey,
+    peerId,
     isTrigger,
     requiredConsecutive = 3,
     confirmationText = 'Code accepted. You can continue the conversation.',
   }: {
     messageKey: string;
-    openKfId: string;
-    externalUserId: string;
+    accountKey: string;
+    peerId: string;
     isTrigger: boolean;
     requiredConsecutive?: number;
     confirmationText?: string;
@@ -2528,12 +3159,13 @@ export class SqliteStore {
       const message = this.#inboundRow(messageKey);
       if (!message) throw new Error(`Unknown inbound message: ${messageKey}`);
       if (
-        message.open_kfid !== openKfId ||
-        message.external_userid !== externalUserId
+        message.channel !== 'wechat_kf' ||
+        message.open_kfid !== accountKey ||
+        message.external_userid !== peerId
       ) {
         throw new Error('Authorization target does not match inbound message');
       }
-      const current = this.getAuthorization(externalUserId);
+      const current = this.getAuthorization(peerId);
       if (current?.authorized && current.lastMessageKey === messageKey) {
         return {
           decision: 'duplicate',
@@ -2555,7 +3187,7 @@ export class SqliteStore {
 
       const threshold = Math.max(1, Number(requiredConsecutive) || 3);
       const consecutiveMatches = isTrigger
-        ? (current?.lastOpenKfId === openKfId
+        ? (current?.lastAccountKey === accountKey
             ? current.consecutiveMatches
             : 0) + 1
         : 0;
@@ -2576,10 +3208,10 @@ export class SqliteStore {
             updated_at = excluded.updated_at
         `)
         .run(
-          externalUserId,
+          peerId,
           newlyAuthorized ? 1 : 0,
           consecutiveMatches,
-          openKfId,
+          accountKey,
           messageKey,
           newlyAuthorized ? now : 0,
           now,
@@ -2588,8 +3220,8 @@ export class SqliteStore {
       if (newlyAuthorized) {
         this.#insertAttempt({
           sourceMessageKey: messageKey,
-          openKfId,
-          externalUserId,
+          accountKey,
+          peerId,
           sendIndex: 0,
           source: 'authorization',
           sentType: 'text',
@@ -2704,6 +3336,7 @@ export class SqliteStore {
         throw new Error(`Primary message is not steerable in status ${primary.status}`);
       }
       if (
+        message.channel !== primary.channel ||
         message.open_kfid !== primary.open_kfid ||
         message.external_userid !== primary.external_userid
       ) {
@@ -2882,37 +3515,41 @@ export class SqliteStore {
   }
 
   listRecentConversationAttempts({
-    openKfId,
-    externalUserId,
+    channel,
+    accountKey,
+    peerId,
     limit = 20,
   }: {
-    openKfId: string;
-    externalUserId: string;
+    channel: ChatChannel;
+    accountKey: string;
+    peerId: string;
     limit?: number;
   }): AttemptRecord[] {
     return rowsAs<AttemptRow>(this.#database
       .prepare(`
         SELECT * FROM send_attempts
-        WHERE open_kfid = ? AND external_userid = ?
+        WHERE channel = ? AND open_kfid = ? AND external_userid = ?
           AND status IN ('accepted', 'failed', 'uncertain')
         ORDER BY updated_at DESC
         LIMIT ?
       `)
       .all(
-        requiredText(openKfId, 'openKfId'),
-        requiredText(externalUserId, 'externalUserId'),
+        channel,
+        requiredText(accountKey, 'accountKey'),
+        requiredText(peerId, 'peerId'),
         Math.max(1, Math.min(Number(limit) || 20, 100)),
       ))
       .map((row) => mapAttempt(row)!);
   }
 
-  beginNextSend(channel: ChatChannel = 'wechat_kf'): AttemptRecord | undefined {
+  beginNextSend(channel: ChatChannel): AttemptRecord | undefined {
     return this.#transaction(() => {
       const candidate = rowAs<AttemptRow>(this.#database.prepare(`
         SELECT * FROM send_attempts
         WHERE channel = ? AND status = 'pending' AND NOT EXISTS (
           SELECT 1 FROM send_attempts AS active
           WHERE active.status = 'sending'
+            AND active.channel = send_attempts.channel
             AND active.open_kfid = send_attempts.open_kfid
             AND active.external_userid = send_attempts.external_userid
         )
@@ -2931,12 +3568,15 @@ export class SqliteStore {
 
   completeSend(
     attemptId: string,
-    { wecomMsgId }: { wecomMsgId: string },
+    { providerMessageId }: { providerMessageId: string },
   ): AttemptRecord {
-    const acceptedMessageId = requiredText(wecomMsgId, 'wecomMsgId');
+    const acceptedMessageId = requiredText(
+      providerMessageId,
+      'providerMessageId',
+    );
     return this.#transaction(() => {
       const accepted = this.#finishSending(attemptId, 'accepted', {
-        wecomMsgId: acceptedMessageId,
+        providerMessageId: acceptedMessageId,
       });
       if (accepted.channel !== 'wechat_kf') return accepted;
       const failure = rowAs<{ fail_type: number }>(this.#database.prepare(`
@@ -2984,15 +3624,15 @@ export class SqliteStore {
   }
 
   markSendMsgFailed({
-    wecomMsgId,
+    providerMessageId,
     failType,
   }: {
-    wecomMsgId: string;
+    providerMessageId: string;
     failType: number;
   }): boolean {
-    if (!String(wecomMsgId || '')) return false;
+    if (!String(providerMessageId || '')) return false;
     return this.#transaction(() => {
-      const messageId = String(wecomMsgId);
+      const messageId = String(providerMessageId);
       const fail = Number(failType || 0);
       const now = this.#now();
       this.#database.prepare(`
@@ -3087,13 +3727,14 @@ export class SqliteStore {
       const now = this.#now();
       const insert = this.#database.prepare(`
         INSERT INTO inbound_media (
-          message_key, open_kfid, external_userid, position, kind,
+          message_key, channel, open_kfid, external_userid, position, kind,
           media_id, filename, sent_at, remembered_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
       attachments.forEach((attachment, index) => {
         insert.run(
           messageKey,
+          message.channel,
           message.open_kfid,
           message.external_userid,
           index,
@@ -3105,26 +3746,30 @@ export class SqliteStore {
         );
       });
       return this.listRecentMedia({
-        openKfId: message.open_kfid,
-        externalUserId: message.external_userid,
+        channel: message.channel,
+        accountKey: message.open_kfid,
+        peerId: message.external_userid,
         limit: attachments.length,
       }).filter((item) => item.messageKey === messageKey);
     });
   }
 
   listRecentMedia({
-    openKfId,
-    externalUserId,
+    channel,
+    accountKey,
+    peerId,
     limit = 10,
     maxAgeMs = 3 * 24 * 60 * 60 * 1000,
   }: {
-    openKfId: string;
-    externalUserId: string;
+    channel: ChatChannel;
+    accountKey: string;
+    peerId: string;
     limit?: number;
     maxAgeMs?: number;
   }): MediaCatalogEntry[] {
     const rows = rowsAs<{
       message_key: string;
+      channel: ChatChannel;
       open_kfid: string;
       external_userid: string;
       media_id: string;
@@ -3134,21 +3779,24 @@ export class SqliteStore {
     }>(this.#database
       .prepare(`
         SELECT * FROM inbound_media
-        WHERE open_kfid = ? AND external_userid = ? AND remembered_at >= ?
+        WHERE channel = ? AND open_kfid = ? AND external_userid = ?
+          AND remembered_at >= ?
         ORDER BY remembered_at DESC, media_seq DESC
         LIMIT ?
       `)
       .all(
-        String(openKfId),
-        String(externalUserId),
+        channel,
+        String(accountKey),
+        String(peerId),
         this.#now() - Number(maxAgeMs),
         Math.max(0, Math.min(Number(limit) || 10, 50)),
       ));
     return rows.map((row, index) => ({
         ref: `media:${index}`,
         messageKey: String(row.message_key),
-        openKfId: String(row.open_kfid),
-        externalUserId: String(row.external_userid),
+        channel: row.channel,
+        accountKey: String(row.open_kfid),
+        peerId: String(row.external_userid),
         kind: 'image' as const,
         mediaId: String(row.media_id),
         filename: String(row.filename),

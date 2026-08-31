@@ -17,7 +17,7 @@ const ACCEPTED: IlinkToolReceipt = {
   attemptId: 'attempt-0001',
   sendIndex: 0,
   type: 'text',
-  msgid: 'ilink-message-0001',
+  providerMessageId: 'ilink-message-0001',
 };
 
 async function harness(
@@ -121,7 +121,7 @@ test('iLink MCP preserves attempt facts and replaces provider error text with sa
       attemptId: 'attempt-failed',
       sendIndex: 1,
       type: 'text',
-      msgid: '',
+      providerMessageId: '',
       error: {
         kind: 'reply_window_expired',
         message: 'secret context_token=do-not-leak',
@@ -134,7 +134,7 @@ test('iLink MCP preserves attempt facts and replaces provider error text with sa
       attemptId: 'attempt-uncertain',
       sendIndex: 2,
       type: 'text',
-      msgid: '',
+      providerMessageId: '',
       error: {
         kind: 'unknown-secret-kind',
         message: 'https://private.invalid/token',
@@ -146,7 +146,7 @@ test('iLink MCP preserves attempt facts and replaces provider error text with sa
       attemptId: 'attempt-quota',
       sendIndex: 10,
       type: 'text',
-      msgid: '',
+      providerMessageId: '',
       error: {
         kind: 'reply_quota_exhausted',
         message: 'provider detail must not leak',
@@ -175,7 +175,7 @@ test('iLink MCP preserves attempt facts and replaces provider error text with sa
     attemptId: 'attempt-failed',
     sendIndex: 1,
     type: 'text',
-    msgid: '',
+    providerMessageId: '',
     error: {
       kind: 'reply_window_expired',
       message: 'The iLink reply window closed 24 hours after the participant\'s last message. Stop retrying and wait for another inbound message.',
@@ -189,7 +189,7 @@ test('iLink MCP preserves attempt facts and replaces provider error text with sa
     attemptId: 'attempt-uncertain',
     sendIndex: 2,
     type: 'text',
-    msgid: '',
+    providerMessageId: '',
     error: {
       kind: 'uncertain_result',
       message: 'The iLink delivery outcome is uncertain and may have succeeded.',
@@ -200,7 +200,7 @@ test('iLink MCP preserves attempt facts and replaces provider error text with sa
     attemptId: 'attempt-quota',
     sendIndex: 10,
     type: 'text',
-    msgid: '',
+    providerMessageId: '',
     error: {
       kind: 'reply_quota_exhausted',
       message: 'The ten-message quota for this iLink reply window is exhausted. Stop retrying and wait for another inbound message.',
@@ -234,7 +234,7 @@ test('iLink MCP contains thrown errors and executor receipt field leakage', asyn
       attemptId: '',
       sendIndex: -1,
       type: 'text',
-      msgid: '',
+      providerMessageId: '',
       error: {
         kind: 'ilink_tool_error',
         message: 'The iLink tool could not execute the message.',

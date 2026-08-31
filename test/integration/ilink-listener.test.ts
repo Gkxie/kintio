@@ -82,8 +82,8 @@ async function until(condition: () => boolean): Promise<void> {
 function hostFor(
   accounts: () => readonly IlinkListenerRuntimeAccount[],
   commitPage: IlinkListenerHost['commitPage'] = (input) => ({
-    insertedMessageKeys: input.candidates.map(
-      (candidate) => candidate.providerMessageId,
+    insertedMessageKeys: input.messages.map(
+      ({ message }) => message.providerMessageId,
     ),
     cursor: input.nextCursor,
   }),
@@ -170,9 +170,14 @@ test('a page commits and enqueues before the next poll without waiting on Agent 
   assert.equal(commits[0]?.expectedCursor, runtime.cursor);
   assert.equal(commits[0]?.nextCursor, 'cursor-ordered-1');
   assert.deepEqual(
-    commits[0]?.candidates.map((candidate) => candidate.providerMessageId),
+    commits[0]?.messages.map(({ message }) => message.providerMessageId),
     ['message:1'],
   );
+  assert.deepEqual(commits[0]?.messages[0]?.message.sync, {
+    cursor: '',
+    index: 0,
+  });
+  assert.equal(commits[0]?.messages[0]?.facts.contextToken, 'context-1');
   assert.deepEqual(events.slice(0, 4), [
     'poll:',
     'commit',

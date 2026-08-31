@@ -175,9 +175,8 @@ Tools return execution facts only: accepted, failed, or uncertain. Provider-spec
 
 ## Identity, context, and media
 
-- A WeChat KF conversation key is `open_kfid + external_userid`.
-- An iLink conversation key is `bot_id + user_id`.
-- Adapter `accountKey` values occupy distinct namespaces; a new adapter must not reuse another adapter's key space.
+- Every conversation identity is `channel + accountKey + peerId`. Provider adapters translate their native account and participant IDs at the normalization boundary.
+- Identical `accountKey`, `peerId`, or provider message IDs in different channels remain independent; adapters do not need coordinated ID namespaces.
 - Later messages within the same adapter can steer the running agent turn; different adapters never share a Codex thread.
 - WeChat KF authorization applies to an `external_userid` within an enterprise, while thread isolation still uses the account-and-user pair.
 - Only text and images become native model input. Other message types retain important provider fields and become explicit summaries.
