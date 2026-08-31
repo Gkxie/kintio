@@ -221,15 +221,12 @@ export function createIlinkMcpServer(executor: IlinkToolExecutor): McpServer {
 export async function handleIlinkMcpRequest({
   request,
   executor,
-  bearerToken,
 }: {
   request: Request;
   executor: IlinkToolExecutor;
-  bearerToken: string;
 }): Promise<Response> {
   return handleMcpHttpRequest({
     request,
-    bearerToken,
     createServer: () => createIlinkMcpServer(executor),
   });
 }

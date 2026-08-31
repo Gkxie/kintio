@@ -4,6 +4,10 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Moved MCP actions off the public Hono listener onto one ephemeral loopback
+  listener, removed static MCP URL/Bearer configuration, and made the Codex
+  adapter inherit host model, provider, reasoning, and search settings
+  ([#21](https://github.com/Gkxie/kintio/issues/21)).
 - Added macOS, Linux, and Windows lifecycle support with an authenticated native
   daemon, bounded worker restarts, rotated logs, portable path and temporary-file
   handling, and a three-system CI matrix

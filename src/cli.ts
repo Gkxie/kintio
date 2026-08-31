@@ -317,18 +317,10 @@ function setup(location: InstanceLocation, runtime: CliRuntime): number {
   prepareDirectories(location.home);
   const templateFile = path.join(runtime.packageRoot, '.env.example');
   const template = fs.readFileSync(templateFile, 'utf8');
-  const tokenLine = /^KINTIO_MCP_BEARER_TOKEN=$/gmu;
-  if ([...template.matchAll(tokenLine)].length !== 1) {
-    throw new Error('Packaged .env.example has an invalid MCP token placeholder');
-  }
-  const configured = template.replace(
-    tokenLine,
-    `KINTIO_MCP_BEARER_TOKEN=${randomBytes(32).toString('base64url')}`,
-  );
   const configInsideHome = isPathInside(location.home, location.configFile);
   const configCreated = writeNewFile(
     location.configFile,
-    configured,
+    template,
     configInsideHome ? location.home : undefined,
   );
   const configStat = privateFile(location.configFile, 'Kintio config');
@@ -385,12 +377,6 @@ function processEnvironment(
     root: location.home,
   });
   return environment;
-}
-
-function remaining(deadline: number): number {
-  const value = deadline - Date.now();
-  if (value <= 0) throw new Error('Kintio lifecycle command timed out');
-  return value;
 }
 
 function removeDaemonMetadata(location: InstanceLocation): void {
@@ -541,7 +527,11 @@ async function waitUntilRunning(
   while (Date.now() < deadline) {
     let response: ControlResponse | undefined;
     try {
-      response = await requestControl(location.home, 'ping', 500);
+      response = await requestControl(
+        location.home,
+        'ping',
+        Math.min(500, Math.max(1, deadline - Date.now())),
+      );
     } catch (error: unknown) {
       lastError = error instanceof Error ? error.message : String(error);
     }
@@ -550,7 +540,8 @@ async function waitUntilRunning(
       throw new Error(response.message || 'Kintio worker failed to start');
     }
     if (response) lastError = response.message || `daemon phase is ${response.phase}`;
-    await delay(Math.min(100, remaining(deadline)));
+    const waitMs = Math.min(100, deadline - Date.now());
+    if (waitMs > 0) await delay(waitMs);
   }
   throw new Error(
     `Kintio failed to become ready: ${lastError}; inspect "kintio logs --no-follow"`,
@@ -574,7 +565,8 @@ async function stopDaemon(
     Date.now() < deadline &&
     (readDaemonRecord(location.home) || fs.existsSync(daemonLock))
   ) {
-    await delay(50);
+    const waitMs = Math.min(50, deadline - Date.now());
+    if (waitMs > 0) await delay(waitMs);
   }
   if (readDaemonRecord(location.home) || fs.existsSync(daemonLock)) {
     throw new Error('Kintio daemon did not stop within the shutdown budget');

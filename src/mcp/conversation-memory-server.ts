@@ -229,15 +229,12 @@ export function createConversationMemoryMcpServer(
 export async function handleConversationMemoryMcpRequest({
   request,
   executor,
-  bearerToken,
 }: {
   request: Request;
   executor: Pick<ConversationMemoryExecutor, 'read'>;
-  bearerToken: string;
 }): Promise<Response> {
   return handleMcpHttpRequest({
     request,
-    bearerToken,
     createServer: () => createConversationMemoryMcpServer(executor),
   });
 }

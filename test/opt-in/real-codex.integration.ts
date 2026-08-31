@@ -7,10 +7,6 @@ import os from 'node:os';
 import path from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { afterAll as after, test } from 'vitest';
-import { serve } from '@hono/node-server';
-import { Hono } from 'hono';
-
-import type { ReasoningEffort } from '../../src/config.ts';
 import {
   normalizeWecomMessage,
   renderMessageForCodex,
@@ -32,6 +28,7 @@ import {
   ConversationMemoryExecutor,
   handleConversationMemoryMcpRequest,
 } from '../../src/mcp/conversation-memory-server.ts';
+import { LocalMcpHost } from '../../src/mcp/local-host.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
 import { WecomApiClient } from '../../src/services/wecom-api.ts';
@@ -67,53 +64,7 @@ interface RealHarness {
   close(): Promise<void>;
 }
 
-function reasoningEffort(value: string | undefined): ReasoningEffort {
-  const effort = value || 'none';
-  const allowed: readonly ReasoningEffort[] = [
-    'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra',
-  ];
-  if (!allowed.includes(effort as ReasoningEffort)) {
-    throw new Error(`Unsupported CODEX_REASONING_EFFORT: ${effort}`);
-  }
-  return effort as ReasoningEffort;
-}
-
-function webSearchMode(
-  value: string | undefined,
-): 'disabled' | 'cached' | 'live' {
-  const mode = value || 'live';
-  if (mode !== 'disabled' && mode !== 'cached' && mode !== 'live') {
-    throw new Error(`Unsupported CODEX_WEB_SEARCH_MODE: ${mode}`);
-  }
-  return mode;
-}
-
-function ciModelProvider(): {
-  readonly baseUrl: string;
-  readonly apiKeyEnv: string;
-} | undefined {
-  const baseUrl = process.env.KINTIO_CI_BASE_URL?.trim() || '';
-  const hasApiKey = Boolean(process.env.KINTIO_CI_API_KEY?.trim());
-  if (!baseUrl && !hasApiKey) return undefined;
-  if (!baseUrl || !hasApiKey) {
-    throw new Error(
-      'KINTIO_CI_BASE_URL and KINTIO_CI_API_KEY must be configured together',
-    );
-  }
-  let providerUrl: URL;
-  try {
-    providerUrl = new URL(baseUrl);
-  } catch {
-    throw new Error('KINTIO_CI_BASE_URL must be a valid URL');
-  }
-  if (providerUrl.origin !== 'https://www.xieyu.chat') {
-    throw new Error('KINTIO_CI_BASE_URL must use https://www.xieyu.chat');
-  }
-  return { baseUrl, apiKeyEnv: 'KINTIO_CI_API_KEY' };
-}
-
 async function createRealHarness(): Promise<RealHarness> {
-  const modelProvider = ciModelProvider();
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-real-codex-'));
   const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
   const imageTempDirectory = path.join(directory, 'input');
@@ -168,50 +119,22 @@ async function createRealHarness(): Promise<RealHarness> {
       cancel() {},
     },
   });
-  const mcpBearerToken = 'real-codex-http-mcp-test-token';
-  const mcpApp = new Hono();
   let memoryExecutor: ConversationMemoryExecutor | undefined;
-  mcpApp.all('/mcp', (context) => handleWechatKfMcpRequest({
-    request: context.req.raw,
-    executor,
-    bearerToken: mcpBearerToken,
-  }));
-  mcpApp.all('/mcp/memory', async (context) => memoryExecutor
-    ? await handleConversationMemoryMcpRequest({
-        request: context.req.raw,
+  const localMcp = new LocalMcpHost({
+    wechatKf: (request) => handleWechatKfMcpRequest({ request, executor }),
+    memory: async (request) => memoryExecutor
+      ? await handleConversationMemoryMcpRequest({
+        request,
         executor: memoryExecutor,
-        bearerToken: mcpBearerToken,
       })
-    : context.json({ error: 'not ready' }, 503));
-  const mcpHttp = serve({
-    fetch: mcpApp.fetch,
-    hostname: '127.0.0.1',
-    port: 0,
+      : Response.json({ error: 'not ready' }, { status: 503 }),
   });
-  await once(mcpHttp, 'listening');
-  const mcpAddress = mcpHttp.address();
-  if (!mcpAddress || typeof mcpAddress === 'string') {
-    throw new Error('Fake MCP server did not bind a TCP port');
-  }
   const config = {
-    pathOverride: process.env.CODEX_PATH || 'codex',
-    model: process.env.CODEX_MODEL || 'gpt-5.6-luna',
-    reasoningEffort: reasoningEffort(process.env.CODEX_REASONING_EFFORT),
-    webSearchMode: webSearchMode(process.env.CODEX_WEB_SEARCH_MODE),
     workingDirectory: path.resolve('codex-workspace'),
     imageTempDirectory,
     generatedImageDirectory,
   };
-  const codex = createCodexAppServer({
-      pathOverride: config.pathOverride,
-      webSearchMode: config.webSearchMode,
-      workingDirectory: config.workingDirectory,
-    }, {
-      mcpUrl: `http://127.0.0.1:${mcpAddress.port}/mcp`,
-      memoryMcpUrl: `http://127.0.0.1:${mcpAddress.port}/mcp/memory`,
-      mcpBearerToken,
-      ...(modelProvider ? { modelProvider } : {}),
-    });
+  const codex = createCodexAppServer({ mcpEndpoints: await localMcp.start() });
   const memoryReads: string[] = [];
   memoryExecutor = new ConversationMemoryExecutor({
     store,
@@ -344,8 +267,7 @@ async function createRealHarness(): Promise<RealHarness> {
       try {
         await agent.close();
         await executor.close();
-        mcpHttp.close();
-        await once(mcpHttp, 'close');
+        await localMcp.close();
         fakeWechat.close();
         await once(fakeWechat, 'close');
         store.close();

@@ -20,7 +20,7 @@ Private Vulnerability Reporting.
 Never include real instances of the following in a report:
 
 - CorpID, WeChat Customer Service Secret, callback Token, or EncodingAESKey;
-- MCP Bearer Token, OpenAI API key, or Codex login information;
+- conversation capability, OpenAI API key, or Codex login information;
 - channel user ID, Bot Token, reply context token, or QR-code token; or
 - conversation transcript, media file, SQLite database, or local path.
 
@@ -57,8 +57,9 @@ maintain every `0.x` line at the same time.
 - Keep the Kintio instance and config below directories that untrusted local
   users cannot replace or modify. Custom Windows paths need an owner-only DACL;
   custom POSIX paths need trusted parents or sticky shared parents.
-- Protect `/mcp`, `/mcp/ilink`, and `/mcp/memory` with a strong Bearer Token.
-  Any non-loopback connection must use HTTPS.
+- Never proxy or publish the Runtime-owned local MCP listener. Public Hono
+  `/mcp*` paths intentionally return 404, and conversation capabilities must
+  never be logged or copied between sessions.
 - Bind archived memory through the current short-lived session; never let the
   model select an arbitrary Thread ID.
 - Prefer a dedicated operating-system user in production. WeChat authorization

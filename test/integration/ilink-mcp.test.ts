@@ -1,13 +1,11 @@
 import assert from 'node:assert/strict';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { test, type TestContext } from 'vitest';
 
 import {
   createIlinkMcpServer,
-  handleIlinkMcpRequest,
   type IlinkSendTextInput,
   type IlinkToolExecutor,
   type IlinkToolName,
@@ -244,69 +242,4 @@ test('iLink MCP contains thrown errors and executor receipt field leakage', asyn
     });
     assert.doesNotMatch(JSON.stringify(result), /must-not-leak|account/iu);
   }
-});
-
-test('iLink Streamable HTTP MCP requires its configured bearer token', async (t) => {
-  const created = await harness(t);
-  const initialize = (authorization?: string) => new Request(
-    'https://robot.example/mcp/ilink',
-    {
-      method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-        ...(authorization ? { authorization } : {}),
-      },
-      body: JSON.stringify({
-        jsonrpc: '2.0',
-        id: 1,
-        method: 'initialize',
-        params: {},
-      }),
-    },
-  );
-
-  for (const authorization of [undefined, 'Bearer wrong-token']) {
-    const response = await handleIlinkMcpRequest({
-      request: initialize(authorization),
-      executor: created.executor,
-      bearerToken: 'correct-token',
-    });
-    assert.equal(response.status, 401);
-    assert.equal(response.headers.get('www-authenticate'), 'Bearer');
-  }
-  const disabled = await handleIlinkMcpRequest({
-    request: initialize('Bearer '),
-    executor: created.executor,
-    bearerToken: '',
-  });
-  assert.equal(disabled.status, 401);
-
-  const bearerToken = 'correct-token';
-  const transport = new StreamableHTTPClientTransport(
-    new URL('https://robot.example/mcp/ilink'),
-    {
-      requestInit: {
-        headers: { Authorization: `Bearer ${bearerToken}` },
-      },
-      fetch: async (input, init) => handleIlinkMcpRequest({
-        request: new Request(input, init),
-        executor: created.executor,
-        bearerToken,
-      }),
-    },
-  );
-  const client = new Client({ name: 'ilink-http-test', version: '1.0.0' });
-  await client.connect(transport as unknown as Parameters<Client['connect']>[0]);
-  t.onTestFinished(() => client.close());
-  const result = await client.callTool({
-    name: 'send_text',
-    arguments: {
-      session: `ws_${'E'.repeat(32)}`,
-      content: 'HTTP MCP works',
-    },
-  });
-  assert.equal(
-    (result.structuredContent as { status?: unknown })?.status,
-    'accepted',
-  );
 });

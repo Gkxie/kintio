@@ -4,10 +4,7 @@ import { PassThrough, Writable } from 'node:stream';
 import { test } from 'vitest';
 
 import { createCodexAppServer } from '../../src/services/codex-agent.ts';
-import {
-  CodexAppServer,
-  type SpawnProcess,
-} from '../../src/services/codex-app-server.ts';
+import type { SpawnProcess } from '../../src/services/codex-app-server.ts';
 
 type RpcMessage = Record<string, unknown>;
 
@@ -50,14 +47,13 @@ class FakeCodexProcess extends EventEmitter {
   }
 }
 
-test('Codex Adapter inherits the host environment and overlays its scoped MCP capability', async (t) => {
+test('Codex Adapter uses native environment inheritance without adding Agent configuration', async (t) => {
   const environmentCanaries = {
     CODEX_SQLITE_HOME: '/private/codex-sqlite',
     CODEX_CA_CERTIFICATE: '/private/codex-ca.pem',
     http_proxy: 'http://proxy.example:8080',
     AGENT_HOST_CANARY: 'host-environment-canary',
   } as const;
-  const mcpBearerToken = 'mcp-bearer-canary-value-1234567890';
   const previous = new Map<string, string | undefined>();
   for (const [name, value] of Object.entries(environmentCanaries)) {
     previous.set(name, process.env[name]);
@@ -74,7 +70,7 @@ test('Codex Adapter inherits the host environment and overlays its scoped MCP ca
     | {
         command: string;
         argumentsList: readonly string[];
-        environment: NodeJS.ProcessEnv;
+        explicitEnvironment: boolean;
       }
     | undefined;
   const child = new FakeCodexProcess();
@@ -82,47 +78,38 @@ test('Codex Adapter inherits the host environment and overlays its scoped MCP ca
     captured = {
       command,
       argumentsList: [...argumentsList],
-      environment: { ...options.env },
+      explicitEnvironment: 'env' in options,
     };
     return child;
   };
-  const server = createCodexAppServer(
-    {
-      pathOverride: '/mock/codex',
-      webSearchMode: 'live',
-      workingDirectory: '/mock/workspace',
+  const server = createCodexAppServer({
+    spawnProcess,
+    logger: { warn() {} },
+    mcpEndpoints: {
+      wechatKf: 'http://127.0.0.1:30103/mcp',
+      memory: 'http://127.0.0.1:30103/mcp/memory',
     },
-    {
-      spawnProcess,
-      logger: { warn() {} },
-      mcpUrl: 'https://robot.example/mcp',
-      mcpBearerToken,
-    },
-  );
+  });
   t.onTestFinished(() => server.close());
   await server.initialize();
 
   assert.ok(captured);
-  assert.equal(captured.command, '/mock/codex');
+  assert.equal(captured.command, 'codex');
   assert.deepEqual(captured.argumentsList.slice(0, 2), ['app-server', '--stdio']);
   const serializedArguments = JSON.stringify(captured.argumentsList);
   assert.ok(captured.argumentsList.includes(
-    'mcp_servers.wechat_kf.url="https://robot.example/mcp"',
+    'mcp_servers.wechat_kf.url="http://127.0.0.1:30103/mcp"',
   ));
   assert.ok(captured.argumentsList.includes(
-    'mcp_servers.wechat_kf.bearer_token_env_var="KINTIO_MCP_BEARER_TOKEN"',
-  ));
-  assert.ok(captured.argumentsList.includes(
-    'mcp_servers.conversation_memory.url="https://robot.example/mcp/memory"',
+    'mcp_servers.conversation_memory.url="http://127.0.0.1:30103/mcp/memory"',
   ));
   assert.ok(captured.argumentsList.includes(
     'mcp_servers.conversation_memory.enabled_tools=["read_archived_thread"]',
   ));
-  assert.ok(serializedArguments.includes('features={apps=false'));
-  assert.ok(serializedArguments.includes('code_mode_host=true'));
-  assert.ok(serializedArguments.includes('code_mode=false'));
-  assert.ok(serializedArguments.includes('hooks=false'));
-  assert.ok(serializedArguments.includes('unified_exec=false'));
+  assert.ok(captured.argumentsList.includes('features.apps=false'));
+  assert.ok(captured.argumentsList.includes('features.code_mode.enabled=false'));
+  assert.ok(captured.argumentsList.includes('features.hooks=false'));
+  assert.ok(captured.argumentsList.includes('features.unified_exec=false'));
   assert.ok(
     captured.argumentsList.includes('sandbox_workspace_write.network_access=false'),
   );
@@ -130,37 +117,9 @@ test('Codex Adapter inherits the host environment and overlays its scoped MCP ca
   assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.command'), false);
   assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.args'), false);
   assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.env_vars'), false);
-  assert.equal(
-    captured.environment.KINTIO_MCP_BEARER_TOKEN,
-    mcpBearerToken,
-  );
-  for (const [name, value] of Object.entries(environmentCanaries)) {
-    assert.equal(captured.environment[name], value, name);
-  }
+  assert.equal(/bearer_token|model_provider|reasoning|web_search/iu.test(serializedArguments), false);
+  assert.equal(captured.explicitEnvironment, false);
   for (const canary of Object.values(environmentCanaries)) {
     assert.equal(serializedArguments.includes(canary), false, canary);
   }
-
-});
-
-test('low-level Codex app-server follows normal child-process environment inheritance', async (t) => {
-  const name = 'KINTIO_LOW_LEVEL_ENV_CANARY';
-  const previous = process.env[name];
-  process.env[name] = 'must-cross-process-boundary';
-  t.onTestFinished(() => {
-    if (previous === undefined) delete process.env[name];
-    else process.env[name] = previous;
-  });
-
-  let childEnvironment: NodeJS.ProcessEnv | undefined;
-  const child = new FakeCodexProcess();
-  const server = new CodexAppServer({
-    spawnProcess(_command, _argumentsList, options) {
-      childEnvironment = { ...options.env };
-      return child;
-    },
-  });
-  t.onTestFinished(() => server.close());
-  await server.initialize();
-  assert.equal(childEnvironment?.[name], 'must-cross-process-boundary');
 });

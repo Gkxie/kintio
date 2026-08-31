@@ -40,8 +40,9 @@ The Supervisor—not Hono—is the process composition root:
 ```text
 Kintio process
 └── Supervisor
-    ├── HTTP adapter: Hono callback and MCP routes
+    ├── public HTTP adapter: Hono messaging callbacks
     └── application runtime
+        ├── loopback-only MCP action listener
         ├── WeChat message synchronization
         ├── Weixin iLink polling and login listeners
         ├── future Feishu WebSocket or another long-lived transport
@@ -58,17 +59,17 @@ ownership.
 
 Startup is deliberately phased:
 
-1. construct the shared runtime and MCP handlers;
+1. construct the shared runtime and bind its loopback MCP listener;
 2. bind the Hono HTTP channel while callback ingress returns `503`;
-3. start recovery, polling, and other live listeners with MCP already reachable;
+3. start recovery, polling, and other live listeners;
 4. open callback ingress; and
-5. publish the process readiness nonce and PID.
+5. publish worker readiness to the native daemon over parent IPC.
 
 Shutdown reverses capability rather than merely reversing object creation:
 
 1. close callback and polling ingress to new work;
 2. keep MCP reachable while active Agent turns and sends drain;
-3. close tools, SQLite, and the instance lock; and
+3. close local MCP, tools, SQLite, and the instance lock; and
 4. close the HTTP channel.
 
 If graceful drain exceeds its configured limit, abort immediately disables
@@ -79,11 +80,13 @@ and the instance lock use their existing crash-recovery rules on the next start.
 ## Message flow
 
 ```text
-WeChat KF HTTPS callback ─→ normalize inbound message ─┐
-                                                      ├→ SQLite Inbox → conversation scheduler → Agent
-iLink Bot long polling ───────────────────────────────┘                                      │
-                                                                                             ↓
-Messaging user ←──────── provider API ← MCP action tool ← scoped conversation capability
+WeChat KF HTTPS callback ─┐
+                          ├→ NormalizedMessage → SQLite Inbox → scheduler → Agent Adapter
+iLink Bot long polling ───┘                                            ├── Kintio Prompt
+                                                                      ├── session-selected Skill
+                                                                      └── local MCP registration
+                                                                                  ↓
+Messaging user ← provider API ← local MCP tool ← scoped capability ← host Agent CLI
 ```
 
 SQLite is the source of truth for both inbound and outbound processing:
@@ -101,9 +104,9 @@ SQLite is the source of truth for both inbound and outbound processing:
 
 Messaging adapters handle provider protocols. They do not decide what the agent should say.
 
-Hono is the HTTP adapter for callbacks and MCP transport, not the Kintio process
-entry or lifecycle owner. Long polling and future WebSocket adapters do not
-depend on Hono being available as their host.
+Hono is the public HTTP adapter for callbacks, not the Kintio process entry or
+lifecycle owner. The loopback MCP listener, long polling, and future WebSocket
+adapters have independent lifecycles under the Runtime.
 
 - WeChat KF callback and signature verification: [src/routes/wecom.ts](../src/routes/wecom.ts)
 - WeChat KF message synchronization: [src/services/wecom-sync.ts](../src/services/wecom-sync.ts)
@@ -124,15 +127,22 @@ In-process queues only drive work forward; SQLite owns recoverable state. Databa
 
 [src/agent/runtime.ts](../src/agent/runtime.ts) defines the minimal agent lifecycle Kintio needs: start, steer, resume, and stop. [src/services/codex-agent.ts](../src/services/codex-agent.ts) is the current Codex CLI implementation, while [src/services/codex-app-server.ts](../src/services/codex-app-server.ts) implements the app-server protocol.
 
+Each adapter produces the same `NormalizedMessage`; the shared processor then
+builds channel-neutral `AgentInput`. A managed Skill lives in the private Kintio
+instance workspace and is selected by the trusted per-session channel prompt.
+It is not installed into the host user's global Agent configuration.
+
 The Agent process inherits the environment supplied to Kintio by its host.
 Kintio parses its instance `.env` without copying those values into
 `process.env`; adapter credentials therefore remain application configuration
-unless the operator explicitly exports them in the host environment. Each
-Agent adapter overlays only the capabilities it needs for the current runtime.
+unless the operator explicitly exports them in the host environment. Kintio
+does not select a model, provider, reasoning effort, or public-search mode. The
+Codex adapter adds only the session prompt, selected managed Skill, local MCP tools, and
+the safety restrictions required for untrusted chat input.
 
 The structured Agent input contains channel-neutral text, images, and summaries.
-Kintio does not place provider secrets, real user IDs, raw `media_id` values, or
-database paths in that input. Provider payloads, error codes, and delivery
+Kintio does not place messaging-provider secrets, real user IDs, raw `media_id`
+values, or database paths in that input. Provider payloads, error codes, and delivery
 policies cannot enter channel-neutral adapter input. MCP tools may return
 sanitized execution facts to the Agent.
 
@@ -143,9 +153,16 @@ MCP is the agent's only path for actions against messaging providers:
 - WeChat KF: [src/mcp/wechat-kf-server.ts](../src/mcp/wechat-kf-server.ts)
 - iLink: [src/mcp/ilink-server.ts](../src/mcp/ilink-server.ts)
 - read-only memory for archived threads: [src/mcp/conversation-memory-server.ts](../src/mcp/conversation-memory-server.ts)
+- loopback-only MCP lifecycle: [src/mcp/local-host.ts](../src/mcp/local-host.ts)
 - Streamable HTTP transport: [src/mcp/http.ts](../src/mcp/http.ts)
 
-The Hono process hosts these MCP servers. Codex receives only the MCP URL, bearer token, and current conversation session. Each tool revalidates the adapter, recipient, message direction, media ownership, expiration, and quota. The model cannot select a recipient through tool arguments.
+The Runtime hosts one MCP listener on an operating-system-assigned
+`127.0.0.1` port. Public Hono routes never expose MCP, and no static transport
+Token is stored or copied into the Agent environment. Every action still
+requires the short-lived session capability embedded in the current trusted
+Agent input. Each tool revalidates the adapter, recipient, message direction,
+media ownership, expiration, and quota. The model cannot select a recipient
+through tool arguments.
 
 Tools return execution facts only: accepted, failed, or uncertain. Provider-specific errors are explained by tool results when they occur. They do not belong in the global prompt, and retry decisions are not hard-coded into channel-neutral agent behavior.
 

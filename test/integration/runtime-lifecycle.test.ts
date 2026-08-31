@@ -4,11 +4,12 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import type { TestContext } from 'vitest';
 
 import { createApp } from '../../src/app.ts';
 import { createConfig, type AppConfig } from '../../src/config.ts';
+import { LocalMcpHost } from '../../src/mcp/local-host.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
@@ -26,7 +27,6 @@ function activeConfig(directory: string): AppConfig {
     WECOM_CORP_ID: 'ww-runtime',
     WECOM_KF_SECRET: 'runtime-secret',
     ILINK_ENABLED: 'false',
-    WECOM_MCP_BEARER_TOKEN: 'r'.repeat(32),
     WECOM_ALLOWED_USER_IDS: 'wm-runtime',
     WECOM_DB_FILE: path.join(directory, 'wecom.sqlite'),
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
@@ -41,10 +41,9 @@ test('disabled runtime exposes complete no-op lifecycle', async () => {
     WECOM_CALLBACK_TOKEN: 'RuntimeToken123',
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
   });
-  const runtime = createRuntime({ config, logger });
+  const runtime = await createRuntime({ config, logger });
   assert.equal(runtime.messageProcessor, null);
   await runtime.start();
-  assert.equal((await runtime.handleMcp(new Request('http://localhost/mcp'))).status, 503);
   runtime.stopAccepting();
   await runtime.abort();
   await runtime.close();
@@ -75,27 +74,23 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
   previous.close();
   const config = createConfig({
     ILINK_ENABLED: 'true',
-    HARNESS_MCP_BEARER_TOKEN: 'i'.repeat(32),
     HARNESS_DB_FILE: databaseFile,
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
   });
-  const runtime = createRuntime({ config, logger });
+  const runtime = await createRuntime({ config, logger });
   t.onTestFinished(() => runtime.close());
 
   assert.equal(runtime.messageProcessor, null);
   await runtime.start();
-  assert.equal((await runtime.handleMcp(new Request('http://localhost/mcp'))).status, 503);
-  assert.equal(
-    (await runtime.handleIlinkMcp(new Request('http://localhost/mcp/ilink'))).status,
-    401,
-  );
 
-  const app = createApp({ config, logger, runtime });
+  const app = createApp({ config, logger, messageProcessor: runtime.messageProcessor });
   const rootResponse = await app.request('/');
   assert.equal(await rootResponse.text(), 'hello world');
   assert.equal((await app.request('/', { method: 'POST' })).status, 404);
-  assert.equal((await app.request('/mcp/ilink', { method: 'POST' })).status, 401);
+  for (const route of ['/mcp', '/mcp/memory', '/mcp/ilink']) {
+    assert.equal((await app.request(route, { method: 'POST' })).status, 404);
+  }
   await runtime.close();
 
   const preserved = new SqliteStore({ filePath: databaseFile });
@@ -110,19 +105,10 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
   }, { live: 'received', deferred: true });
 });
 
-test('Hono remains a route adapter when no runtime is attached', async () => {
-  const config = createConfig({
-    WECOM_CALLBACK_TOKEN: 'RuntimeToken123',
-    WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
-  });
-  const app = createApp({ config, logger, messageProcessor: null });
-  assert.equal((await app.request('/mcp', { method: 'POST' })).status, 404);
-});
-
 test('active runtime stop/abort/close are safe and close releases the instance lock', async (t) => {
   const directory = await workspace(t);
   const config = activeConfig(directory);
-  const runtime = createRuntime({ config, logger });
+  const runtime = await createRuntime({ config, logger });
   assert.ok(runtime.messageProcessor);
   await runtime.start();
   assert.equal(await fs.stat(config.state.lockFile).then(() => true), true);
@@ -139,6 +125,19 @@ test('active runtime stop/abort/close are safe and close releases the instance l
   await firstClose;
   await assert.rejects(fs.access(config.state.lockFile), { code: 'ENOENT' });
   await runtime.close();
+});
+
+test('local MCP startup failure rolls back SQLite and the instance lock', async (t) => {
+  const directory = await workspace(t);
+  const config = activeConfig(directory);
+  const failed = vi.spyOn(LocalMcpHost.prototype, 'start')
+    .mockRejectedValue(new Error('local MCP bind failed'));
+  await assert.rejects(createRuntime({ config, logger }), /local MCP bind failed/u);
+  failed.mockRestore();
+  await assert.rejects(fs.access(config.state.lockFile), { code: 'ENOENT' });
+
+  const recovered = await createRuntime({ config, logger });
+  await recovered.close();
 });
 
 test('runtime readiness does not wait for a blocked startup catch-up backlog', async (t) => {
@@ -193,12 +192,11 @@ test('runtime readiness does not wait for a blocked startup catch-up backlog', a
     ILINK_ENABLED: 'false',
     WECOM_API_BASE_URL: `http://127.0.0.1:${address.port}`,
     WECOM_API_TIMEOUT_MS: '5000',
-    KINTIO_MCP_BEARER_TOKEN: 'r'.repeat(32),
     KINTIO_DB_FILE: databaseFile,
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
   });
-  const runtime = createRuntime({ config, logger });
+  const runtime = await createRuntime({ config, logger });
   t.onTestFinished(() => runtime.close());
 
   const started = runtime.start();

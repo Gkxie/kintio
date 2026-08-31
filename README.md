@@ -76,8 +76,8 @@ codex login status
 ```
 
 `kintio setup` creates a private instance under `~/.kintio`, installs the bundled Agent
-skill, and writes an environment file with a generated MCP token. POSIX systems use mode
-`0600`; Windows keeps the instance inside the current user's profile. No adapter is enabled
+skill, and writes the channel configuration template. POSIX systems use mode `0600`;
+Windows keeps the instance inside the current user's profile. No adapter is enabled
 by default. Follow the [setup guide](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)
 and edit `~/.kintio/.env` to configure one adapter:
 
@@ -105,9 +105,10 @@ process-manager migration described in the setup guide.
 
 - `.env`, SQLite databases, downloaded media, and local key files are ignored by Git and
   must never be force-added.
-- The Agent does not receive provider secrets, stable user identifiers, raw media IDs, or
-  database paths.
-- MCP endpoints require strong bearer tokens; non-loopback access must use HTTPS.
+- Kintio does not inject messaging-adapter secrets, stable user identifiers, raw media IDs,
+  or database paths into the Agent; host Agent credentials remain host-managed.
+- MCP is bound to an ephemeral IPv4 loopback port and is never exposed by public Hono;
+  every action still requires a short-lived conversation capability.
 - Project-level Agent capability restrictions are not an operating-system sandbox. Use a
   dedicated system account and additional isolation appropriate to the Agent's real powers.
 - A provider accepting an outbound request does not prove that a client displayed it;

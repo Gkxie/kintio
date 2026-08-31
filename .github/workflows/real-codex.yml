@@ -15,7 +15,8 @@ jobs:
     name: Approved synthetic smoke test
     if: >-
       github.repository == 'Gkxie/kintio' &&
-      github.ref == 'refs/heads/master' &&
+      (github.ref == 'refs/heads/master' ||
+      startsWith(github.ref, 'refs/heads/codex/')) &&
       github.actor == 'Gkxie' &&
       github.triggering_actor == 'Gkxie' &&
       github.run_attempt == 1
@@ -47,17 +48,40 @@ jobs:
           tar -xzf "$archive" -C "$RUNNER_TEMP/kintio-codex"
           test -x "$RUNNER_TEMP/kintio-codex/bin/codex"
           test "$("$RUNNER_TEMP/kintio-codex/bin/codex" --version)" = "codex-cli 0.151.0"
+          echo "$RUNNER_TEMP/kintio-codex/bin" >> "$GITHUB_PATH"
       - name: Prepare isolated Codex state
-        run: install -d -m 700 "$RUNNER_TEMP/kintio-codex-home"
+        env:
+          KINTIO_CI_BASE_URL: ${{ vars.KINTIO_CI_BASE_URL }}
+        run: |
+          test "$KINTIO_CI_BASE_URL" = "https://www.xieyu.chat"
+          install -d -m 700 "$RUNNER_TEMP/kintio-codex-home"
+          cat > "$RUNNER_TEMP/kintio-codex-home/config.toml" <<EOF
+          model_provider = "OpenAI"
+          model = "gpt-5.6-luna"
+          review_model = "gpt-5.6-luna"
+          model_reasoning_effort = "none"
+          disable_response_storage = true
+          network_access = "enabled"
+          windows_wsl_setup_acknowledged = true
+
+          [model_providers.OpenAI]
+          name = "OpenAI"
+          base_url = "$KINTIO_CI_BASE_URL"
+          wire_api = "responses"
+          requires_openai_auth = true
+
+          [features]
+          goals = true
+          EOF
+          chmod 600 "$RUNNER_TEMP/kintio-codex-home/config.toml"
+      - name: Authenticate isolated Codex host
+        env:
+          CODEX_HOME: ${{ runner.temp }}/kintio-codex-home
+          KINTIO_CI_API_KEY: ${{ secrets.KINTIO_CI_API_KEY }}
+        run: printf '%s' "$KINTIO_CI_API_KEY" | codex login --with-api-key
       - name: Run the fixed real Codex smoke test
         env:
           CODEX_HOME: ${{ runner.temp }}/kintio-codex-home
-          CODEX_MODEL: gpt-5.6-luna
-          CODEX_PATH: ${{ runner.temp }}/kintio-codex/bin/codex
-          CODEX_REASONING_EFFORT: none
-          CODEX_WEB_SEARCH_MODE: disabled
-          KINTIO_CI_API_KEY: ${{ secrets.KINTIO_CI_API_KEY }}
-          KINTIO_CI_BASE_URL: ${{ vars.KINTIO_CI_BASE_URL }}
           RUN_REAL_CODEX: 1
         run: >-
           pnpm exec vitest run

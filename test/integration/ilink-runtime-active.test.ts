@@ -9,7 +9,6 @@ import type {
   AgentCompletion,
   AgentInput,
 } from '../../src/agent/runtime.ts';
-import { createApp } from '../../src/app.ts';
 import { createConfig } from '../../src/config.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { IlinkSqliteStore } from '../../src/ilink/sqlite-store.ts';
@@ -20,6 +19,7 @@ import {
   IlinkMessageType,
 } from '../../src/ilink/protocol/types.ts';
 import { CodexAgent } from '../../src/services/codex-agent.ts';
+import { LocalMcpHost, type LocalMcpEndpoints } from '../../src/mcp/local-host.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { SqliteStore } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
@@ -92,13 +92,10 @@ async function fixture(t: TestContext) {
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
     WECOM_CORP_ID: 'ww-ilink-runtime',
     WECOM_KF_SECRET: 'wecom-must-not-connect',
-    WECOM_MCP_BEARER_TOKEN: 'i'.repeat(32),
     WECOM_ALLOWED_USER_IDS: 'wm-unrelated-user',
     WECOM_DB_FILE: temp.filePath,
-    CODEX_PATH: `${temp.directory}/codex-must-not-run`,
     CODEX_WORKING_DIRECTORY: `${temp.directory}/codex-workspace`,
     CODEX_IMAGE_TMP_DIR: `${temp.directory}/codex-images`,
-    CODEX_WEB_SEARCH_MODE: 'disabled',
     ILINK_ENABLED: 'true',
     ILINK_STORAGE_KEY: storageKey,
     ILINK_API_TIMEOUT_MS: '5000',
@@ -135,7 +132,7 @@ async function fixture(t: TestContext) {
   return { temp, config, accounts };
 }
 
-test('active runtime restores encrypted iLink listeners, commits and enqueues, routes MCP sends, and shuts down', async (t) => {
+test('active runtime restores iLink listeners, routes local MCP sends, and shuts down', async (t) => {
   const { temp, config, accounts } = await fixture(t);
   const reader = temp.open({ readOnly: true });
   let readerClosed = false;
@@ -189,9 +186,11 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     readonly authorization: string;
     readonly body: Record<string, unknown>;
   }> = [];
+  const nativeFetch = globalThis.fetch;
   const fetchImpl = vi.fn<typeof globalThis.fetch>(async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
+    if (url.hostname === '127.0.0.1') return nativeFetch(input, init);
     assert.equal(url.origin, 'https://ilinkai.weixin.qq.com');
     const authorization = request.headers.get('authorization') || '';
     const runtimeAccount = accounts.find(
@@ -273,8 +272,19 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     warn: (message: string) => loggerMessages.push(message),
     error: (message: string) => loggerMessages.push(message),
   };
-  const runtime = createRuntime({ config, logger });
-  const app = createApp({ config, logger, runtime });
+  let localEndpoints: LocalMcpEndpoints | undefined;
+  const originalStart = LocalMcpHost.prototype.start;
+  const startSpy = vi.spyOn(LocalMcpHost.prototype, 'start').mockImplementation(
+    function (this: LocalMcpHost) {
+      return originalStart.call(this).then((endpoints) => {
+        localEndpoints = endpoints;
+        return endpoints;
+      });
+    },
+  );
+  t.onTestFinished(() => startSpy.mockRestore());
+  const runtime = await createRuntime({ config, logger });
+  assert.ok(localEndpoints?.ilink);
   let shutDown = false;
   t.onTestFinished(async () => {
     closeReader();
@@ -287,10 +297,6 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     }
   });
 
-  assert.equal(
-    (await app.request('/mcp/ilink', { method: 'POST' })).status,
-    401,
-  );
   await bounded('runtime start', runtime.start());
   await bounded('second long poll', until(() => submissions.length === 2 &&
     accounts.every((value) => (pollCount.get(value.botToken) || 0) >= 2)));
@@ -344,21 +350,11 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
     );
   }
 
-  const bearerToken = config.wecom.mcp.bearerToken;
-  const transport = new StreamableHTTPClientTransport(
-    new URL('http://runtime.example/mcp/ilink'),
-    {
-      requestInit: {
-        headers: { Authorization: `Bearer ${bearerToken}` },
-      },
-      fetch: async (input, init) => app.request(new Request(input, init)),
-    },
-  );
   const mcp = new Client({ name: 'active-ilink-runtime-test', version: '1.0.0' });
-  await bounded(
-    'MCP connect',
-    mcp.connect(transport as unknown as Parameters<Client['connect']>[0]),
-  );
+  await bounded('MCP connect', mcp.connect(
+    new StreamableHTTPClientTransport(new URL(localEndpoints.ilink)) as unknown as
+      Parameters<Client['connect']>[0],
+  ));
   assert.deepEqual(
     (await mcp.listTools()).tools.map((tool) => tool.name),
     ['send_text', 'send_image'],
@@ -370,16 +366,13 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
       ({ input }) => input.message.text === `hello from ${value.name}`,
     );
     assert.ok(submission);
-    const result = await bounded(
-      `MCP send for ${value.name}`,
-      mcp.callTool({
-        name: 'send_text',
-        arguments: {
-          session: submission.input.toolSessionToken,
-          content: `reply to ${value.name}`,
-        },
-      }),
-    );
+    const result = await bounded(`MCP send for ${value.name}`, mcp.callTool({
+      name: 'send_text',
+      arguments: {
+        session: submission.input.toolSessionToken,
+        content: `reply to ${value.name}`,
+      },
+    }));
     const receipt = result.structuredContent as {
       status?: unknown;
       attemptId?: unknown;
@@ -433,15 +426,7 @@ test('active runtime restores encrypted iLink listeners, commits and enqueues, r
 
   closeReader();
   runtime.stopAccepting();
-  assert.equal(
-    (await app.request('/mcp/ilink', { method: 'POST' })).status,
-    401,
-  );
   await bounded('runtime close', runtime.close());
-  assert.equal(
-    (await app.request('/mcp/ilink', { method: 'POST' })).status,
-    503,
-  );
   shutDown = true;
   assert.deepEqual([...abortedPolls].sort(), accounts.map((value) => value.botToken).sort());
   assert.deepEqual([...lifecycleStops].sort(), accounts.map((value) => value.botToken).sort());

@@ -92,65 +92,6 @@ test('positive integer settings reject zero fractions and non-numbers', () => {
   );
 });
 
-test('project-only enum settings fail closed on unsupported values', () => {
-  for (const [name, value, pattern] of [
-    ['CODEX_REASONING_EFFORT', 'tiny', /CODEX_REASONING_EFFORT/u],
-    ['CODEX_WEB_SEARCH_MODE', 'sometimes', /CODEX_WEB_SEARCH_MODE/u],
-  ] as const) {
-    assert.throws(() => createConfig({ ...base, [name]: value }), pattern);
-  }
-  const config = createConfig({
-    ...base,
-    CODEX_REASONING_EFFORT: 'ultra',
-    CODEX_WEB_SEARCH_MODE: 'cached',
-  });
-  assert.equal(config.codex.reasoningEffort, 'ultra');
-  assert.equal(config.codex.webSearchMode, 'cached');
-});
-
-test('HTTP MCP URL and bearer token fail closed', () => {
-  const active = {
-    ...base,
-    WECOM_CORP_ID: 'ww-test',
-    WECOM_KF_SECRET: 'secret',
-    ILINK_ENABLED: 'false',
-  };
-  for (const token of ['', 'short', 'a'.repeat(129), `${'a'.repeat(31)}!`]) {
-    assert.throws(
-      () => createConfig({ ...active, KINTIO_MCP_BEARER_TOKEN: token }),
-      /MCP_BEARER_TOKEN/u,
-    );
-  }
-  for (const url of [
-    'not-a-url',
-    'ftp://example.com/mcp',
-    'https://user:pass@example.com/mcp',
-    'https://example.com/mcp?token=leaked',
-    'https://example.com/mcp#fragment',
-    'http://example.com/mcp',
-    'http://192.168.1.20/mcp',
-  ]) {
-    assert.throws(
-      () => createConfig({
-        ...active,
-        KINTIO_MCP_BEARER_TOKEN: 'a'.repeat(32),
-        KINTIO_MCP_URL: url,
-      }),
-      /MCP_URL/u,
-    );
-  }
-  assert.equal(createConfig({
-    ...active,
-    KINTIO_MCP_BEARER_TOKEN: 'a'.repeat(32),
-    KINTIO_MCP_URL: 'http://localhost:8888/mcp',
-  }).wecom.mcp.url, 'http://localhost:8888/mcp');
-  assert.equal(createConfig({
-    ...active,
-    KINTIO_MCP_BEARER_TOKEN: 'a'.repeat(32),
-    KINTIO_MCP_URL: 'https://chat.example.com/mcp',
-  }).wecom.mcp.url, 'https://chat.example.com/mcp');
-});
-
 test('iLink validates an explicit storage key and otherwise uses its private key file', () => {
   for (const key of ['short', 'a'.repeat(42), 'a'.repeat(44), `${'a'.repeat(42)}=`]) {
     assert.throws(
@@ -162,7 +103,6 @@ test('iLink validates an explicit storage key and otherwise uses its private key
     ...base,
     ILINK_ENABLED: 'true',
     ILINK_STORAGE_KEY: 'a'.repeat(43),
-    KINTIO_MCP_BEARER_TOKEN: 'b'.repeat(32),
   });
   assert.equal(config.ilink.enabled, true);
   assert.match(config.ilink.storageKeyFile, /ilink-storage\.key$/u);

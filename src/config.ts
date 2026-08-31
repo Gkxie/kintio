@@ -91,34 +91,8 @@ export function resolveStateFiles(
   });
 }
 
-const REASONING_EFFORTS = new Set([
-  'none',
-  'minimal',
-  'low',
-  'medium',
-  'high',
-  'xhigh',
-  'max',
-  'ultra',
-]);
-const WEB_SEARCH_MODES = new Set(['disabled', 'cached', 'live']);
-export type ReasoningEffort =
-  | 'none'
-  | 'minimal'
-  | 'low'
-  | 'medium'
-  | 'high'
-  | 'xhigh'
-  | 'max'
-  | 'ultra';
-type WebSearchMode = 'disabled' | 'cached' | 'live';
-
 export interface CodexConfig {
   readonly enabled: boolean;
-  readonly pathOverride: string;
-  readonly model: string;
-  readonly reasoningEffort: ReasoningEffort | undefined;
-  readonly webSearchMode: WebSearchMode;
   readonly imageTempDirectory: string;
   readonly workingDirectory: string;
   readonly generatedImageDirectory: string;
@@ -138,11 +112,6 @@ export interface AppConfig {
       readonly timeoutMs: number;
       readonly observeMs: number;
     };
-    readonly mcp: {
-      readonly url: string;
-      readonly memoryUrl: string;
-      readonly bearerToken: string;
-    };
     readonly allowedUserIds: readonly string[];
     readonly authorization: {
       readonly trigger: string;
@@ -158,7 +127,6 @@ export interface AppConfig {
     readonly apiTimeoutMs: number;
     readonly longPollTimeoutMs: number;
     readonly maxAccounts: number;
-    readonly mcpUrl: string;
   };
   readonly state: {
     readonly databaseFile: string;
@@ -234,21 +202,6 @@ function parsePositiveInteger(
   return parsed;
 }
 
-function parseOptionalEnum<T extends string>(
-  value: string | undefined,
-  allowedValues: ReadonlySet<string>,
-  name: string,
-  fallback?: T,
-): T | undefined {
-  const parsed = value || fallback;
-
-  if (parsed && !allowedValues.has(parsed)) {
-    throw new Error(`${name} has an unsupported value: ${parsed}`);
-  }
-
-  return (parsed || undefined) as T | undefined;
-}
-
 function parseAllowedUserIds(value: string | undefined): readonly string[] {
   const parsed =
     String(value || '')
@@ -320,57 +273,6 @@ export function createConfig(
   if (ilinkStorageKey && !/^[A-Za-z0-9_-]{43}$/u.test(ilinkStorageKey)) {
     throw new Error('ILINK_STORAGE_KEY must be a canonical 32-byte base64url value');
   }
-  const mcpBearerToken = String(
-    environment.KINTIO_MCP_BEARER_TOKEN ||
-    environment.TALKFERRY_MCP_BEARER_TOKEN ||
-    environment.HARNESS_MCP_BEARER_TOKEN ||
-    environment.WECOM_MCP_BEARER_TOKEN ||
-    '',
-  ).trim();
-  if (
-    (apiEnabled || ilinkEnabled) && codexEnabled &&
-    !/^[A-Za-z0-9_-]{32,128}$/u.test(mcpBearerToken)
-  ) {
-    throw new Error(
-      'KINTIO_MCP_BEARER_TOKEN must contain 32 to 128 URL-safe characters',
-    );
-  }
-  let mcpUrl: URL;
-  try {
-    mcpUrl = new URL(
-      environment.KINTIO_MCP_URL ||
-      environment.TALKFERRY_MCP_URL ||
-      environment.HARNESS_MCP_URL ||
-      environment.WECOM_MCP_URL ||
-      `http://127.0.0.1:${port}/mcp`,
-    );
-  } catch {
-    throw new Error('KINTIO_MCP_URL must be a valid HTTP(S) URL');
-  }
-  if (
-    !['http:', 'https:'].includes(mcpUrl.protocol) ||
-    mcpUrl.username || mcpUrl.password || mcpUrl.search || mcpUrl.hash
-  ) {
-    throw new Error(
-      'KINTIO_MCP_URL must be an HTTP(S) URL without credentials, query, or hash',
-    );
-  }
-  if (
-    mcpUrl.protocol === 'http:' &&
-    !['127.0.0.1', 'localhost', '[::1]'].includes(mcpUrl.hostname.toLowerCase())
-  ) {
-    throw new Error('KINTIO_MCP_URL requires HTTPS unless it uses a loopback host');
-  }
-  const memoryMcpUrl = new URL(mcpUrl);
-  memoryMcpUrl.pathname = `${mcpUrl.pathname.replace(/\/+$/u, '')}/memory`;
-  const ilinkMcpUrl = new URL(mcpUrl);
-  ilinkMcpUrl.pathname = `${mcpUrl.pathname.replace(/\/+$/u, '')}/ilink`;
-  const webSearchMode = parseOptionalEnum<WebSearchMode>(
-    environment.CODEX_WEB_SEARCH_MODE,
-    WEB_SEARCH_MODES,
-    'CODEX_WEB_SEARCH_MODE',
-    'live',
-  );
   const { databaseFile, lockFile } = resolveStateFiles(environment, instanceRoot);
   const codexWorkingDirectory = path.resolve(
     instanceRoot,
@@ -411,11 +313,6 @@ export function createConfig(
           'WECOM_MCP_OBSERVE_MS',
           20_000,
         ),
-      }),
-      mcp: Object.freeze({
-        url: mcpUrl.toString(),
-        memoryUrl: memoryMcpUrl.toString(),
-        bearerToken: mcpBearerToken,
       }),
       allowedUserIds: parseAllowedUserIds(environment.WECOM_ALLOWED_USER_IDS),
       authorization: Object.freeze({
@@ -465,7 +362,6 @@ export function createConfig(
         'ILINK_MAX_ACCOUNTS',
         1_000,
       ),
-      mcpUrl: ilinkMcpUrl.toString(),
     }),
     state: Object.freeze({
       databaseFile,
@@ -474,15 +370,6 @@ export function createConfig(
     }),
     codex: Object.freeze({
       enabled: codexEnabled,
-      pathOverride: environment.CODEX_PATH || 'codex',
-      model: environment.CODEX_MODEL || '',
-      reasoningEffort: parseOptionalEnum<ReasoningEffort>(
-        environment.CODEX_REASONING_EFFORT,
-        REASONING_EFFORTS,
-        'CODEX_REASONING_EFFORT',
-        undefined,
-      ),
-      webSearchMode: webSearchMode ?? 'live',
       imageTempDirectory: path.resolve(
         instanceRoot,
         environment.CODEX_IMAGE_TMP_DIR ||

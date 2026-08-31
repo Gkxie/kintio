@@ -175,7 +175,6 @@ test('API acceptance and customer observation remain distinct image facts', asyn
   const agent = new CodexAgent({
     codex: boundary,
     config: {
-      model: 'gpt-channel', reasoningEffort: 'none',
       workingDirectory: directory, imageTempDirectory: directory,
       generatedImageDirectory: path.join(directory, 'generated'),
     },

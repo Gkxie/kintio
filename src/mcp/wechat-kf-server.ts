@@ -252,15 +252,12 @@ export function createWechatKfMcpServer(executor: ToolExecutor): McpServer {
 export async function handleWechatKfMcpRequest({
   request,
   executor,
-  bearerToken,
 }: {
   request: Request;
   executor: ToolExecutor;
-  bearerToken: string;
 }): Promise<Response> {
   return handleMcpHttpRequest({
     request,
-    bearerToken,
     createServer: () => createWechatKfMcpServer(executor),
   });
 }

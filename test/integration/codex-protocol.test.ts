@@ -56,9 +56,9 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
   const requests: RpcMessage[] = [];
   let child!: FakeCodexProcess;
   const spawnProcess = ((command: string, args: readonly string[], options: unknown) => {
-    assert.equal(command, '/mock/codex');
+    assert.equal(command, 'codex');
     assert.ok(args.includes('app-server'));
-    assert.ok(JSON.stringify(options).includes('PATH'));
+    assert.deepEqual(options, { stdio: ['pipe', 'pipe', 'pipe'] });
     child = new FakeCodexProcess((message, process) => {
       requests.push(message);
       if (message.method === 'initialize') {
@@ -76,15 +76,11 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
     return child as unknown as ReturnType<SpawnProcess>;
   }) as SpawnProcess;
   const server = new CodexAppServer({
-    codexPathOverride: '/mock/codex',
-    env: { PATH: '/usr/bin' },
     configOverrides: ['tools.web_search=true', 'mcp_servers={}'],
     spawnProcess,
     logger: { warn() {} },
   });
   const thread = server.startThread({
-    model: 'gpt-test',
-    modelReasoningEffort: 'low',
     developerInstructions: 'fixed channel policy',
     workingDirectory: '/workspace',
     approvalPolicy: 'never',
@@ -157,8 +153,8 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
   const start = requests.find((message) => message.method === 'turn/start');
   const threadStart = requests.find((message) => message.method === 'thread/start');
   const steer = requests.find((message) => message.method === 'turn/steer');
-  assert.equal((start?.params as RpcMessage).model, 'gpt-test');
-  assert.equal((start?.params as RpcMessage).effort, 'low');
+  assert.equal('model' in (start?.params as RpcMessage), false);
+  assert.equal('effort' in (start?.params as RpcMessage), false);
   assert.equal(
     (threadStart?.params as RpcMessage).developerInstructions,
     'fixed channel policy',
@@ -173,20 +169,23 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
   await server.close();
 });
 
-test('invalid JSON rejects initialization and terminates the child process', async () => {
+test('invalid JSON suppresses raw input and terminates the child process', async () => {
   let child!: FakeCodexProcess;
   const spawnProcess = (() => {
     child = new FakeCodexProcess((message, process) => {
       if (message.method === 'initialize') {
-        process.send({ id: message.id, result: { userAgent: 'mock' } });
+        process.sendRaw('{"invalid-secret-canary"');
       }
     });
     return child as unknown as ReturnType<SpawnProcess>;
   }) as SpawnProcess;
   const server = new CodexAppServer({ spawnProcess });
-  await server.initialize();
-  child.sendRaw('{not-json');
-  await new Promise<void>((resolve) => child.once('exit', () => resolve()));
-  assert.equal(child.killedWith, 'SIGTERM');
+  await assert.rejects(
+    server.initialize(),
+    (error: unknown) => error instanceof Error &&
+      error.message === 'Invalid JSON from Codex app-server' &&
+      !error.message.includes('invalid-secret-canary'),
+  );
   await server.close();
+  assert.equal(child.killedWith, 'SIGTERM');
 });

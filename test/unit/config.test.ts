@@ -27,7 +27,6 @@ test('.env.example is safe to copy before choosing a channel', async () => {
   assert.equal(config.wecom.encodingAesKey, '');
   assert.equal(config.wecom.api.enabled, false);
   assert.equal(config.ilink.enabled, false);
-  assert.equal(config.wecom.mcp.bearerToken, '');
 });
 
 describe('independent channel activation', () => {
@@ -36,11 +35,7 @@ describe('independent channel activation', () => {
     const talkFerryDatabase = path.join(os.tmpdir(), 'talkferry-test.sqlite');
     const config = createConfig({
       ILINK_ENABLED: 'true',
-      KINTIO_MCP_BEARER_TOKEN: 'i'.repeat(32),
-      KINTIO_MCP_URL: 'https://chat.example.com/mcp',
       KINTIO_DB_FILE: kintioDatabase,
-      TALKFERRY_MCP_BEARER_TOKEN: 't'.repeat(32),
-      TALKFERRY_MCP_URL: 'https://legacy-talkferry.example.com/mcp',
       TALKFERRY_DB_FILE: talkFerryDatabase,
     });
 
@@ -49,7 +44,6 @@ describe('independent channel activation', () => {
     assert.equal(config.wecom.encodingAesKey, '');
     assert.equal(config.ilink.enabled, true);
     assert.equal(config.codex.enabled, true);
-    assert.equal(config.wecom.mcp.url, 'https://chat.example.com/mcp');
     assert.equal(config.state.databaseFile, kintioDatabase);
     assert.equal(config.state.lockFile, path.join(os.tmpdir(), 'kintio.lock'));
   });
@@ -58,12 +52,10 @@ describe('independent channel activation', () => {
     assert.throws(() => createConfig({
       WECOM_CORP_ID: 'ww-explicit-channel',
       WECOM_KF_SECRET: 'secret',
-      KINTIO_MCP_BEARER_TOKEN: 'k'.repeat(32),
     }), /ILINK_ENABLED must be explicitly true or false/u);
     const config = createConfig({
       WECOM_CORP_ID: 'ww-explicit-channel',
       WECOM_KF_SECRET: 'secret',
-      KINTIO_MCP_BEARER_TOKEN: 'k'.repeat(32),
       ILINK_ENABLED: 'false',
     });
     assert.equal(config.wecom.api.enabled, true);
@@ -223,8 +215,6 @@ test('message processing remains disabled until CorpID and Secret are present', 
   assert.equal(config.codex.enabled, false);
   assert.equal(config.ilink.enabled, false);
   assert.equal(config.ilink.baseUrl, 'https://ilinkai.weixin.qq.com/');
-  assert.equal(config.ilink.mcpUrl, 'http://127.0.0.1:8888/mcp/ilink');
-  assert.equal(config.codex.webSearchMode, 'live');
   assert.equal(path.basename(config.codex.imageTempDirectory), 'codex-input');
   assert.equal(path.basename(path.dirname(config.codex.imageTempDirectory)), 'data');
   assert.equal(
@@ -250,18 +240,15 @@ test('CorpID and WeChat KF Secret must be configured together', () => {
   );
 });
 
-test('allowed users and safe Codex defaults are parsed', () => {
+test('allowed users and channel runtime defaults are parsed', () => {
   const config = createConfig({
     ...callbackEnvironment,
     WECOM_CORP_ID: 'ww-test',
     WECOM_KF_SECRET: 'secret',
-    KINTIO_MCP_BEARER_TOKEN: 'a'.repeat(32),
     WECOM_ALLOWED_USER_IDS: 'wm-one, wm-two',
     WECOM_AUTH_TRIGGER: '发车',
     WECOM_AUTH_TRIGGER_COUNT: '3',
     WECOM_AUTH_CONFIRMATION: '暗号确认，请继续对话',
-    CODEX_MODEL: 'gpt-5.6-luna',
-    CODEX_REASONING_EFFORT: 'none',
     ILINK_ENABLED: 'true',
     ILINK_STORAGE_KEY: 'i'.repeat(43),
   });
@@ -269,9 +256,6 @@ test('allowed users and safe Codex defaults are parsed', () => {
   assert.equal(config.wecom.api.enabled, true);
   assert.equal(config.wecom.api.observeMs, 5_000);
   assert.equal(config.wecom.api.baseUrl, 'https://qyapi.weixin.qq.com');
-  assert.equal(config.wecom.mcp.url, 'http://127.0.0.1:8888/mcp');
-  assert.equal(config.wecom.mcp.memoryUrl, 'http://127.0.0.1:8888/mcp/memory');
-  assert.equal(config.wecom.mcp.bearerToken, 'a'.repeat(32));
   assert.deepEqual(config.wecom.allowedUserIds, ['wm-one', 'wm-two']);
   assert.equal(config.wecom.authorization.trigger, '发车');
   assert.equal(config.wecom.authorization.requiredConsecutive, 3);
@@ -281,27 +265,19 @@ test('allowed users and safe Codex defaults are parsed', () => {
   );
   assert.equal(config.codex.enabled, true);
   assert.equal(config.wecom.expectedReceiveId, 'ww-test');
-  assert.equal(config.codex.webSearchMode, 'live');
-  assert.equal(config.codex.pathOverride, 'codex');
-  assert.equal(config.codex.model, 'gpt-5.6-luna');
-  assert.equal(config.codex.reasoningEffort, 'none');
   assert.equal(config.ilink.enabled, true);
   assert.equal(config.ilink.storageKey, 'i'.repeat(43));
   assert.equal(config.ilink.longPollTimeoutMs, 35_000);
   assert.equal(config.ilink.maxAccounts, 20);
 });
 
-test('legacy harness MCP and database aliases remain compatible', () => {
+test('legacy harness database alias remains compatible', () => {
   const databaseFile = path.join(os.tmpdir(), 'legacy-kintio.sqlite');
   const config = createConfig({
     ILINK_ENABLED: 'true',
-    HARNESS_MCP_BEARER_TOKEN: 'l'.repeat(32),
-    HARNESS_MCP_URL: 'https://legacy.example.com/mcp',
     HARNESS_DB_FILE: databaseFile,
   });
 
-  assert.equal(config.wecom.mcp.bearerToken, 'l'.repeat(32));
-  assert.equal(config.wecom.mcp.url, 'https://legacy.example.com/mcp');
   assert.equal(config.state.databaseFile, databaseFile);
   assert.equal(config.state.lockFile, path.join(os.tmpdir(), 'wecom.lock'));
 });
@@ -310,13 +286,9 @@ test('TalkFerry configuration aliases remain compatible for upgrades', () => {
   const databaseFile = path.join(os.tmpdir(), 'talkferry-state.sqlite');
   const config = createConfig({
     ILINK_ENABLED: 'true',
-    TALKFERRY_MCP_BEARER_TOKEN: 't'.repeat(32),
-    TALKFERRY_MCP_URL: 'https://talkferry.example.com/mcp',
     TALKFERRY_DB_FILE: databaseFile,
   });
 
-  assert.equal(config.wecom.mcp.bearerToken, 't'.repeat(32));
-  assert.equal(config.wecom.mcp.url, 'https://talkferry.example.com/mcp');
   assert.equal(config.state.databaseFile, databaseFile);
   assert.equal(config.state.lockFile, path.join(os.tmpdir(), 'talkferry.lock'));
 });

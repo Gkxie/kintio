@@ -120,7 +120,6 @@ test('generated image flows through the channel runtime and a same-thread delta 
   const agent = new CodexAgent({
     codex: boundary,
     config: {
-      model: 'gpt-image-test', reasoningEffort: 'none',
       workingDirectory: directory, imageTempDirectory: directory,
       generatedImageDirectory: generatedDirectory,
     },

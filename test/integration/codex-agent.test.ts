@@ -137,8 +137,6 @@ function createAgent(
   const agent = new CodexAgent({
     codex: boundary,
     config: {
-      model: 'gpt-project',
-      reasoningEffort: 'low',
       workingDirectory: '/isolated-codex-workspace',
       imageTempDirectory: config.imageTempDirectory || os.tmpdir(),
       generatedImageDirectory: config.generatedImageDirectory || '',
@@ -148,7 +146,7 @@ function createAgent(
   return agent;
 }
 
-test('passes project model/effort and treats customer observation independently of accepted', async (t) => {
+test('does not override host model or effort and keeps customer observation independent', async (t) => {
   const boundary = new FakeBoundary([
     { items: [executedText('answer', 'sa_project_config', 1)] },
   ]);
@@ -165,14 +163,13 @@ test('passes project model/effort and treats customer observation independently 
     workingDirectory: '/isolated-codex-workspace',
     approvalPolicy: 'never',
     developerInstructions: boundary.startOptions[0]?.developerInstructions,
-    model: 'gpt-project',
-    modelReasoningEffort: 'low',
   }]);
   assert.match(
     boundary.startOptions[0]?.developerInstructions || '',
     /Never read.*local files.*Never access localhost/su,
   );
   assert.deepEqual(completed.executedAttemptIds, ['sa_project_config']);
+  assert.match(String(boundary.runCalls[0]?.input), /Follow \$wechat-kf-reply-sop/u);
   assert.match(String(boundary.runCalls[0]?.input), /participant explicitly commented/u);
   assert.equal(submission.threadId, 'thread-test');
 });
@@ -668,6 +665,8 @@ test('a durable iLink window rejection completes without a format retry', async 
     executedAttemptIds: ['sa_ilink_quota_rejected'],
   });
   assert.equal(boundary.runCalls.length, 1);
+  assert.match(String(boundary.runCalls[0]?.input), /weixin_ilink tools/u);
+  assert.doesNotMatch(String(boundary.runCalls[0]?.input), /wechat-kf-reply-sop/u);
 });
 
 test('transport-closed execution is never reconstructed into a duplicate host send', async (t) => {

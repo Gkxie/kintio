@@ -1,11 +1,8 @@
 import assert from 'node:assert/strict';
-import { once } from 'node:events';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { test } from 'vitest';
-import { serve } from '@hono/node-server';
-import { Hono } from 'hono';
 
 import { loadConfig } from '../../src/config.ts';
 import { CodexAgent, createCodexAppServer } from '../../src/services/codex-agent.ts';
@@ -16,6 +13,7 @@ import {
   ConversationMemoryExecutor,
   handleConversationMemoryMcpRequest,
 } from '../../src/mcp/conversation-memory-server.ts';
+import { LocalMcpHost } from '../../src/mcp/local-host.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
 import { WecomApiClient } from '../../src/services/wecom-api.ts';
 import { WecomSync } from '../../src/services/wecom-sync.ts';
@@ -58,45 +56,21 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
     mediaGateway,
     observeMs: config.wecom.api.observeMs,
   });
-  const mcpApp = new Hono();
   let memoryExecutor: ConversationMemoryExecutor | undefined;
-  mcpApp.all('/mcp', (context) => handleWechatKfMcpRequest({
-    request: context.req.raw,
-    executor: channel,
-    bearerToken: config.wecom.mcp.bearerToken,
-  }));
-  mcpApp.all('/mcp/memory', async (context) => memoryExecutor
-    ? await handleConversationMemoryMcpRequest({
-        request: context.req.raw,
+  const localMcp = new LocalMcpHost({
+    wechatKf: (request) => handleWechatKfMcpRequest({ request, executor: channel }),
+    memory: async (request) => memoryExecutor
+      ? await handleConversationMemoryMcpRequest({
+        request,
         executor: memoryExecutor,
-        bearerToken: config.wecom.mcp.bearerToken,
       })
-    : context.json({ error: 'not ready' }, 503));
-  const mcpHttp = serve({ fetch: mcpApp.fetch, hostname: '127.0.0.1', port: 0 });
-  await once(mcpHttp, 'listening');
-  const mcpAddress = mcpHttp.address();
-  if (!mcpAddress || typeof mcpAddress === 'string') {
-    throw new Error('Live MCP server did not bind a TCP port');
-  }
-  const codex = createCodexAppServer({
-      pathOverride: config.codex.pathOverride,
-      webSearchMode: config.codex.webSearchMode,
-      workingDirectory: config.codex.workingDirectory,
-    }, {
-      mcpUrl: `http://127.0.0.1:${mcpAddress.port}/mcp`,
-      memoryMcpUrl: `http://127.0.0.1:${mcpAddress.port}/mcp/memory`,
-      mcpBearerToken: config.wecom.mcp.bearerToken,
-    });
+      : Response.json({ error: 'not ready' }, { status: 503 }),
+  });
+  const codex = createCodexAppServer({ mcpEndpoints: await localMcp.start() });
   memoryExecutor = new ConversationMemoryExecutor({ store, threads: codex });
   const agent = new CodexAgent({
     codex,
-    config: {
-      model: config.codex.model,
-      reasoningEffort: config.codex.reasoningEffort,
-      workingDirectory: config.codex.workingDirectory,
-      imageTempDirectory: config.codex.imageTempDirectory,
-      generatedImageDirectory: config.codex.generatedImageDirectory,
-    },
+    config: config.codex,
   });
   const processor = new ConversationProcessor({
     store,
@@ -148,8 +122,7 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
     } finally {
       await processor.close();
       await channel.close();
-      mcpHttp.close();
-      await once(mcpHttp, 'close');
+      await localMcp.close();
       store.close();
       await fs.rm(directory, { recursive: true, force: true });
     }
