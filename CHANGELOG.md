@@ -4,6 +4,10 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Disabled persisted Codex Goals and multi-agent tools inside untrusted channel
+  sessions so conversation work cannot outlive its bounded turn or expand into
+  background Agent execution
+  ([#38](https://github.com/Gkxie/kintio/issues/38)).
 - Made `~/.kintio` the single default mutable instance root for global and
   direct Worker entry points, hardened foreground and daemon-first crash cleanup,
   and constrained Windows-owned state to the selected Profile instance without

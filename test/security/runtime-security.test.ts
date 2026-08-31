@@ -107,8 +107,10 @@ test('Codex Adapter uses native environment inheritance without adding Agent con
     'mcp_servers.conversation_memory.enabled_tools=["read_archived_thread"]',
   ));
   assert.ok(captured.argumentsList.includes('features.apps=false'));
+  assert.ok(captured.argumentsList.includes('features.goals=false'));
   assert.ok(captured.argumentsList.includes('features.code_mode.enabled=false'));
   assert.ok(captured.argumentsList.includes('features.hooks=false'));
+  assert.ok(captured.argumentsList.includes('features.multi_agent=false'));
   assert.ok(captured.argumentsList.includes('features.unified_exec=false'));
   assert.ok(
     captured.argumentsList.includes('sandbox_workspace_write.network_access=false'),
