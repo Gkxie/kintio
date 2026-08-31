@@ -12,7 +12,7 @@ Requirements:
 - an HTTPS domain reverse-proxied to `127.0.0.1:8888` when using the WeChat KF callback adapter.
 
 ```bash
-npm install --global kintio
+npm install --global @kin-tio/cli
 kintio setup
 codex login status
 ```
@@ -220,13 +220,13 @@ process never refers to files being changed in place:
 
 ```bash
 kintio stop
-npm install --global kintio@latest
+npm install --global @kin-tio/cli@latest
 kintio --version
 kintio start
 ```
 
 To remove the command, run `kintio stop` and then `npm uninstall --global
-kintio`. The instance under `~/.kintio` is retained by default so uninstalling
+@kin-tio/cli`. The instance under `~/.kintio` is retained by default so uninstalling
 the package does not silently delete configuration, conversations, or media.
 
 Each instance keeps its daemon identity, private control capability, and rotated

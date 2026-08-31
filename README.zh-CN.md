@@ -40,7 +40,7 @@
 受支持适配器的凭据。
 
 ```bash
-npm install --global kintio
+npm install --global @kin-tio/cli
 kintio setup
 codex login status
 ```

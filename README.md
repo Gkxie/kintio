@@ -64,7 +64,7 @@ Prerequisites:
 - credentials for at least one supported adapter.
 
 ```bash
-npm install --global kintio
+npm install --global @kin-tio/cli
 kintio setup
 codex login status
 ```
