@@ -27,6 +27,17 @@ jobs:
       - run: pnpm exec tsc -p tsconfig.test.json
       - run: KNIP_DISABLE_RAW_TRANSFER=1 pnpm exec knip
       - run: pnpm run build
+      - name: Install the exact npm tarball
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-package"
+          npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP/npm-package" > "$RUNNER_TEMP/npm-pack.json"
+          package_file=$(node --input-type=module -e "import fs from 'node:fs'; const [packed]=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); if (!packed?.filename) throw new Error('npm pack returned no file'); process.stdout.write(packed.filename)" "$RUNNER_TEMP/npm-pack.json")
+          package_version=$(node --input-type=module -e "import fs from 'node:fs'; process.stdout.write(JSON.parse(fs.readFileSync('package.json','utf8')).version)")
+          npm install --global --prefix "$RUNNER_TEMP/kintio-global" "$RUNNER_TEMP/npm-package/$package_file" --ignore-scripts --no-audit --no-fund --registry https://registry.npmjs.org/
+          test "$("$RUNNER_TEMP/kintio-global/bin/kintio" --version)" = "$package_version"
+          HOME="$RUNNER_TEMP/kintio-profile" "$RUNNER_TEMP/kintio-global/bin/kintio" setup
+          test -f "$RUNNER_TEMP/kintio-profile/.kintio/.env"
+          test -f "$RUNNER_TEMP/kintio-profile/.kintio/codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md"
 
   platform-tests:
     name: Tests (${{ matrix.os }})

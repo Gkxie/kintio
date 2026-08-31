@@ -209,15 +209,12 @@ Kintio uses SemVer and `vX.Y.Z` Git tags. During `0.x`:
 - **`1.0.0`:** reserved for stable public interfaces and an established upgrade
   policy.
 
-Kintio is a self-hosted application. `private: true` prevents accidental npm
-registry publication. The package manifest still defines the global CLI and an
-explicit file allowlist so a checked-out source tree can be built and installed
-locally without exposing tests, repository automation, or runtime state. Public
-npm publication requires a separate reviewed release design and trusted
-publisher configuration; do not remove the guard merely to test the CLI.
-GitHub releases remain source-only and carry no uploaded assets. The release
-workflow refuses any pre-existing Release for the tag instead of publishing or
-trusting content that it did not create.
+Kintio is published as the public `kintio` package on the official npm
+Registry. The manifest's explicit file allowlist excludes tests, repository
+automation, source-only files, and runtime state. npm publication is currently
+an intentional Maintainer action from a clean, reviewed release commit using
+account 2FA; do not store a publish token in the repository. GitHub releases
+remain source-only and carry no uploaded assets.
 
 ## Publish a release
 
@@ -226,9 +223,25 @@ trusting content that it did not create.
 3. Move the relevant entries under `## Unreleased` in `CHANGELOG.md` into
    `## X.Y.Z - YYYY-MM-DD`. Include only user-observable changes, and reference
    public issues or PRs where useful.
-4. Run `pnpm test`. After merging, wait for CI and Gitleaks to pass on the release
-   commit.
-5. Create and push an annotated tag from the latest `master`:
+4. Run `pnpm test` and inspect `npm pack --dry-run`. Before merging, wait for
+   every required PR check, including CI and Gitleaks. After merging, confirm
+   that `master` points to the reviewed squash commit and wait for CodeQL.
+5. From that clean `master` commit, build and publish the exact tarball:
+
+   ```bash
+   test -z "$(git status --short)"
+   pnpm install --frozen-lockfile
+   pnpm test
+   pnpm run build
+   npm pack --json --ignore-scripts
+   npm publish ./kintio-X.Y.Z.tgz --access public
+   npm view kintio@X.Y.Z dist.integrity
+   ```
+
+   Account 2FA is required. Confirm a clean-prefix Registry installation reports
+   the exact version before continuing. If the package name becomes occupied
+   before the first publish, stop and select a reviewed replacement in a new PR.
+6. Create and push an annotated tag from the latest `master`:
 
    ```bash
    git tag -a vX.Y.Z -m "vX.Y.Z"
@@ -238,12 +251,12 @@ trusting content that it did not create.
    Once pushed, a release tag must never be deleted, moved, or reused, even if
    the release workflow fails.
 
-6. The release workflow's read-only job rechecks version monotonicity, the
+7. The release workflow's read-only job rechecks version monotonicity, the
    Changelog, source commit, tests, build, and dependencies. A separate job with
    minimal write permission then publishes the GitHub Release. Pushing the tag
    is the final release action, so Release Notes must already have been reviewed
    in the version PR.
-7. Confirm that [SECURITY.md](SECURITY.md) lists the supported release line.
+8. Confirm that [SECURITY.md](SECURITY.md) lists the supported release line.
    Close linked issues only after the release is downloadable.
 
 Rerun the original workflow after a transient infrastructure failure only when
@@ -252,6 +265,12 @@ Release exists, verify it instead of rerunning the workflow. If code must change
 keep the failed tag, increment to a new Patch version, and carry forward every
 Changelog entry that has never been published. Never rewrite a public Release;
 publish a new Patch release instead.
+
+An npm version is also immutable. Do not unpublish or overwrite a defective
+version; deprecate it with an actionable upgrade message and publish a fixed
+Patch. For a severe regression, a 2FA-authenticated Maintainer may temporarily
+move the `latest` dist-tag to the last known-good version while preparing the
+fix.
 
 ## Public repository checks
 

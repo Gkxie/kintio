@@ -73,15 +73,22 @@ test('package, release version, and public entry points stay aligned', async () 
     name?: string;
     version?: string;
     private?: boolean;
+    author?: string;
     license?: string;
     bin?: Record<string, string>;
     files?: string[];
     scripts?: Record<string, string>;
     repository?: { url?: string };
+    publishConfig?: { access?: string; registry?: string };
   };
   assert.equal(packageJson.name, 'kintio');
   assert.match(packageJson.version || '', /^0\.\d+\.\d+$/u);
-  assert.equal(packageJson.private, true);
+  assert.notEqual(packageJson.private, true);
+  assert.equal(packageJson.author, 'XIE YU');
+  assert.deepEqual(packageJson.publishConfig, {
+    access: 'public',
+    registry: 'https://registry.npmjs.org/',
+  });
   assert.equal(packageJson.license, 'Apache-2.0');
   assert.equal(packageJson.bin?.kintio, 'bin/kintio.js');
   assert.equal(packageJson.scripts?.prepack, 'pnpm run build');
@@ -90,15 +97,18 @@ test('package, release version, and public entry points stay aligned', async () 
     /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u.exec(runtimeVersion)?.[1],
     packageJson.version,
   );
-  for (const file of [
-    'dist',
-    'bin/kintio.js',
-    'assets/ilink-login-card.png',
+  assert.deepEqual(packageJson.files?.toSorted(), [
     '.env.example',
+    'CHANGELOG.md',
+    'LICENSE',
+    'README.md',
+    'README.zh-CN.md',
+    'THIRD_PARTY_NOTICES',
+    'assets/ilink-login-card.png',
+    'bin/kintio.js',
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
-  ]) {
-    assert.equal(packageJson.files?.includes(file), true, `missing package file ${file}`);
-  }
+    'dist',
+  ].toSorted());
   assert.match(license, /Apache License\s+Version 2\.0/iu);
   assert.match(cla, /Project Owner[^\n]+XIE YU/su);
   const ignored = new Set(gitignore.split(/\r?\n/u));
@@ -107,8 +117,11 @@ test('package, release version, and public entry points stay aligned', async () 
   }
   for (const file of ['README.md', 'README.zh-CN.md']) {
     const readme = await read(file);
+    const installIndex = readme.indexOf('npm install --global kintio');
     const setupIndex = readme.indexOf('kintio setup');
+    assert.notEqual(installIndex, -1);
     assert.notEqual(setupIndex, -1);
+    assert.ok(installIndex < setupIndex);
     assert.ok(readme.indexOf('kintio start', setupIndex) > setupIndex);
   }
 });
@@ -158,6 +171,8 @@ test('repository workflows preserve executable security boundaries', async () =>
     'pnpm exec tsc -p tsconfig.test.json',
     'KNIP_DISABLE_RAW_TRANSFER=1 pnpm exec knip',
     'pnpm run build',
+    'npm pack --json --ignore-scripts',
+    'npm install --global',
     'pnpm test',
   ]) assert.ok(ci.includes(command), command);
   for (const operatingSystem of [
