@@ -184,8 +184,8 @@ export function createCodexAppServer(
     'agents.enabled=false',
     'allow_login_shell=false',
     ...[
-      'apps', 'hooks', 'memories', 'remote_plugin', 'shell_tool',
-      'skill_mcp_dependency_install', 'unified_exec',
+      'apps', 'goals', 'hooks', 'memories', 'multi_agent', 'remote_plugin',
+      'shell_tool', 'skill_mcp_dependency_install', 'unified_exec',
     ].map((feature) => `features.${feature}=false`),
     'features.code_mode.enabled=false',
     'shell_environment_policy={inherit="none"}',
