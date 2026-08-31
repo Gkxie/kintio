@@ -185,6 +185,35 @@ test('unlinked startup messages stay independent even across one conversation', 
   });
 });
 
+test('damaged recovery payload is quarantined without blocking later input', async (t) => {
+  const active = await harness(t);
+  const damaged = seed(active.store, 'damaged-primary', 'processing');
+  active.store.database.prepare(`
+    UPDATE inbound_messages
+    SET payload_json = json_set(payload_json, '$.conversation.channel', 'weixin_ilink')
+    WHERE message_key = ?
+  `).run(damaged);
+  const later = active.store.ingestSyncPage({
+    openKfId: 'wk-recovery',
+    expectedCursor: active.store.getCursor('wk-recovery'),
+    nextCursor: 'after-damaged',
+    messages: [testWecomMessage({
+      id: 'after-damaged',
+      openKfId: 'wk-recovery',
+      externalUserId: 'wm-recovery',
+      text: '继续处理正常消息',
+    })],
+  }).insertedMessageKeys[0]!;
+
+  await active.processor.recover(active.store.recoverStartup().inbound);
+  await active.processor.waitForIdle();
+
+  assert.equal(active.store.getInbound(damaged)?.status, 'suppressed');
+  assert.equal(active.store.getInbound(later)?.status, 'completed');
+  assert.equal(active.rawAgent.inputs.length, 1);
+  assert.equal(active.sends.length, 1);
+});
+
 test('archived recovery exposes old ID to the new turn and clears it after completion', async (t) => {
   const active = await harness(t);
   const messageKey = seed(active.store, 'archived-memory', 'processing');

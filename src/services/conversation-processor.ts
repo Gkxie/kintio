@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto';
 
 import {
+  COMMON_MESSAGE_TYPES,
   MESSAGE_ORIGINS,
-  MESSAGE_TYPES,
-  isSupportedCustomerMessage,
-  renderMessageForCodex,
-} from '../domain/wecom-message.ts';
+  isProcessableCustomerMessage,
+  isSystemEvent,
+  renderMessageForAgent,
+} from '../domain/message.ts';
 import type {
   ChatChannel,
   Logger,
@@ -70,6 +71,8 @@ function errorMessage(error: unknown): string {
 function messageFromRecord(record: InboundRecord): ChannelMessage {
   const payload = (record.payload || {}) as unknown as Partial<NormalizedMessage>;
   if (
+    (payload.conversation?.channel &&
+      payload.conversation.channel !== record.channel) ||
     (payload.conversation?.accountKey &&
       payload.conversation.accountKey !== record.openKfId) ||
     (payload.conversation?.peerId &&
@@ -87,7 +90,7 @@ function messageFromRecord(record: InboundRecord): ChannelMessage {
     sentAt: record.sentAt,
     sync: payload.sync || { cursor: '', index: 0 },
     conversation: {
-      channel: (payload.conversation?.channel || 'wechat_kf') as ChatChannel,
+      channel: record.channel,
       accountKey: record.openKfId,
       peerId: record.externalUserId,
     },
@@ -159,6 +162,23 @@ export class ConversationProcessor {
       1,
       Math.min(Number(options.maxConcurrentConversations) || 10, 10),
     );
+  }
+
+  #message(record: InboundRecord): ChannelMessage | undefined {
+    try {
+      return messageFromRecord(record);
+    } catch (error: unknown) {
+      const current = this.#store.getInbound(record.messageKey);
+      if (current?.status === 'received') {
+        this.#store.markInboundIgnored(record.messageKey);
+      } else {
+        this.#store.suppressInbound(record.messageKey, 'invalid_persisted_identity');
+      }
+      this.#logger.error?.(
+        `[processor] rejected inbound identity mismatch message_key=${record.messageKey}: ${errorMessage(error)}`,
+      );
+      return undefined;
+    }
   }
 
   #mediaCatalog(record: Pick<InboundRecord, 'openKfId' | 'externalUserId'>) {
@@ -543,17 +563,9 @@ export class ConversationProcessor {
   ): Promise<void> {
     const record = this.#store.getInbound(messageKey) as InboundRecord | undefined;
     if (!record || record.status !== 'received') return;
-    let message: ChannelMessage;
-    try {
-      message = messageFromRecord(record);
-    } catch (error: unknown) {
-      this.#store.markInboundIgnored(messageKey);
-      this.#logger.error?.(
-        `[processor] rejected inbound identity mismatch message_key=${messageKey}: ${errorMessage(error)}`,
-      );
-      return;
-    }
-    if (message.origin === MESSAGE_ORIGINS.SYSTEM && message.type === MESSAGE_TYPES.EVENT) {
+    const message = this.#message(record);
+    if (!message) return;
+    if (isSystemEvent(message)) {
       this.#systemEvent(record, message);
       return;
     }
@@ -569,7 +581,7 @@ export class ConversationProcessor {
       this.#store.getAuthorization(externalUserId)?.authorized !== true
     ) {
       const isTrigger = Boolean(this.#authorization.trigger) &&
-        message.type === MESSAGE_TYPES.TEXT &&
+        message.type === COMMON_MESSAGE_TYPES.TEXT &&
         message.text === this.#authorization.trigger;
       const result = this.#store.evaluateAuthorization({
         messageKey,
@@ -586,7 +598,7 @@ export class ConversationProcessor {
         return;
       }
     }
-    if (!isSupportedCustomerMessage(message)) {
+    if (!isProcessableCustomerMessage(message)) {
       this.#store.markInboundIgnored(messageKey);
       return;
     }
@@ -614,7 +626,7 @@ export class ConversationProcessor {
       message: agentMessage(message),
       resolvedMedia: await this.#pipeline.mediaGateway.resolveForCodex(message),
       mediaCatalog,
-      contextText: renderMessageForCodex(message),
+      contextText: renderMessageForAgent(message),
       ...(latestImage
         ? {
             channelState: {
@@ -641,16 +653,11 @@ export class ConversationProcessor {
     }).filter((candidate) => candidate.inboxSeq > record.inboxSeq);
     let customerFollowupArrived = false;
     for (const candidate of later) {
-      const message = messageFromRecord(candidate);
-      if (
-        message.origin === MESSAGE_ORIGINS.SYSTEM &&
-        message.type === MESSAGE_TYPES.EVENT
-      ) {
+      const message = this.#message(candidate);
+      if (!message) continue;
+      if (isSystemEvent(message)) {
         this.#systemEvent(candidate, message);
-      } else if (
-        message.origin === MESSAGE_ORIGINS.CUSTOMER &&
-        isSupportedCustomerMessage(message)
-      ) {
+      } else if (isProcessableCustomerMessage(message)) {
         customerFollowupArrived = true;
       } else {
         this.#store.markInboundIgnored(candidate.messageKey);
@@ -716,6 +723,10 @@ export class ConversationProcessor {
   }
 
   #systemEvent(record: InboundRecord, message: ChannelMessage): void {
+    if (message.conversation.channel !== 'wechat_kf') {
+      this.#store.markInboundIgnored(record.messageKey);
+      return;
+    }
     const event = message.attributes;
     if (event.event_type === 'msg_send_fail') {
       this.#store.markSendMsgFailed({
@@ -765,11 +776,12 @@ export class ConversationProcessor {
     priority: WorkPriority,
   ): Promise<void> {
     for (const record of ordered.filter((item) => item.status === 'received')) {
-      const message = messageFromRecord(record);
-      if (
-        message.origin === MESSAGE_ORIGINS.SYSTEM &&
-        message.type === MESSAGE_TYPES.EVENT
-      ) {
+      const message = this.#message(record);
+      if (!message) {
+        record.status = this.#store.getInbound(record.messageKey)?.status || record.status;
+        continue;
+      }
+      if (isSystemEvent(message)) {
         await this.#process(record.messageKey, priority);
         record.status = this.#store.getInbound(record.messageKey)?.status || record.status;
       }
@@ -778,7 +790,14 @@ export class ConversationProcessor {
       ['failed', 'processing', 'preparing'].includes(record.status) &&
       !record.primaryMessageKey,
     );
-    const recoveryBoundary = ordered.at(-1)?.messageKey;
+    const recoveryBoundary = [...ordered].reverse().find((record) => {
+      if (['completed', 'ignored', 'absorbed', 'suppressed'].includes(record.status)) {
+        return false;
+      }
+      if (this.#message(record)) return true;
+      record.status = this.#store.getInbound(record.messageKey)?.status || record.status;
+      return false;
+    })?.messageKey;
     for (const primary of primaries) {
       const group = ordered.filter((record) =>
         record.messageKey === primary.messageKey ||
@@ -808,11 +827,20 @@ export class ConversationProcessor {
         clientInputId: primary.clientInputId || primary.messageKey,
       });
     }
+    const decoded = group.flatMap((record) => {
+      const message = this.#message(record);
+      return message ? [{ record, message }] : [];
+    });
+    const primaryMessage = decoded.find(
+      ({ record }) => record.messageKey === primary.messageKey,
+    )?.message;
+    if (!primaryMessage) return;
+    const validGroup = decoded.map(({ record }) => record);
     const conversation = this.#store.getConversation(primary.openKfId, primary.externalUserId);
     const mediaCatalog = this.#mediaCatalog(primary);
-    const ids = group.map((record) => record.clientInputId || record.messageKey);
+    const ids = validGroup.map((record) => record.clientInputId || record.messageKey);
     const latestId = ids.at(-1) || primary.clientInputId;
-    const steering = group.filter((item) => item.status === 'steering');
+    const steering = validGroup.filter((item) => item.status === 'steering');
     const inspection = conversation?.threadId && this.#pipeline.agent.inspectHistory
       ? await this.#pipeline.agent.inspectHistory(conversation.threadId, ids, latestId)
       : undefined;
@@ -846,7 +874,7 @@ export class ConversationProcessor {
 
     const latestDirection = Math.max(
       primary.inboxSeq,
-      ...group.map((record) => record.inboxSeq),
+      ...validGroup.map((record) => record.inboxSeq),
     );
     const attempts = this.#store.listMessageAttempts(primary.messageKey);
     const artifactAlreadyHandled = attempts
@@ -868,12 +896,13 @@ export class ConversationProcessor {
       : [];
 
     const resolvedMedia = (await Promise.all(
-      group.map((record) =>
-        this.#pipeline.mediaGateway.resolveForCodex(messageFromRecord(record))),
+      decoded.map(({ message }) => this.#pipeline.mediaGateway.resolveForCodex(message)),
     )).flat() as ResolvedImage[];
+    const boundaryMessageKey =
+      recoveryBoundary || validGroup.at(-1)?.messageKey || primary.messageKey;
     await this.#submit(primary, {
-      channel: messageFromRecord(primary).conversation.channel,
-      message: agentMessage(messageFromRecord(primary)),
+      channel: primaryMessage.conversation.channel,
+      message: agentMessage(primaryMessage),
       resolvedMedia,
       mediaCatalog,
       contextText: [
@@ -881,15 +910,14 @@ export class ConversationProcessor {
         ...(recoveredArtifacts.length
           ? ['The previous turn generated an image that is now available as a deliverable artifact. Do not generate it again.']
           : []),
-        ...group.sort((a, b) => a.inboxSeq - b.inboxSeq)
-          .map((record) => renderMessageForCodex(messageFromRecord(record))),
+        ...decoded.sort((left, right) => left.record.inboxSeq - right.record.inboxSeq)
+          .map(({ message }) => renderMessageForAgent(message)),
       ].join('\n'),
       allowNoAction,
       clientInputId: `${primary.messageKey}-recovery`,
     }, {
       wait: true,
-      boundaryMessageKey:
-        recoveryBoundary || group.at(-1)?.messageKey || primary.messageKey,
+      boundaryMessageKey,
       ...(recoveredArtifacts.length
         ? { recoveredArtifacts }
         : {}),

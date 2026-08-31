@@ -1,14 +1,12 @@
 import { truncateUtf8 } from '../lib/text.ts';
 import type { NormalizedMessage } from '../types.ts';
-
-export const MESSAGE_ORIGINS = {
-  CUSTOMER: 'customer',
-  SYSTEM: 'system',
-  UNKNOWN: 'unknown',
-} as const;
+import {
+  COMMON_MESSAGE_TYPES,
+  MESSAGE_ORIGINS,
+} from './message.ts';
 
 export const MESSAGE_TYPES = {
-  TEXT: 'text',
+  TEXT: COMMON_MESSAGE_TYPES.TEXT,
   IMAGE: 'image',
   VOICE: 'voice',
   VIDEO: 'video',
@@ -23,28 +21,11 @@ export const MESSAGE_TYPES = {
   MERGED_MESSAGE: 'merged_msg',
   CHANNELS: 'channels',
   NOTE: 'note',
-  EVENT: 'event',
-  UNKNOWN: 'unknown',
+  EVENT: COMMON_MESSAGE_TYPES.EVENT,
+  UNKNOWN: COMMON_MESSAGE_TYPES.UNKNOWN,
 } as const;
 type MessageType = (typeof MESSAGE_TYPES)[keyof typeof MESSAGE_TYPES];
 
-export const CUSTOMER_MESSAGE_TYPES = Object.freeze([
-  MESSAGE_TYPES.TEXT,
-  MESSAGE_TYPES.IMAGE,
-  MESSAGE_TYPES.VOICE,
-  MESSAGE_TYPES.VIDEO,
-  MESSAGE_TYPES.FILE,
-  MESSAGE_TYPES.LOCATION,
-  MESSAGE_TYPES.LINK,
-  MESSAGE_TYPES.BUSINESS_CARD,
-  MESSAGE_TYPES.MINIPROGRAM,
-  MESSAGE_TYPES.MSGMENU,
-  MESSAGE_TYPES.CHANNELS_SHOP_PRODUCT,
-  MESSAGE_TYPES.CHANNELS_SHOP_ORDER,
-  MESSAGE_TYPES.MERGED_MESSAGE,
-  MESSAGE_TYPES.CHANNELS,
-  MESSAGE_TYPES.NOTE,
-]);
 type LooseObject = Record<string, unknown>;
 type RawMessage = LooseObject & {
   text?: LooseObject;
@@ -73,7 +54,6 @@ interface MergedItem {
 }
 
 const KNOWN_TYPES = new Set(Object.values(MESSAGE_TYPES));
-const KNOWN_CUSTOMER_TYPES = new Set(CUSTOMER_MESSAGE_TYPES);
 const MAX_MERGED_ITEMS = 50;
 const MAX_MERGED_DEPTH = 3;
 const MAX_SUMMARY_BYTES = 16 * 1024;
@@ -342,21 +322,4 @@ export function normalizeWecomMessage(
     ),
   };
   return Object.freeze(message);
-}
-
-export function isSupportedCustomerMessage(
-  message: Pick<NormalizedMessage, 'origin' | 'type'>,
-): boolean {
-  return (
-    message?.origin === MESSAGE_ORIGINS.CUSTOMER &&
-    KNOWN_CUSTOMER_TYPES.has(
-      message.type as (typeof CUSTOMER_MESSAGE_TYPES)[number],
-    )
-  );
-}
-
-export function renderMessageForCodex(
-  message: Pick<NormalizedMessage, 'summary' | 'text'>,
-): string {
-  return String(message?.summary || message?.text || '[WeChat message: no readable summary]');
 }

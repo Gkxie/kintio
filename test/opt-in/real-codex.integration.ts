@@ -9,8 +9,8 @@ import { deflateSync } from 'node:zlib';
 import { afterAll as after, test } from 'vitest';
 import {
   normalizeWecomMessage,
-  renderMessageForCodex,
 } from '../../src/domain/wecom-message.ts';
+import { renderMessageForAgent } from '../../src/domain/message.ts';
 import {
   CodexAgent,
   createCodexAppServer,
@@ -213,7 +213,7 @@ async function createRealHarness(): Promise<RealHarness> {
             text: message.text,
             summary: message.summary,
           },
-          contextText: options.contextText ?? renderMessageForCodex(message),
+          contextText: options.contextText ?? renderMessageForAgent(message),
           resolvedMedia: options.resolvedMedia || [],
           mediaCatalog: [],
           toolSessionToken: session.token,
@@ -477,7 +477,7 @@ test.concurrent('real Codex answers from an inbound link card summary', { timeou
   const normalized = normalizeWecomMessage(raw);
   const result = await active.submit({
     raw,
-    contextText: `${renderMessageForCodex(normalized)}\n客户问题：这个链接介绍什么？`,
+    contextText: `${renderMessageForAgent(normalized)}\n客户问题：这个链接介绍什么？`,
   });
   assert.match(attemptText(result.attempts), /示例博主|AI 编程|example\.com\/creator/u);
 });

@@ -123,6 +123,40 @@ test('iLink executor resolves encrypted routing from the session and sends text'
   assert.doesNotMatch(JSON.stringify(attempt?.payload), /context-secret|bot-secret/u);
 });
 
+test('WeChat delivery failures cannot change iLink attempts in either order', async (t) => {
+  const created = await fixture(t);
+  let failBeforeResponse = false;
+  const executor = new IlinkSendExecutor({
+    store: created.store,
+    ilinkStore: created.ilinkStore,
+    secretBox: created.box,
+    createClient: () => ({
+      async sendMessage(request) {
+        const clientId = String(request.msg.client_id || '');
+        if (failBeforeResponse) {
+          created.store.markSendMsgFailed({ wecomMsgId: clientId, failType: 13 });
+        }
+      },
+    }),
+  });
+
+  for (const [index, beforeResponse] of [false, true].entries()) {
+    failBeforeResponse = beforeResponse;
+    const result = await executor.execute('send_text', {
+      session: created.session.token,
+      content: `message-${index}`,
+    });
+    assert.equal(result.status, 'accepted');
+    if (!beforeResponse) {
+      assert.equal(created.store.markSendMsgFailed({
+        wecomMsgId: result.msgid,
+        failType: 13,
+      }), false);
+    }
+    assert.equal(created.store.getAttempt(result.attemptId)?.status, 'accepted');
+  }
+});
+
 test('iLink session cannot trigger any WeChat KF media or send side effect', async (t) => {
   const created = await fixture(t);
   const calls = { upload: 0, clone: 0, thumbnail: 0, send: 0, offer: 0 };

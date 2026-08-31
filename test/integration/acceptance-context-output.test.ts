@@ -10,8 +10,8 @@ import {
 } from '../../src/domain/send-contract.ts';
 import {
   normalizeWecomMessage,
-  renderMessageForCodex,
 } from '../../src/domain/wecom-message.ts';
+import { renderMessageForAgent } from '../../src/domain/message.ts';
 import type { AgentInput } from '../../src/agent/runtime.ts';
 import { CodexAgent } from '../../src/services/codex-agent.ts';
 import type {
@@ -49,7 +49,7 @@ test('link title, description, and URL enter the Codex summary', () => {
       url: 'https://example.com/creator',
     },
   });
-  const summary = renderMessageForCodex(message);
+  const summary = renderMessageForAgent(message);
   assert.match(summary, /@示例博主主页/u);
   assert.match(summary, /AI 编程与开源项目/u);
   assert.match(summary, /https:\/\/example\.com\/creator/u);
@@ -82,7 +82,7 @@ test('voice, video, and file remain explicit unresolved summaries with zero down
       msgtype,
       ...payload,
     });
-    assert.match(renderMessageForCodex(message), expected);
+    assert.match(renderMessageForAgent(message), expected);
     assert.deepEqual(await gateway.resolveForCodex(message), []);
   }
   assert.equal(downloads, 0);

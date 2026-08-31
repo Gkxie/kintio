@@ -70,24 +70,25 @@ function event(msgid: string, attributes: Record<string, unknown>) {
   };
 }
 
-test('persisted inbox identity overrides and rejects a mismatched payload identity', async (t) => {
+test('persisted inbox identity rejects payload account peer or channel mismatch', async (t) => {
   const harness = await createHarness(t);
-  const key = harness.ingest({
-    msgid: 'identity-mismatch', open_kfid: 'wk-one', external_userid: 'wm-one',
-    origin: 3, msgtype: 'text', text: { content: '不要串到其他客服' },
-  });
-  harness.store.database.prepare(`
-    UPDATE inbound_messages
-    SET payload_json = json_set(
-      payload_json,
-      '$.conversation.accountKey', 'wk-payload',
-      '$.conversation.peerId', 'wm-payload'
-    )
-    WHERE message_key = ?
-  `).run(key);
-  await harness.processor.enqueue(key);
-  assert.equal(harness.store.getInbound(key)?.status, 'ignored');
-  assert.equal(harness.store.getConversation('wk-payload', 'wm-payload'), undefined);
+  for (const [field, value] of [
+    ['accountKey', 'wk-payload'],
+    ['peerId', 'wm-payload'],
+    ['channel', 'weixin_ilink'],
+  ] as const) {
+    const key = harness.ingest({
+      msgid: `identity-${field}`, open_kfid: 'wk-one', external_userid: 'wm-one',
+      origin: 3, msgtype: 'text', text: { content: '不要改变持久化身份' },
+    });
+    harness.store.database.prepare(`
+      UPDATE inbound_messages
+      SET payload_json = json_set(payload_json, ?, ?)
+      WHERE message_key = ?
+    `).run(`$.conversation.${field}`, value, key);
+    await harness.processor.enqueue(key);
+    assert.equal(harness.store.getInbound(key)?.status, 'ignored', field);
+  }
   assert.equal(harness.store.getConversation('wk-one', 'wm-one')?.threadId, '');
 });
 
@@ -106,6 +107,22 @@ test('msg_send_fail reports the failed fact without automatic resend', async (t)
   const sending = harness.store.beginNextSend();
   if (!sending) throw new Error('Expected pending primary attempt');
   harness.store.completeSend(sending.attemptId, { wecomMsgId: 'wecom-failed' });
+
+  const foreign = harness.ingest(event('foreign-event', {
+    event_type: 'msg_send_fail', fail_msgid: 'wecom-failed', fail_type: 13,
+  }));
+  harness.store.database.prepare(`
+    UPDATE inbound_messages
+    SET channel = 'weixin_ilink',
+        payload_json = json_set(payload_json, '$.conversation.channel', 'weixin_ilink')
+    WHERE message_key = ?
+  `).run(foreign);
+  await harness.processor.enqueue(foreign);
+  assert.equal(harness.store.getInbound(foreign)?.status, 'ignored');
+  assert.deepEqual(
+    inspectAttempts(harness.store.database, sourceKey).map((item) => item.status),
+    ['accepted'],
+  );
 
   const failureKey = harness.ingest(event('failure-event', {
     event_type: 'msg_send_fail', fail_msgid: 'wecom-failed', fail_type: 13,

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
+import { MESSAGE_ORIGINS } from '../domain/message.ts';
 import {
   stableMessageKey,
   type AttemptRecord,
@@ -446,8 +447,8 @@ function normalizedPayload(
   return {
     id: candidate.providerMessageId,
     messageKey,
-    origin: 'customer',
-    type: 'text',
+    origin: MESSAGE_ORIGINS.CUSTOMER,
+    type: candidate.kind,
     rawType: `ilink_${candidate.kind}`,
     sentAt: candidate.createTime,
     sync: candidate.sync,

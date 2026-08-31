@@ -159,6 +159,7 @@ test('iLink inbound traverses the shared Harness and replies through its bound M
   });
   t.onTestFinished(() => processor.close());
   const messageKey = page.insertedMessageKeys[0]!;
+  assert.equal(store.getInbound(messageKey)?.type, 'mixed');
   await processor.enqueue(messageKey);
   await processor.waitForIdle();
   assert.equal(store.getInbound(messageKey)?.status, 'completed');

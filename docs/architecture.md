@@ -111,6 +111,7 @@ adapters have independent lifecycles under the Runtime.
 - WeChat KF callback and signature verification: [src/routes/wecom.ts](../src/routes/wecom.ts)
 - WeChat KF message synchronization: [src/services/wecom-sync.ts](../src/services/wecom-sync.ts)
 - WeChat KF message domain: [src/domain/wecom-message.ts](../src/domain/wecom-message.ts)
+- Channel-neutral message admission: [src/domain/message.ts](../src/domain/message.ts)
 - iLink long polling: [src/ilink/listener.ts](../src/ilink/listener.ts)
 - iLink protocol client: [src/ilink/protocol/client.ts](../src/ilink/protocol/client.ts)
 - iLink message conversion: [src/ilink/message.ts](../src/ilink/message.ts)
@@ -170,6 +171,7 @@ Tools return execution facts only: accepted, failed, or uncertain. Provider-spec
 
 - A WeChat KF conversation key is `open_kfid + external_userid`.
 - An iLink conversation key is `bot_id + user_id`.
+- Adapter `accountKey` values occupy distinct namespaces; a new adapter must not reuse another adapter's key space.
 - Later messages within the same adapter can steer the running agent turn; different adapters never share a Codex thread.
 - WeChat KF authorization applies to an `external_userid` within an enterprise, while thread isolation still uses the account-and-user pair.
 - Only text and images become native model input. Other message types retain important provider fields and become explicit summaries.
