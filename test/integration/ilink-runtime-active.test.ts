@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { test, vi, type TestContext } from 'vitest';
 
 import type {
@@ -19,7 +19,7 @@ import {
   IlinkMessageType,
 } from '../../src/ilink/protocol/types.ts';
 import { CodexAgent } from '../../src/services/codex-agent.ts';
-import { LocalMcpHost, type LocalMcpEndpoints } from '../../src/mcp/local-host.ts';
+import { McpIpcHost, type LocalMcpLaunches } from '../../src/mcp/ipc-host.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { SqliteStore } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
@@ -132,7 +132,7 @@ async function fixture(t: TestContext) {
   return { temp, config, accounts };
 }
 
-test('active runtime restores iLink listeners, routes local MCP sends, and shuts down', async (t) => {
+test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts down', async (t) => {
   const { temp, config, accounts } = await fixture(t);
   const reader = temp.open({ readOnly: true });
   let readerClosed = false;
@@ -186,11 +186,9 @@ test('active runtime restores iLink listeners, routes local MCP sends, and shuts
     readonly authorization: string;
     readonly body: Record<string, unknown>;
   }> = [];
-  const nativeFetch = globalThis.fetch;
   const fetchImpl = vi.fn<typeof globalThis.fetch>(async (input, init) => {
     const request = input instanceof Request ? input : new Request(input, init);
     const url = new URL(request.url);
-    if (url.hostname === '127.0.0.1') return nativeFetch(input, init);
     assert.equal(url.origin, 'https://ilinkai.weixin.qq.com');
     const authorization = request.headers.get('authorization') || '';
     const runtimeAccount = accounts.find(
@@ -272,19 +270,20 @@ test('active runtime restores iLink listeners, routes local MCP sends, and shuts
     warn: (message: string) => loggerMessages.push(message),
     error: (message: string) => loggerMessages.push(message),
   };
-  let localEndpoints: LocalMcpEndpoints | undefined;
-  const originalStart = LocalMcpHost.prototype.start;
-  const startSpy = vi.spyOn(LocalMcpHost.prototype, 'start').mockImplementation(
-    function (this: LocalMcpHost) {
-      return originalStart.call(this).then((endpoints) => {
-        localEndpoints = endpoints;
-        return endpoints;
+  let mcpLaunches: LocalMcpLaunches | undefined;
+  const originalStart = McpIpcHost.prototype.start;
+  const startSpy = vi.spyOn(McpIpcHost.prototype, 'start').mockImplementation(
+    function (this: McpIpcHost) {
+      return originalStart.call(this).then((launches) => {
+        mcpLaunches = launches;
+        return launches;
       });
     },
   );
   t.onTestFinished(() => startSpy.mockRestore());
   const runtime = await createRuntime({ config, logger });
-  assert.ok(localEndpoints?.ilink);
+  const ilinkLaunch = mcpLaunches?.ilink;
+  assert.ok(ilinkLaunch);
   let shutDown = false;
   t.onTestFinished(async () => {
     closeReader();
@@ -352,8 +351,11 @@ test('active runtime restores iLink listeners, routes local MCP sends, and shuts
 
   const mcp = new Client({ name: 'active-ilink-runtime-test', version: '1.0.0' });
   await bounded('MCP connect', mcp.connect(
-    new StreamableHTTPClientTransport(new URL(localEndpoints.ilink)) as unknown as
-      Parameters<Client['connect']>[0],
+    new StdioClientTransport({
+      command: ilinkLaunch.command,
+      args: [...ilinkLaunch.args],
+      stderr: 'pipe',
+    }),
   ));
   assert.deepEqual(
     (await mcp.listTools()).tools.map((tool) => tool.name),

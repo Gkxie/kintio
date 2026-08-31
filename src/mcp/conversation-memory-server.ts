@@ -3,7 +3,6 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as z from 'zod/v4';
 
 import { KINTIO_VERSION } from '../version.ts';
-import { handleMcpHttpRequest } from './http.ts';
 import type { CodexBoundary } from '../services/codex-app-server.ts';
 import { AgentSessionError, type SqliteStore } from '../state/sqlite-store.ts';
 import type { ChatChannel } from '../types.ts';
@@ -224,17 +223,4 @@ export function createConversationMemoryMcpServer(
     },
   );
   return server;
-}
-
-export async function handleConversationMemoryMcpRequest({
-  request,
-  executor,
-}: {
-  request: Request;
-  executor: Pick<ConversationMemoryExecutor, 'read'>;
-}): Promise<Response> {
-  return handleMcpHttpRequest({
-    request,
-    createServer: () => createConversationMemoryMcpServer(executor),
-  });
 }

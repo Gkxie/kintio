@@ -50,9 +50,10 @@ PORT=8888
 CODEX_ENABLED=true
 ```
 
-Kintio creates its MCP listener in process on an ephemeral IPv4 loopback port;
-it is never served by the public Hono listener and requires no configured URL or
-Bearer Token. Remove obsolete `KINTIO_MCP_URL`, `KINTIO_MCP_BEARER_TOKEN`, and
+Kintio registers MCP with Codex as local stdio processes. Behind stdio it uses a
+private Unix-domain socket or Windows named pipe, never a TCP port or public Hono
+route, and requires no configured URL or Bearer Token. Remove obsolete
+`KINTIO_MCP_URL`, `KINTIO_MCP_BEARER_TOKEN`, and
 the equivalent `TALKFERRY_`, `HARNESS_`, or `WECOM_` URL/Bearer aliases from
 upgraded deployments.
 

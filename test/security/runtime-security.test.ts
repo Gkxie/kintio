@@ -85,9 +85,9 @@ test('Codex Adapter uses native environment inheritance without adding Agent con
   const server = createCodexAppServer({
     spawnProcess,
     logger: { warn() {} },
-    mcpEndpoints: {
-      wechatKf: 'http://127.0.0.1:30103/mcp',
-      memory: 'http://127.0.0.1:30103/mcp/memory',
+    mcpLaunches: {
+      wechatKf: { command: '/node', args: ['/relay', '--route', 'wechat_kf'] },
+      memory: { command: '/node', args: ['/relay', '--route', 'conversation_memory'] },
     },
   });
   t.onTestFinished(() => server.close());
@@ -98,10 +98,10 @@ test('Codex Adapter uses native environment inheritance without adding Agent con
   assert.deepEqual(captured.argumentsList.slice(0, 2), ['app-server', '--stdio']);
   const serializedArguments = JSON.stringify(captured.argumentsList);
   assert.ok(captured.argumentsList.includes(
-    'mcp_servers.wechat_kf.url="http://127.0.0.1:30103/mcp"',
+    'mcp_servers.wechat_kf.command="/node"',
   ));
   assert.ok(captured.argumentsList.includes(
-    'mcp_servers.conversation_memory.url="http://127.0.0.1:30103/mcp/memory"',
+    'mcp_servers.conversation_memory.args=["/relay","--route","conversation_memory"]',
   ));
   assert.ok(captured.argumentsList.includes(
     'mcp_servers.conversation_memory.enabled_tools=["read_archived_thread"]',
@@ -114,8 +114,9 @@ test('Codex Adapter uses native environment inheritance without adding Agent con
     captured.argumentsList.includes('sandbox_workspace_write.network_access=false'),
   );
   assert.equal(captured.argumentsList.includes('--strict-config'), false);
-  assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.command'), false);
-  assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.args'), false);
+  assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.command'), true);
+  assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.args'), true);
+  assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.url'), false);
   assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.env_vars'), false);
   assert.equal(/bearer_token|model_provider|reasoning|web_search/iu.test(serializedArguments), false);
   assert.equal(captured.explicitEnvironment, false);

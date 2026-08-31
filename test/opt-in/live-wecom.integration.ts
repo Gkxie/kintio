@@ -8,12 +8,12 @@ import { loadConfig } from '../../src/config.ts';
 import { CodexAgent, createCodexAppServer } from '../../src/services/codex-agent.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
-import { handleWechatKfMcpRequest } from '../../src/mcp/wechat-kf-server.ts';
+import { createWechatKfMcpServer } from '../../src/mcp/wechat-kf-server.ts';
 import {
   ConversationMemoryExecutor,
-  handleConversationMemoryMcpRequest,
+  createConversationMemoryMcpServer,
 } from '../../src/mcp/conversation-memory-server.ts';
-import { LocalMcpHost } from '../../src/mcp/local-host.ts';
+import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
 import { WecomApiClient } from '../../src/services/wecom-api.ts';
 import { WecomSync } from '../../src/services/wecom-sync.ts';
@@ -57,16 +57,19 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
     observeMs: config.wecom.api.observeMs,
   });
   let memoryExecutor: ConversationMemoryExecutor | undefined;
-  const localMcp = new LocalMcpHost({
-    wechatKf: (request) => handleWechatKfMcpRequest({ request, executor: channel }),
-    memory: async (request) => memoryExecutor
-      ? await handleConversationMemoryMcpRequest({
-        request,
-        executor: memoryExecutor,
-      })
-      : Response.json({ error: 'not ready' }, { status: 503 }),
+  const mcpHost = new McpIpcHost({
+    instanceKey: path.join(directory, 'runtime.lock'),
+    stateDirectory: directory,
+    relayFile: path.resolve('mcp-relay.ts'),
+    wechatKf: () => createWechatKfMcpServer(channel),
+    memory: () => createConversationMemoryMcpServer({
+      read(session) {
+        if (!memoryExecutor) throw new Error('memory executor is not ready');
+        return memoryExecutor.read(session);
+      },
+    }),
   });
-  const codex = createCodexAppServer({ mcpEndpoints: await localMcp.start() });
+  const codex = createCodexAppServer({ mcpLaunches: await mcpHost.start() });
   memoryExecutor = new ConversationMemoryExecutor({ store, threads: codex });
   const agent = new CodexAgent({
     codex,
@@ -122,7 +125,7 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
     } finally {
       await processor.close();
       await channel.close();
-      await localMcp.close();
+      await mcpHost.close();
       store.close();
       await fs.rm(directory, { recursive: true, force: true });
     }

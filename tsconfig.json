@@ -31,6 +31,7 @@
     "cli.ts",
     "daemon.ts",
     "index.ts",
+    "mcp-relay.ts",
     "src/**/*.ts"
   ],
   "exclude": ["dist", "node_modules", "test"]

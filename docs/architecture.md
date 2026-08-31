@@ -42,7 +42,7 @@ Kintio process
 └── Supervisor
     ├── public HTTP adapter: Hono messaging callbacks
     └── application runtime
-        ├── loopback-only MCP action listener
+        ├── private MCP IPC host and stdio relays
         ├── WeChat message synchronization
         ├── Weixin iLink polling and login listeners
         ├── future Feishu WebSocket or another long-lived transport
@@ -59,7 +59,7 @@ ownership.
 
 Startup is deliberately phased:
 
-1. construct the shared runtime and bind its loopback MCP listener;
+1. construct the shared runtime and bind its private MCP IPC endpoint;
 2. bind the Hono HTTP channel while callback ingress returns `503`;
 3. start recovery, polling, and other live listeners;
 4. open callback ingress; and
@@ -68,8 +68,8 @@ Startup is deliberately phased:
 Shutdown reverses capability rather than merely reversing object creation:
 
 1. close callback and polling ingress to new work;
-2. keep MCP reachable while active Agent turns and sends drain;
-3. close local MCP, tools, SQLite, and the instance lock; and
+2. keep MCP IPC reachable while active Agent turns and sends drain;
+3. close MCP IPC, tools, SQLite, and the instance lock; and
 4. close the HTTP channel.
 
 If graceful drain exceeds its configured limit, abort immediately disables
@@ -84,7 +84,7 @@ WeChat KF HTTPS callback ─┐
                           ├→ NormalizedMessage → SQLite Inbox → scheduler → Agent Adapter
 iLink Bot long polling ───┘                                            ├── Kintio Prompt
                                                                       ├── session-selected Skill
-                                                                      └── local MCP registration
+                                                                      └── stdio MCP registration
                                                                                   ↓
 Messaging user ← provider API ← local MCP tool ← scoped capability ← host Agent CLI
 ```
@@ -105,7 +105,7 @@ SQLite is the source of truth for both inbound and outbound processing:
 Messaging adapters handle provider protocols. They do not decide what the agent should say.
 
 Hono is the public HTTP adapter for callbacks, not the Kintio process entry or
-lifecycle owner. The loopback MCP listener, long polling, and future WebSocket
+lifecycle owner. The local MCP IPC host, long polling, and future WebSocket
 adapters have independent lifecycles under the Runtime.
 
 - WeChat KF callback and signature verification: [src/routes/wecom.ts](../src/routes/wecom.ts)
@@ -154,16 +154,19 @@ MCP is the agent's only path for actions against messaging providers:
 - WeChat KF: [src/mcp/wechat-kf-server.ts](../src/mcp/wechat-kf-server.ts)
 - iLink: [src/mcp/ilink-server.ts](../src/mcp/ilink-server.ts)
 - read-only memory for archived threads: [src/mcp/conversation-memory-server.ts](../src/mcp/conversation-memory-server.ts)
-- loopback-only MCP lifecycle: [src/mcp/local-host.ts](../src/mcp/local-host.ts)
-- Streamable HTTP transport: [src/mcp/http.ts](../src/mcp/http.ts)
+- Worker-owned IPC lifecycle: [src/mcp/ipc-host.ts](../src/mcp/ipc-host.ts)
+- stdio relay: [src/mcp/stdio-relay.ts](../src/mcp/stdio-relay.ts)
+- bounded descriptor and handshake protocol: [src/mcp/ipc-protocol.ts](../src/mcp/ipc-protocol.ts)
 
-The Runtime hosts one MCP listener on an operating-system-assigned
-`127.0.0.1` port. Public Hono routes never expose MCP, and no static transport
-Token is stored or copied into the Agent environment. Every action still
-requires the short-lived session capability embedded in the current trusted
-Agent input. Each tool revalidates the adapter, recipient, message direction,
-media ownership, expiration, and quota. The model cannot select a recipient
-through tool arguments.
+Codex starts one local stdio relay for each enabled MCP server. The relays connect
+to one Worker-owned Unix-domain socket on POSIX or named pipe on Windows; no MCP
+TCP listener exists. A per-Worker descriptor contains a rotated transport token
+in the private instance directory. Codex receives only the relay command,
+descriptor path, and fixed route—never the token through arguments or environment
+variables. Public Hono routes never expose MCP. Every action still requires the
+short-lived session capability embedded in the current trusted Agent input. Each
+tool revalidates the adapter, recipient, message direction, media ownership,
+expiration, and quota. The model cannot select a recipient through tool arguments.
 
 Tools return execution facts only: accepted, failed, or uncertain. Provider-specific errors are explained by tool results when they occur. They do not belong in the global prompt, and retry decisions are not hard-coded into channel-neutral agent behavior.
 

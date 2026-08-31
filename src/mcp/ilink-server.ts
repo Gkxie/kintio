@@ -3,7 +3,6 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as z from 'zod/v4';
 
 import { KINTIO_VERSION } from '../version.ts';
-import { handleMcpHttpRequest } from './http.ts';
 
 const MAX_TEXT_BYTES = 2_000;
 const SESSION = /^ws_[A-Za-z0-9_-]{32}$/u;
@@ -216,17 +215,4 @@ export function createIlinkMcpServer(executor: IlinkToolExecutor): McpServer {
     );
   }
   return server;
-}
-
-export async function handleIlinkMcpRequest({
-  request,
-  executor,
-}: {
-  request: Request;
-  executor: IlinkToolExecutor;
-}): Promise<Response> {
-  return handleMcpHttpRequest({
-    request,
-    createServer: () => createIlinkMcpServer(executor),
-  });
 }

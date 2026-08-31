@@ -107,8 +107,9 @@ process-manager migration described in the setup guide.
   must never be force-added.
 - Kintio does not inject messaging-adapter secrets, stable user identifiers, raw media IDs,
   or database paths into the Agent; host Agent credentials remain host-managed.
-- MCP is bound to an ephemeral IPv4 loopback port and is never exposed by public Hono;
-  every action still requires a short-lived conversation capability.
+- Codex starts MCP over stdio. Kintio uses only a private Unix-domain socket or
+  Windows named pipe behind that process boundary, never an MCP TCP port or public
+  Hono route; every action still requires a short-lived conversation capability.
 - Project-level Agent capability restrictions are not an operating-system sandbox. Use a
   dedicated system account and additional isolation appropriate to the Agent's real powers.
 - A provider accepting an outbound request does not prove that a client displayed it;

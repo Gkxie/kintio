@@ -3,7 +3,6 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import * as z from 'zod/v4';
 
 import { KINTIO_VERSION } from '../version.ts';
-import { handleMcpHttpRequest } from './http.ts';
 import {
   WechatKfToolExecutor,
   type WechatToolReceipt,
@@ -247,17 +246,4 @@ export function createWechatKfMcpServer(executor: ToolExecutor): McpServer {
     });
   }
   return server;
-}
-
-export async function handleWechatKfMcpRequest({
-  request,
-  executor,
-}: {
-  request: Request;
-  executor: ToolExecutor;
-}): Promise<Response> {
-  return handleMcpHttpRequest({
-    request,
-    createServer: () => createWechatKfMcpServer(executor),
-  });
 }

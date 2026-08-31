@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import { fileURLToPath } from 'node:url';
 
 import { acquireSingleInstanceLock } from './runtime/single-instance-lock.ts';
 import { ensurePrivateDirectory } from './lib/private-directory.ts';
@@ -12,9 +13,9 @@ import { WecomMediaGateway } from './services/media-gateway.ts';
 import { WecomApiClient } from './services/wecom-api.ts';
 import { WecomSync } from './services/wecom-sync.ts';
 import { WechatKfToolExecutor } from './mcp/wechat-kf-executor.ts';
-import { handleWechatKfMcpRequest } from './mcp/wechat-kf-server.ts';
-import { handleIlinkMcpRequest } from './mcp/ilink-server.ts';
-import { LocalMcpHost } from './mcp/local-host.ts';
+import { createWechatKfMcpServer } from './mcp/wechat-kf-server.ts';
+import { createIlinkMcpServer } from './mcp/ilink-server.ts';
+import { McpIpcHost } from './mcp/ipc-host.ts';
 import { IlinkSendExecutor } from './ilink/executor.ts';
 import { IlinkListenerManager } from './ilink/listener.ts';
 import { IlinkLoginManager } from './ilink/login-manager.ts';
@@ -27,7 +28,7 @@ import { IlinkSecretBox } from './ilink/secret-box.ts';
 import { IlinkSqliteStore } from './ilink/sqlite-store.ts';
 import {
   ConversationMemoryExecutor,
-  handleConversationMemoryMcpRequest,
+  createConversationMemoryMcpServer,
 } from './mcp/conversation-memory-server.ts';
 import {
   SqliteStore,
@@ -129,7 +130,7 @@ export async function createRuntime({
   let store: SqliteStore | undefined;
   let cleanupTimer: NodeJS.Timeout | undefined;
   let ilinkOffers: IlinkLoginStore | undefined;
-  let localMcp: LocalMcpHost | undefined;
+  let mcpHost: McpIpcHost | undefined;
 
   try {
     store = new SqliteStore({ filePath: config.state.databaseFile });
@@ -242,26 +243,46 @@ export async function createRuntime({
       },
     };
     let conversationMemory: ConversationMemoryExecutor | undefined;
-    const activeLocalMcp = new LocalMcpHost({
+    const runtimeFile = fileURLToPath(import.meta.url);
+    const activeMcpHost = new McpIpcHost({
+      instanceKey: config.state.lockFile,
+      stateDirectory: path.dirname(config.state.lockFile),
+      relayFile: path.resolve(
+        path.dirname(runtimeFile),
+        '..',
+        `mcp-relay${path.extname(runtimeFile)}`,
+      ),
       ...(wechatTools ? {
-        wechatKf: (request) => toolsUnavailable
-          ? Promise.resolve(Response.json({ error: 'service unavailable' }, { status: 503 }))
-          : handleWechatKfMcpRequest({ request, executor: wechatTools }),
+        wechatKf: () => createWechatKfMcpServer({
+          execute(name, input) {
+            if (toolsUnavailable) throw new Error('service unavailable');
+            return wechatTools.execute(name, input);
+          },
+        }),
       } : {}),
-      memory: (request) => toolsUnavailable || !conversationMemory
-        ? Promise.resolve(Response.json({ error: 'service unavailable' }, { status: 503 }))
-        : handleConversationMemoryMcpRequest({ request, executor: conversationMemory }),
+      memory: () => createConversationMemoryMcpServer({
+        read(session) {
+          if (toolsUnavailable || !conversationMemory) {
+            throw new Error('service unavailable');
+          }
+          return conversationMemory.read(session);
+        },
+      }),
       ...(ilinkTools ? {
-        ilink: (request) => toolsUnavailable
-          ? Promise.resolve(Response.json({ error: 'service unavailable' }, { status: 503 }))
-          : handleIlinkMcpRequest({ request, executor: ilinkTools }),
+        ilink: () => createIlinkMcpServer({
+          execute(name, input) {
+            if (toolsUnavailable) throw new Error('service unavailable');
+            return ilinkTools.execute(name, input);
+          },
+        }),
       } : {}),
+      logger,
     });
-    localMcp = activeLocalMcp;
-    const mcpEndpoints = await activeLocalMcp.start();
+    mcpHost = activeMcpHost;
+    const mcpLaunches = await activeMcpHost.start();
     const codex = createCodexAppServer({
       logger,
-      mcpEndpoints,
+      mcpLaunches,
       mcpToolTimeoutSec: Math.ceil((
         config.wecom.api.timeoutMs * 4 +
         config.wecom.api.observeMs +
@@ -492,7 +513,7 @@ export async function createRuntime({
               wechatTools?.close(),
             ]);
             try {
-              await activeLocalMcp.close();
+              await activeMcpHost.close();
             } finally {
               if (cleanupTimer) clearInterval(cleanupTimer);
               try {
@@ -518,14 +539,14 @@ export async function createRuntime({
         await Promise.all([
           processor.abort(),
           ilinkClosing,
-          activeLocalMcp.close(true),
+          activeMcpHost.close(true),
         ]);
       },
     };
     return runtime;
   } catch (error: unknown) {
     if (cleanupTimer) clearInterval(cleanupTimer);
-    await localMcp?.close(true).catch(() => undefined);
+    await mcpHost?.close(true).catch(() => undefined);
     try {
       store?.close();
     } catch (cleanupError: unknown) {
