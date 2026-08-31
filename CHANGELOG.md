@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Made a merged, owner-authored Release PR the sole human release authorization;
+  Kintio now creates the annotated tag and dispatches its verified OIDC release
+  automatically
+  ([#45](https://github.com/Gkxie/kintio/issues/45)).
+
 ## 0.6.1 - 2026-08-31
 
 - Added approval-gated npm Trusted Publishing with an exact artifact integrity
