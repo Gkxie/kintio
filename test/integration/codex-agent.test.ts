@@ -67,8 +67,13 @@ function agentInput(
   overrides: Partial<AgentInput> = {},
 ): AgentInput {
   const baseMessage = message(messageKey);
-  const { message: overrideMessage, ...rest } = overrides;
+  const {
+    message: overrideMessage,
+    channel = 'wechat_kf',
+    ...rest
+  } = overrides;
   return {
+    channel,
     mode: 'start',
     conversationId: 'cv-test',
     threadId: '',

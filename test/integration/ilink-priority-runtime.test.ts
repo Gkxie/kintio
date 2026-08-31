@@ -306,14 +306,10 @@ async function createHarness(
       botId: account.botId,
       ownerUserId: account.peerId,
     }, {
-      cursor: account.cursor || 'initial',
+      cursor: account.cursor,
       index: 0,
     });
     assert.ok(normalized);
-    const candidate = {
-      ...normalized,
-      sync: { cursor: account.cursor, index: 0 },
-    };
     const secretGeneration = 10_000 + messageId;
     const nextCursor = `${account.botId}-cursor-${messageId}`;
     const page = ilinkStore.commitPollPage({
@@ -322,9 +318,12 @@ async function createHarness(
       expectedCursor: account.cursor,
       nextCursor,
       messages: [{
-        candidate,
+        message: normalized.message,
+        ...(normalized.facts.providerSeq === undefined
+          ? {}
+          : { providerSeq: normalized.facts.providerSeq }),
         secretGeneration,
-        sealedContextToken: secretBox.seal(candidate.contextToken, {
+        sealedContextToken: secretBox.seal(normalized.facts.contextToken, {
           secretKind: 'context_token',
           accountId: account.accountKey,
           peerId: account.peerId,
@@ -357,7 +356,7 @@ async function createHarness(
       text: { content: label },
     }, openKfId, { cursor: expectedCursor, index: 0 });
     const page = store.ingestSyncPage({
-      openKfId,
+      accountKey: openKfId,
       expectedCursor,
       nextCursor,
       messages: [message],

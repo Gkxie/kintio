@@ -42,27 +42,27 @@ function seedHistory(database: DatabaseSync, size: number): void {
       SELECT value + 1 FROM sequence WHERE value < ?
     )
     INSERT INTO inbound_messages (
-      message_key, open_kfid, msgid, external_userid, origin, msg_type,
+      message_key, open_kfid, msgid, external_userid, channel, origin, msg_type,
       sent_at, status, payload_json, created_at, updated_at
     )
     SELECT
       'history-message-' || printf('%06d', value),
       'wk-history',
       'history-msgid-' || printf('%06d', value),
-      'wm-history-' || printf('%06d', value),
+      'wm-history-' || printf('%06d', value), 'wechat_kf',
       'customer', 'text', value, 'completed', NULL, value, value
     FROM sequence
   `).run(size);
   database.prepare(`
     INSERT INTO send_attempts (
       attempt_key, source_message_key, open_kfid, external_userid,
-      send_index, source, sent_type, payload_json, metadata_json,
+      channel, send_index, source, sent_type, payload_json, metadata_json,
       fingerprint, client_message_id, status,
       wecom_msgid, error_code, error_message, fail_type, created_at, updated_at
     )
     SELECT
       'history-attempt-' || printf('%06d', inbox_seq),
-      message_key, open_kfid, external_userid,
+      message_key, open_kfid, external_userid, channel,
       0, 'history', 'text', NULL, NULL,
       'fingerprint-' || printf('%06d', inbox_seq),
       'client-' || printf('%06d', inbox_seq), 'accepted',
@@ -101,21 +101,21 @@ describe.each(historySizes)('%i history rows', (size) => {
       const { database } = persistence;
       seedHistory(database, size);
 
-      const openKfId = `wk-target-${size}`;
-      const externalUserId = `wm-target-${size}`;
+      const accountKey = `wk-target-${size}`;
+      const peerId = `wm-target-${size}`;
       const msgid = `target-${size}`;
-      const messageKey = stableMessageKey(openKfId, msgid);
+      const messageKey = stableMessageKey('wechat_kf', accountKey, msgid);
       let attemptId = '';
 
       const profile: ChangeProfile = {
         ingest: changeDelta(database, () => {
           store.ingestSyncPage({
-            openKfId,
+            accountKey,
             nextCursor: `cursor-${size}`,
             messages: [testWecomMessage({
               id: msgid,
-              openKfId,
-              externalUserId,
+              openKfId: accountKey,
+              externalUserId: peerId,
               sentAt: size,
               text: 'constant update',
             })],
@@ -123,8 +123,9 @@ describe.each(historySizes)('%i history rows', (size) => {
         }),
         thread: changeDelta(database, () => {
           store.setConversationThread({
-            openKfId,
-            externalUserId,
+            channel: 'wechat_kf',
+            accountKey,
+            peerId,
             threadId: `thread-${size}`,
           });
         }),
@@ -142,10 +143,10 @@ describe.each(historySizes)('%i history rows', (size) => {
           assert.ok(attemptId);
         }),
         beginSend: changeDelta(database, () => {
-          assert.equal(store.beginNextSend()?.attemptId, attemptId);
+          assert.equal(store.beginNextSend('wechat_kf')?.attemptId, attemptId);
         }),
         completeSend: changeDelta(database, () => {
-          store.completeSend(attemptId, { wecomMsgId: `wecom-target-${size}` });
+          store.completeSend(attemptId, { providerMessageId: `wecom-target-${size}` });
         }),
       };
       assert.deepEqual(profile, {
@@ -170,9 +171,10 @@ describe.each(historySizes)('%i history rows', (size) => {
         planDetails(
           database,
           `SELECT * FROM inbound_messages
-           WHERE status IN (?) AND open_kfid = ? AND external_userid = ?
+           WHERE status IN (?) AND channel = ?
+             AND open_kfid = ? AND external_userid = ?
            ORDER BY inbox_seq LIMIT ?`,
-          ['received', openKfId, externalUserId, 100],
+          ['received', 'wechat_kf', accountKey, peerId, 100],
         ),
         'inbound_pending_idx',
       );
@@ -180,7 +182,7 @@ describe.each(historySizes)('%i history rows', (size) => {
         planDetails(
           database,
           `SELECT * FROM send_attempts
-           WHERE status = 'pending'
+           WHERE channel = 'wechat_kf' AND status = 'pending'
            ORDER BY created_at, send_index LIMIT 100`,
           [],
         ),
@@ -190,10 +192,10 @@ describe.each(historySizes)('%i history rows', (size) => {
         planDetails(
           database,
           `SELECT * FROM send_attempts
-           WHERE open_kfid = ? AND external_userid = ?
+           WHERE channel = ? AND open_kfid = ? AND external_userid = ?
              AND status IN ('accepted', 'failed', 'uncertain')
            ORDER BY updated_at DESC LIMIT ?`,
-          ['wk-history', 'wm-history-000001', 20],
+          ['wechat_kf', 'wk-history', 'wm-history-000001', 20],
         ),
         'send_conversation_idx',
       );

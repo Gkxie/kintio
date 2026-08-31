@@ -35,7 +35,7 @@ export function testWecomMessage({
   attachments = [],
 }: TestWecomMessageOptions = {}): NormalizedMessage {
   return Object.freeze({
-    id,
+    providerMessageId: id,
     origin,
     type,
     rawType,

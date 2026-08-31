@@ -55,21 +55,21 @@ async function fixture(
       type: IlinkMessageItemType.TEXT,
       text_item: { text: 'hello' },
     }],
-  }, { accountKey, botId, ownerUserId: peerId }, { cursor: 'initial', index: 0 });
+  }, { accountKey, botId, ownerUserId: peerId }, { cursor: '', index: 0 });
   assert.ok(normalized);
-  const candidate = Object.freeze({
-    ...normalized,
-    sync: Object.freeze({ cursor: '', index: 0 }),
-  });
+  const { message, facts } = normalized;
   const committed = ilinkStore.commitPollPage({
     accountKey,
     expectedGeneration: 1,
     expectedCursor: '',
     nextCursor: 'cursor-one',
     messages: [{
-      candidate,
+      message,
+      ...(facts.providerSeq === undefined
+        ? {}
+        : { providerSeq: facts.providerSeq }),
       secretGeneration: 101,
-      sealedContextToken: box.seal(candidate.contextToken, {
+      sealedContextToken: box.seal(facts.contextToken, {
         secretKind: 'context_token', accountId: accountKey, peerId, generation: 101,
       }),
     }],
@@ -133,7 +133,10 @@ test('WeChat delivery failures cannot change iLink attempts in either order', as
       async sendMessage(request) {
         const clientId = String(request.msg.client_id || '');
         if (failBeforeResponse) {
-          created.store.markSendMsgFailed({ wecomMsgId: clientId, failType: 13 });
+          created.store.markSendMsgFailed({
+            providerMessageId: clientId,
+            failType: 13,
+          });
         }
       },
     }),
@@ -148,7 +151,7 @@ test('WeChat delivery failures cannot change iLink attempts in either order', as
     assert.equal(result.status, 'accepted');
     if (!beforeResponse) {
       assert.equal(created.store.markSendMsgFailed({
-        wecomMsgId: result.msgid,
+        providerMessageId: result.providerMessageId,
         failType: 13,
       }), false);
     }

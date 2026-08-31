@@ -200,7 +200,7 @@ test('one IPC listener routes three standard stdio MCP clients independently', a
         calls.push(`wechat_kf:${name}`);
         return Promise.resolve({
           status: 'accepted', attemptId: 'sa_wechat', sendIndex: 0,
-          type: 'text', msgid: 'wechat-message',
+          type: 'text', providerMessageId: 'wechat-message',
         });
       },
     }),
@@ -209,7 +209,7 @@ test('one IPC listener routes three standard stdio MCP clients independently', a
         calls.push(`weixin_ilink:${name}`);
         return Promise.resolve({
           status: 'accepted', attemptId: 'sa_ilink', sendIndex: 0,
-          type: 'text', msgid: 'ilink-message',
+          type: 'text', providerMessageId: 'ilink-message',
         });
       },
     }),
@@ -239,7 +239,7 @@ test('one IPC listener routes three standard stdio MCP clients independently', a
       ],
       call: { name: 'send_text', arguments: { session: `ws_${'a'.repeat(32)}`, content: 'hi' } },
       expected: { status: 'accepted', attemptId: 'sa_wechat', sendIndex: 0,
-        type: 'text', msgid: 'wechat-message' },
+        type: 'text', providerMessageId: 'wechat-message' },
     },
     {
       route: 'weixin_ilink',
@@ -247,7 +247,7 @@ test('one IPC listener routes three standard stdio MCP clients independently', a
       tools: ['send_text', 'send_image'],
       call: { name: 'send_text', arguments: { session: `ws_${'b'.repeat(32)}`, content: 'hi' } },
       expected: { status: 'accepted', attemptId: 'sa_ilink', sendIndex: 0,
-        type: 'text', msgid: 'ilink-message' },
+        type: 'text', providerMessageId: 'ilink-message' },
     },
     {
       route: 'conversation_memory',

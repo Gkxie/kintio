@@ -57,9 +57,8 @@ const CHANNEL_AGENT_PROFILES: Readonly<Record<ChatChannel, {
   }),
 });
 
-function channelProfile(channel: ChatChannel | undefined) {
-  const selected = channel || 'wechat_kf';
-  return { server: selected, ...CHANNEL_AGENT_PROFILES[selected] };
+function channelProfile(channel: ChatChannel) {
+  return { server: channel, ...CHANNEL_AGENT_PROFILES[channel] };
 }
 const CHANNEL_INSTRUCTIONS = [
   'You are the conversation engine for one active personal chat carried over a bound channel adapter.',
@@ -400,7 +399,10 @@ export class CodexAgent {
     this.#config = config;
   }
 
-  async #thread(input: AgentInput, startFresh = false): Promise<{
+  async #thread(
+    input: Pick<AgentInput, 'conversationId' | 'threadId'>,
+    startFresh = false,
+  ): Promise<{
     readonly key: string;
     readonly thread: CodexThread;
   }> {
@@ -418,10 +420,7 @@ export class CodexAgent {
   }
 
   async ensureThread(conversationId: string, threadId: string): Promise<string> {
-    const input = {
-      conversationId,
-      threadId,
-    } as AgentInput;
+    const input = { conversationId, threadId };
     const state = threadId && this.#codex.getThreadState
       ? await this.#codex.getThreadState(threadId)
       : threadId

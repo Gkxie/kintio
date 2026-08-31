@@ -110,7 +110,7 @@ function seed(
   status: 'processing' | 'preparing' = 'preparing',
 ): string {
   const page = store.ingestSyncPage({
-    openKfId: 'wk-recovery',
+    accountKey: 'wk-recovery',
     nextCursor: `cursor-${id}`,
     messages: [testWecomMessage({
       id,
@@ -120,12 +120,13 @@ function seed(
     })],
   });
   const messageKey = page.insertedMessageKeys[0] ||
-    stableMessageKey('wk-recovery', id);
+    stableMessageKey('wechat_kf', 'wk-recovery', id);
   store.claimInbound({ messageKey });
   if (status === 'preparing') store.markInboundPreparing(messageKey, 'old-turn');
   store.setConversationThread({
-    openKfId: 'wk-recovery',
-    externalUserId: 'wm-recovery',
+    channel: 'wechat_kf',
+    accountKey: 'wk-recovery',
+    peerId: 'wm-recovery',
     threadId: `thread-${id}`,
   });
   return messageKey;
@@ -148,7 +149,7 @@ test('unlinked startup messages stay independent even across one conversation', 
   const active = await harness(t);
   const primary = seed(active.store, 'day-one-primary', 'processing');
   const page = active.store.ingestSyncPage({
-    openKfId: 'wk-recovery',
+    accountKey: 'wk-recovery',
     expectedCursor: active.store.getCursor('wk-recovery'),
     nextCursor: 'later-page',
     messages: [
@@ -200,7 +201,7 @@ test('damaged recovery payload is quarantined without blocking later input', asy
     `).run(damaged);
   });
   const later = active.store.ingestSyncPage({
-    openKfId: 'wk-recovery',
+    accountKey: 'wk-recovery',
     expectedCursor: active.store.getCursor('wk-recovery'),
     nextCursor: 'after-damaged',
     messages: [testWecomMessage({
@@ -226,8 +227,9 @@ test('archived recovery exposes old ID to the new turn and clears it after compl
   const archived = '01900000-0000-7000-8000-000000000001';
   const replacement = '01900000-0000-7000-8000-000000000002';
   active.store.setConversationThread({
-    openKfId: 'wk-recovery',
-    externalUserId: 'wm-recovery',
+    channel: 'wechat_kf',
+    accountKey: 'wk-recovery',
+    peerId: 'wm-recovery',
     threadId: archived,
   });
   active.rawAgent.replacementThreadId = replacement;
@@ -239,11 +241,15 @@ test('archived recovery exposes old ID to the new turn and clears it after compl
   assert.equal(active.rawAgent.inputs[0]?.threadId, replacement);
   assert.equal(active.rawAgent.inputs[0]?.archivedThreadId, archived);
   assert.equal(
-    active.store.getConversation('wk-recovery', 'wm-recovery')?.threadId,
+    active.store.getConversation(
+      'wechat_kf', 'wk-recovery', 'wm-recovery',
+    )?.threadId,
     replacement,
   );
   assert.equal(
-    active.store.getConversation('wk-recovery', 'wm-recovery')?.memoryThreadId,
+    active.store.getConversation(
+      'wechat_kf', 'wk-recovery', 'wm-recovery',
+    )?.memoryThreadId,
     '',
   );
   assert.equal(active.store.getInbound(messageKey)?.status, 'completed');
@@ -259,7 +265,9 @@ test('deleted thread recovery starts clean without advertising unavailable memor
 
   assert.equal(active.rawAgent.inputs[0]?.archivedThreadId, undefined);
   assert.equal(
-    active.store.getConversation('wk-recovery', 'wm-recovery')?.memoryThreadId,
+    active.store.getConversation(
+      'wechat_kf', 'wk-recovery', 'wm-recovery',
+    )?.memoryThreadId,
     '',
   );
 });

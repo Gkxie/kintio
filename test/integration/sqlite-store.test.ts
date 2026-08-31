@@ -67,7 +67,7 @@ test('SQLite store creates private directory and WAL/FULL/FK schema', (t) => {
     persistence.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  assert.equal(inspectSchemaVersion(database), 21);
+  assert.equal(inspectSchemaVersion(database), 22);
   assert.deepEqual(inspectPragmas(database), {
     journalMode: 'wal',
     synchronous: 2,
@@ -131,19 +131,19 @@ test('SQLite store preserves an existing shared parent directory mode', (t) => {
 test('sync page atomically inserts messages and advances a CAS cursor', (t) => {
   const { store } = createStore(t);
   const systemEvent = testWecomMessage({
-    id: '',
+    id: 'event-1',
     origin: 'system',
     type: 'event',
     sentAt: 100,
     index: 1,
     openKfId: 'wk-a',
-    externalUserId: '',
+    externalUserId: 'wm-event',
     text: '',
     summary: '[event]',
     attributes: { event_type: 'future_event' },
   });
   const result = store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     expectedCursor: '',
     nextCursor: 'cursor-1',
     messages: [
@@ -158,7 +158,7 @@ test('sync page atomically inserts messages and advances a CAS cursor', (t) => {
   assert.throws(
     () =>
       store.ingestSyncPage({
-        openKfId: 'wk-a',
+        accountKey: 'wk-a',
         expectedCursor: '',
         nextCursor: 'cursor-stale',
         messages: [customerMessage('msg-stale')],
@@ -166,11 +166,11 @@ test('sync page atomically inserts messages and advances a CAS cursor', (t) => {
     CursorConflictError,
   );
   assert.equal(store.getCursor('wk-a'), 'cursor-1');
-  assert.equal(store.getInbound(stableMessageKey('wk-a', 'msg-stale')), undefined);
+  assert.equal(store.getInbound(stableMessageKey('wechat_kf', 'wk-a', 'msg-stale')), undefined);
 
   assert.throws(() =>
     store.ingestSyncPage({
-      openKfId: 'wk-a',
+      accountKey: 'wk-a',
       expectedCursor: 'cursor-1',
       nextCursor: 'cursor-2',
       messages: [null as unknown as NormalizedMessage],
@@ -179,21 +179,21 @@ test('sync page atomically inserts messages and advances a CAS cursor', (t) => {
   assert.equal(store.getCursor('wk-a'), 'cursor-1');
 
   store.ingestSyncPage({
-    openKfId: 'wk-b',
+    accountKey: 'wk-b',
     expectedCursor: '',
     nextCursor: 'b-1',
     messages: [customerMessage('msg-1', 'wm-a', 'msg-1', 'wk-b')],
   });
   assert.notEqual(
-    stableMessageKey('wk-a', 'msg-1'),
-    stableMessageKey('wk-b', 'msg-1'),
+    stableMessageKey('wechat_kf', 'wk-a', 'msg-1'),
+    stableMessageKey('wechat_kf', 'wk-b', 'msg-1'),
   );
 });
 
 test('deferred startup messages stay out of recovery until promoted by live activity or idle drain', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'deferred',
     deferred: true,
     messages: [
@@ -205,69 +205,69 @@ test('deferred startup messages stay out of recovery until promoted by live acti
   assert.deepEqual(store.recoverStartup().inbound, []);
   assert.deepEqual(
     store.promoteDeferredConversation({
-      openKfId: 'wk-a', externalUserId: 'wm-a',
-    }).map((record) => record.msgid),
+      channel: 'wechat_kf', accountKey: 'wk-a', peerId: 'wm-a',
+    }).map((record) => record.providerMessageId),
     ['a-one', 'a-two'],
   );
   assert.deepEqual(
-    store.recoverStartup().inbound.map((record) => record.msgid),
+    store.recoverStartup().inbound.map((record) => record.providerMessageId),
     ['a-one', 'a-two'],
   );
   assert.deepEqual(
-    store.activateNextDeferredConversation().map((record) => record.msgid),
+    store.activateNextDeferredConversation().map((record) => record.providerMessageId),
     ['b-one'],
   );
-  assert.equal(store.getInbound(stableMessageKey('wk-a', 'b-one'))?.deferred, false);
+  assert.equal(store.getInbound(stableMessageKey('wechat_kf', 'wk-a', 'b-one'))?.deferred, false);
 });
 
 test('authorization is global but consecutive trigger counting resets by open_kfid', (t) => {
   const { store } = createStore(t);
-  const ingest = (openKfId: string, cursor: string, msgid: string): string => {
+  const ingest = (accountKey: string, cursor: string, msgid: string): string => {
     const next = `${cursor || 'start'}-${msgid}`;
     store.ingestSyncPage({
-      openKfId,
+      accountKey,
       expectedCursor: cursor,
       nextCursor: next,
-      messages: [customerMessage(msgid, 'wm-auth', '发车', openKfId)],
+      messages: [customerMessage(msgid, 'wm-auth', '发车', accountKey)],
     });
     return next;
   };
   let cursorA = ingest('wk-a', '', 'a-1');
-  const a1 = stableMessageKey('wk-a', 'a-1');
+  const a1 = stableMessageKey('wechat_kf', 'wk-a', 'a-1');
   assert.equal(
     store.evaluateAuthorization({
       messageKey: a1,
-      openKfId: 'wk-a',
-      externalUserId: 'wm-auth',
+      accountKey: 'wk-a',
+      peerId: 'wm-auth',
       isTrigger: true,
     }).consecutiveMatches,
     1,
   );
 
   let cursorB = ingest('wk-b', '', 'b-1');
-  const b1 = stableMessageKey('wk-b', 'b-1');
+  const b1 = stableMessageKey('wechat_kf', 'wk-b', 'b-1');
   assert.equal(
     store.evaluateAuthorization({
       messageKey: b1,
-      openKfId: 'wk-b',
-      externalUserId: 'wm-auth',
+      accountKey: 'wk-b',
+      peerId: 'wm-auth',
       isTrigger: true,
     }).consecutiveMatches,
     1,
   );
   cursorB = ingest('wk-b', cursorB, 'b-2');
   store.evaluateAuthorization({
-    messageKey: stableMessageKey('wk-b', 'b-2'),
-    openKfId: 'wk-b',
-    externalUserId: 'wm-auth',
+    messageKey: stableMessageKey('wechat_kf', 'wk-b', 'b-2'),
+    accountKey: 'wk-b',
+    peerId: 'wm-auth',
     isTrigger: true,
   });
   cursorB = ingest('wk-b', cursorB, 'b-3');
-  const b3 = stableMessageKey('wk-b', 'b-3');
+  const b3 = stableMessageKey('wechat_kf', 'wk-b', 'b-3');
   const authorized = store.evaluateAuthorization({
     messageKey: b3,
-    openKfId: 'wk-b',
-    externalUserId: 'wm-auth',
+    accountKey: 'wk-b',
+    peerId: 'wm-auth',
     isTrigger: true,
     confirmationText: '暗号确认，请继续对话',
   });
@@ -286,8 +286,8 @@ test('authorization is global but consecutive trigger counting resets by open_kf
   assert.deepEqual(
     store.evaluateAuthorization({
       messageKey: b3,
-      openKfId: 'wk-b',
-      externalUserId: 'wm-auth',
+      accountKey: 'wk-b',
+      peerId: 'wm-auth',
       isTrigger: true,
     }),
     {
@@ -299,9 +299,9 @@ test('authorization is global but consecutive trigger counting resets by open_kf
   cursorA = ingest('wk-a', cursorA, 'a-after');
   assert.equal(
     store.evaluateAuthorization({
-      messageKey: stableMessageKey('wk-a', 'a-after'),
-      openKfId: 'wk-a',
-      externalUserId: 'wm-auth',
+      messageKey: stableMessageKey('wechat_kf', 'wk-a', 'a-after'),
+      accountKey: 'wk-a',
+      peerId: 'wm-auth',
       isTrigger: false,
     }).decision,
     'already_authorized',
@@ -311,7 +311,7 @@ test('authorization is global but consecutive trigger counting resets by open_kf
 test('a later customer direction prevents an older send from completing its primary early', (t) => {
   const { store } = createStore(t);
   const firstPage = store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'race-one',
     messages: [customerMessage('race-primary', 'wm-race')],
   });
@@ -324,25 +324,25 @@ test('a later customer direction prevents an older send from completing its prim
     payload: { msgtype: 'text', text: { content: 'old direction' } },
   });
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     expectedCursor: 'race-one',
     nextCursor: 'race-two',
     messages: [customerMessage('race-followup', 'wm-race')],
   });
   store.closeAgentSession(session.token);
-  store.completeSend(attempt.attemptId, { wecomMsgId: 'wx-race-old' });
+  store.completeSend(attempt.attemptId, { providerMessageId: 'wx-race-old' });
   assert.equal(store.getInbound(primary)?.status, 'processing');
 });
 
 test('a steer rejected at the completed-turn boundary can become a fresh turn once', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'one',
     messages: [customerMessage('primary'), customerMessage('boundary')],
   });
-  const primary = stableMessageKey('wk-a', 'primary');
-  const boundary = stableMessageKey('wk-a', 'boundary');
+  const primary = stableMessageKey('wechat_kf', 'wk-a', 'primary');
+  const boundary = stableMessageKey('wechat_kf', 'wk-a', 'boundary');
   store.claimInbound({ messageKey: primary });
   const steering = store.beginInboundSteering({
     messageKey: boundary,
@@ -365,11 +365,11 @@ test('startup converts only in-flight sends to uncertain and never requeues them
   const firstPersistence = new StatePersistence({ filePath });
   const first = firstPersistence.core;
   first.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'one',
     messages: [customerMessage('recover')],
   });
-  const messageKey = stableMessageKey('wk-a', 'recover');
+  const messageKey = stableMessageKey('wechat_kf', 'wk-a', 'recover');
   first.claimInbound({ messageKey });
   seedPendingAttempts(first, messageKey, [
       {
@@ -378,7 +378,7 @@ test('startup converts only in-flight sends to uncertain and never requeues them
         payload: { msgtype: 'text', text: { content: '可能已发' } },
       },
     ]);
-  const sending = first.beginNextSend();
+  const sending = first.beginNextSend('wechat_kf');
   assert.ok(sending);
   firstPersistence.close();
 
@@ -391,7 +391,7 @@ test('startup converts only in-flight sends to uncertain and never requeues them
   const recovered = second.recoverStartup();
   assert.equal(recovered.uncertainSends, 1);
   assert.equal(second.getAttempt(sending.attemptId)?.status, 'uncertain');
-  assert.equal(second.beginNextSend(), undefined);
+  assert.equal(second.beginNextSend('wechat_kf'), undefined);
   assert.equal(second.getInbound(messageKey)?.status, 'completed');
 });
 
@@ -401,11 +401,11 @@ test('startup revokes every capability issued by the previous process', (t) => {
   const firstPersistence = new StatePersistence({ filePath });
   const first = firstPersistence.core;
   first.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'one',
     messages: [customerMessage('active-session')],
   });
-  const messageKey = stableMessageKey('wk-a', 'active-session');
+  const messageKey = stableMessageKey('wechat_kf', 'wk-a', 'active-session');
   first.claimInbound({ messageKey });
   const session = first.createAgentSession({ messageKey });
   firstPersistence.close();
@@ -424,7 +424,7 @@ test('startup revokes every capability issued by the previous process', (t) => {
 test('startup requeues inferred steering without a Codex turn and preserves confirmed steering', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'steering-recovery',
     messages: [
       customerMessage('unconfirmed-primary'),
@@ -433,16 +433,16 @@ test('startup requeues inferred steering without a Codex turn and preserves conf
       customerMessage('confirmed-followup'),
     ],
   });
-  const unconfirmedPrimary = stableMessageKey('wk-a', 'unconfirmed-primary');
-  const unconfirmedFollowup = stableMessageKey('wk-a', 'unconfirmed-followup');
+  const unconfirmedPrimary = stableMessageKey('wechat_kf', 'wk-a', 'unconfirmed-primary');
+  const unconfirmedFollowup = stableMessageKey('wechat_kf', 'wk-a', 'unconfirmed-followup');
   store.claimInbound({ messageKey: unconfirmedPrimary });
   store.beginInboundSteering({
     messageKey: unconfirmedFollowup,
     primaryMessageKey: unconfirmedPrimary,
   });
 
-  const confirmedPrimary = stableMessageKey('wk-a', 'confirmed-primary');
-  const confirmedFollowup = stableMessageKey('wk-a', 'confirmed-followup');
+  const confirmedPrimary = stableMessageKey('wechat_kf', 'wk-a', 'confirmed-primary');
+  const confirmedFollowup = stableMessageKey('wechat_kf', 'wk-a', 'confirmed-followup');
   store.claimInbound({ messageKey: confirmedPrimary });
   store.markInboundPreparing(confirmedPrimary, 'turn-confirmed');
   store.beginInboundSteering({
@@ -464,15 +464,15 @@ test('startup requeues inferred steering without a Codex turn and preserves conf
 test('recovery snapshot ignores known backlog but a newly arrived message invalidates it', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'snapshot-one',
     messages: [
       customerMessage('snapshot-primary'),
       customerMessage('snapshot-known-later'),
     ],
   });
-  const primary = stableMessageKey('wk-a', 'snapshot-primary');
-  const knownLater = stableMessageKey('wk-a', 'snapshot-known-later');
+  const primary = stableMessageKey('wechat_kf', 'wk-a', 'snapshot-primary');
+  const knownLater = stableMessageKey('wechat_kf', 'wk-a', 'snapshot-known-later');
   store.claimInbound({ messageKey: primary });
   const allowed = store.createAgentSession({
     messageKey: primary,
@@ -494,7 +494,7 @@ test('recovery snapshot ignores known backlog but a newly arrived message invali
     boundaryMessageKey: knownLater,
   });
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     expectedCursor: 'snapshot-one',
     nextCursor: 'snapshot-two',
     messages: [customerMessage('snapshot-new-live')],
@@ -509,15 +509,16 @@ test('recovery snapshot ignores known backlog but a newly arrived message invali
 test('archived memory binding follows the short-lived session and clears on completion', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'memory',
     messages: [customerMessage('memory-turn')],
   });
-  const messageKey = stableMessageKey('wk-a', 'memory-turn');
+  const messageKey = stableMessageKey('wechat_kf', 'wk-a', 'memory-turn');
   store.claimInbound({ messageKey });
   store.setConversationThread({
-    openKfId: 'wk-a',
-    externalUserId: 'wm-a',
+    channel: 'wechat_kf',
+    accountKey: 'wk-a',
+    peerId: 'wm-a',
     threadId: '01900000-0000-7000-8000-000000000002',
     memoryThreadId: '01900000-0000-7000-8000-000000000001',
   });
@@ -533,21 +534,24 @@ test('archived memory binding follows the short-lived session and clears on comp
     payload: { msgtype: 'text', text: { content: 'done' } },
   }]);
   assert.ok(pending);
-  const sending = store.beginNextSend();
+  const sending = store.beginNextSend('wechat_kf');
   assert.ok(sending);
-  store.completeSend(sending.attemptId, { wecomMsgId: 'wx-memory' });
+  store.completeSend(sending.attemptId, { providerMessageId: 'wx-memory' });
   store.finalizeAgentExecution({
     messageKey,
     attemptIds: [sending.attemptId],
   });
-  assert.equal(store.getConversation('wk-a', 'wm-a')?.memoryThreadId, '');
+  assert.equal(
+    store.getConversation('wechat_kf', 'wk-a', 'wm-a')?.memoryThreadId,
+    '',
+  );
   assert.throws(() => store.getAgentSession(session.token), /closed/u);
 });
 
 test('recent channel facts are conversation scoped and use the conversation index', (t) => {
   const { store, filePath } = createStore(t);
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'one',
     messages: [
       customerMessage('a-fact', 'wm-a'),
@@ -558,7 +562,7 @@ test('recent channel facts are conversation scoped and use the conversation inde
     ['a-fact', 'wm-a'],
     ['b-fact', 'wm-b'],
   ] as const) {
-    const messageKey = stableMessageKey('wk-a', msgid);
+    const messageKey = stableMessageKey('wechat_kf', 'wk-a', msgid);
     store.claimInbound({ messageKey });
     seedPendingAttempts(store, messageKey, [
         {
@@ -567,27 +571,28 @@ test('recent channel facts are conversation scoped and use the conversation inde
           payload: { msgtype: 'text', text: { content: externalUserId } },
         },
       ]);
-    const attempt = store.beginNextSend();
+    const attempt = store.beginNextSend('wechat_kf');
     assert.ok(attempt);
-    store.completeSend(attempt.attemptId, { wecomMsgId: `wx-${externalUserId}` });
+    store.completeSend(attempt.attemptId, { providerMessageId: `wx-${externalUserId}` });
   }
 
   const facts = store.listRecentConversationAttempts({
-    openKfId: 'wk-a',
-    externalUserId: 'wm-a',
+    channel: 'wechat_kf',
+    accountKey: 'wk-a',
+    peerId: 'wm-a',
     limit: 10,
   });
   assert.equal(facts.length, 1);
-  assert.equal(facts[0]?.externalUserId, 'wm-a');
-  assert.equal(facts[0]?.wecomMsgId, 'wx-wm-a');
+  assert.equal(facts[0]?.peerId, 'wm-a');
+  assert.equal(facts[0]?.providerMessageId, 'wx-wm-a');
   const plan = withTestDatabase(filePath, (database) => database.prepare(`
       EXPLAIN QUERY PLAN
       SELECT * FROM send_attempts
-      WHERE open_kfid = ? AND external_userid = ?
+      WHERE channel = ? AND open_kfid = ? AND external_userid = ?
         AND status IN ('accepted', 'failed', 'uncertain')
       ORDER BY updated_at DESC LIMIT ?
     `)
-    .all('wk-a', 'wm-a', 10) as unknown as { detail: string }[]);
+    .all('wechat_kf', 'wk-a', 'wm-a', 10) as unknown as { detail: string }[]);
   assert.match(
     plan.map((row) => String(row.detail)).join('\n'),
     /send_conversation_idx/u,
@@ -600,7 +605,7 @@ test('startup recovery returns every pending inbound beyond the old 1000-row cap
     customerMessage(`recover-${index}`, 'wm-many')
   );
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'many-cursor',
     messages,
   });
@@ -616,12 +621,12 @@ test('startup recovery returns every pending inbound beyond the old 1000-row cap
 test('primary failure requeues its steering input for bounded recovery', (t) => {
   const { store } = createStore(t);
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'steering-cursor',
     messages: [customerMessage('failure-primary'), customerMessage('failure-steer')],
   });
-  const primaryKey = stableMessageKey('wk-a', 'failure-primary');
-  const steerKey = stableMessageKey('wk-a', 'failure-steer');
+  const primaryKey = stableMessageKey('wechat_kf', 'wk-a', 'failure-primary');
+  const steerKey = stableMessageKey('wechat_kf', 'wk-a', 'failure-steer');
   store.claimInbound({ messageKey: primaryKey });
   store.beginInboundSteering({
     messageKey: steerKey,
@@ -636,28 +641,28 @@ test('primary failure requeues its steering input for bounded recovery', (t) => 
 test('composite foreign keys reject cross-customer media and send targets', (t) => {
   const { store, filePath } = createStore(t);
   store.ingestSyncPage({
-    openKfId: 'wk-a',
+    accountKey: 'wk-a',
     nextCursor: 'fk-cursor',
     messages: [customerMessage('owner', 'wm-owner')],
   });
-  const messageKey = stableMessageKey('wk-a', 'owner');
+  const messageKey = stableMessageKey('wechat_kf', 'wk-a', 'owner');
   withTestDatabase(filePath, (database) => {
     assert.throws(() =>
       database.prepare(`
         INSERT INTO inbound_media (
-          message_key, open_kfid, external_userid, position, kind,
+          message_key, channel, open_kfid, external_userid, position, kind,
           media_id, remembered_at
-        ) VALUES (?, 'wk-a', 'wm-other', 0, 'image', 'media', 1)
+        ) VALUES (?, 'wechat_kf', 'wk-a', 'wm-other', 0, 'image', 'media', 1)
       `).run(messageKey),
     /FOREIGN KEY/u);
     assert.throws(() =>
       database.prepare(`
         INSERT INTO send_attempts (
           attempt_key, source_message_key, open_kfid, external_userid,
-          send_index, source, sent_type, fingerprint, client_message_id,
+          channel, send_index, source, sent_type, fingerprint, client_message_id,
           status, created_at, updated_at
         ) VALUES (
-          'bad-attempt', ?, 'wk-a', 'wm-other', 0, 'test', 'text',
+          'bad-attempt', ?, 'wk-a', 'wm-other', 'wechat_kf', 0, 'test', 'text',
           'hash', 'client-id', 'pending', 1, 1
         )
       `).run(messageKey),

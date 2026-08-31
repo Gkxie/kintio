@@ -97,7 +97,7 @@ async function createHarness(
     const cursor = cursors.get(openKfId) || '';
     const next = `${cursor}-${String(raw.msgid)}`;
     const result = store.ingestSyncPage({
-      openKfId, expectedCursor: cursor, nextCursor: next,
+      accountKey: openKfId, expectedCursor: cursor, nextCursor: next,
       messages: [normalizeWecomMessage(raw, openKfId, { cursor, index: 0 })],
     });
     cursors.set(openKfId, next);
@@ -139,26 +139,30 @@ function immediate(input: AgentInput): SimulatedAgentSubmission {
   }));
 }
 
-test('malformed records and unsupported origin=5 are ignored without side effects', async (t) => {
+test('malformed identities are rejected and unsupported origin=5 is ignored', async (t) => {
   const harness = await createHarness(t, async (input) => immediate(input));
-  const keys = [
-    harness.ingest(customer('bad-customer', 'x', { external_userid: '' })),
-    harness.ingest({
-      msgid: 'unsupported-origin', open_kfid: 'wk-one', external_userid: 'wm-one',
-      origin: 5, msgtype: 'text', text: { content: 'x' },
-    }),
-    harness.ingest({
+  assert.throws(
+    () => harness.ingest(customer('bad-customer', 'x', {
+      external_userid: '',
+    })),
+    /peerId is required/u,
+  );
+  assert.throws(
+    () => harness.ingest({
       msgid: 'bad-system', origin: 4, msgtype: 'event',
       event: { event_type: 'future_event' },
     }),
-  ];
-  for (const key of keys) await harness.processor.enqueue(key);
-  assert.deepEqual(keys.map((key) => harness.store.getInbound(key)?.status), [
-    'ignored', 'ignored', 'ignored',
-  ]);
+    /peerId is required/u,
+  );
+  const key = harness.ingest({
+    msgid: 'unsupported-origin', open_kfid: 'wk-one', external_userid: 'wm-one',
+    origin: 5, msgtype: 'text', text: { content: 'x' },
+  });
+  await harness.processor.enqueue(key);
+  assert.equal(harness.store.getInbound(key)?.status, 'ignored');
   assert.equal(harness.inputs.length, 0);
   assert.equal(harness.downloads.length, 0);
-  assert.ok(keys.every((key) => harness.store.listMessageAttempts(key).length === 0));
+  assert.equal(harness.store.listMessageAttempts(key).length, 0);
 });
 
 test('unsupported message resets unauthorized trigger progress without Codex or media', async (t) => {
@@ -194,8 +198,8 @@ test('authorization won by another conversation continues the current message', 
     }));
     const result = harness.store.evaluateAuthorization({
       messageKey,
-      openKfId: 'wk-auth',
-      externalUserId: 'wm-one',
+      accountKey: 'wk-auth',
+      peerId: 'wm-one',
       isTrigger: true,
       requiredConsecutive: 3,
     });

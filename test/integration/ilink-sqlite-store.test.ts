@@ -13,7 +13,7 @@ import {
 } from '../../src/ilink/protocol/types.ts';
 import {
   normalizeIlinkInboundMessage,
-  type IlinkInboundCandidate,
+  type IlinkNormalizedInbound,
 } from '../../src/ilink/message.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
@@ -75,7 +75,7 @@ function candidate(
   message: IlinkMessage,
   cursor: string,
   index: number,
-): IlinkInboundCandidate {
+): IlinkNormalizedInbound {
   const result = normalizeIlinkInboundMessage(
     message,
     { accountKey, botId, ownerUserId: ownerPeerId },
@@ -87,13 +87,19 @@ function candidate(
 
 function pageEntry(
   box: IlinkSecretBox,
-  value: IlinkInboundCandidate,
+  value: IlinkNormalizedInbound,
   secretGeneration: number,
+  sync = value.message.sync,
 ): IlinkPollPageEntry {
   return {
-    candidate: value,
+    message: sync === value.message.sync
+      ? value.message
+      : { ...value.message, sync },
+    ...(value.facts.providerSeq === undefined
+      ? {}
+      : { providerSeq: value.facts.providerSeq }),
     secretGeneration,
-    sealedContextToken: box.seal(value.contextToken, {
+    sealedContextToken: box.seal(value.facts.contextToken, {
       secretKind: 'context_token',
       accountId: accountKey,
       peerId: ownerPeerId,
@@ -300,7 +306,7 @@ test('commits cursor, inbox, encrypted windows, and out-of-order ordering atomic
     messages: [
       {
         ...pageEntry(box, newer, 20),
-        sealedImages: newer.images.map((image) => ({
+        sealedImages: newer.facts.images.map((image) => ({
           position: image.position,
           secretGeneration: 2_020 + image.position,
           sealedLocator: box.seal(JSON.stringify({
@@ -314,7 +320,7 @@ test('commits cursor, inbox, encrypted windows, and out-of-order ordering atomic
       },
       {
         ...pageEntry(box, older, 10),
-        sealedImages: older.images.map((image) => ({
+        sealedImages: older.facts.images.map((image) => ({
           position: image.position,
           secretGeneration: 1_010 + image.position,
           sealedLocator: box.seal(JSON.stringify({
@@ -407,12 +413,8 @@ test('commits cursor, inbox, encrypted windows, and out-of-order ordering atomic
     expectedCursor: 'cursor-1',
     nextCursor: 'cursor-2',
     messages: [{
-      ...pageEntry(box, newer, 20),
-      candidate: {
-        ...newer,
-        sync: { cursor: 'cursor-1', index: 0 },
-      },
-      sealedImages: newer.images.map((image) => ({
+      ...pageEntry(box, newer, 20, { cursor: 'cursor-1', index: 0 }),
+      sealedImages: newer.facts.images.map((image) => ({
         position: image.position,
         secretGeneration: 2_020 + image.position,
         sealedLocator: box.seal(JSON.stringify({
@@ -472,7 +474,16 @@ test('pair or generation failures roll back cursor, inbox, and reply windows', a
     contextToken: 'context-1',
     text: 'hello',
   }), 'cursor-0', 0);
-  const wrongPeer = { ...valid, peerId: 'other@im.wechat' };
+  const wrongPeer = {
+    ...valid,
+    message: {
+      ...valid.message,
+      conversation: {
+        ...valid.message.conversation,
+        peerId: 'other@im.wechat',
+      },
+    },
+  };
   assert.throws(
     () => ilink.commitPollPage({
       accountKey,
@@ -519,6 +530,13 @@ test('pair or generation failures roll back cursor, inbox, and reply windows', a
     }),
     (error: unknown) => errorCode(error, 'invalid_input'),
   );
+  assert.equal(ilink.getCursor(accountKey)?.cursor, 'cursor-0');
+  assert.equal(Number((database.prepare(`
+    SELECT COUNT(*) AS count FROM inbound_messages
+  `).get() as { count: number }).count), 0);
+  assert.equal(Number((database.prepare(`
+    SELECT COUNT(*) AS count FROM ilink_reply_windows
+  `).get() as { count: number }).count), 0);
   assert.deepEqual(store.foreignKeyCheck(), []);
 });
 
@@ -537,13 +555,13 @@ test('same-millisecond client IDs use delivery order when upstream seq is absent
     message.client_id = clientId;
     return message;
   };
-  const first = candidate(withoutSequence('client-a', 'first'), 'initial', 0);
-  const second = candidate(withoutSequence('client-b', 'second'), 'initial', 1);
+  const first = candidate(withoutSequence('client-a', 'first'), '', 0);
+  const second = candidate(withoutSequence('client-b', 'second'), '', 1);
   ilink.commitPollPage({
     accountKey, expectedGeneration: 1, expectedCursor: '', nextCursor: 'same-ms',
     messages: [
-      { ...pageEntry(box, first, 1), candidate: { ...first, sync: { cursor: '', index: 0 } } },
-      { ...pageEntry(box, second, 2), candidate: { ...second, sync: { cursor: '', index: 1 } } },
+      pageEntry(box, first, 1),
+      pageEntry(box, second, 2),
     ],
   });
   const open = database.prepare(`
@@ -551,7 +569,7 @@ test('same-millisecond client IDs use delivery order when upstream seq is absent
     JOIN inbound_messages AS inbound ON inbound.message_key = window.source_message_key
     WHERE window.state = 'open'
   `).get() as { msgid: string };
-  assert.equal(open.msgid, second.providerMessageId);
+  assert.equal(open.msgid, second.message.providerMessageId);
 
   const late = candidate(withoutSequence('client-late', 'late'), 'same-ms', 0);
   ilink.commitPollPage({
@@ -566,7 +584,7 @@ test('same-millisecond client IDs use delivery order when upstream seq is absent
     JOIN inbound_messages AS inbound ON inbound.message_key = window.source_message_key
     WHERE window.state = 'open'
   `).get() as { msgid: string };
-  assert.equal(stillOpen.msgid, second.providerMessageId);
+  assert.equal(stillOpen.msgid, second.message.providerMessageId);
 
   const incomparable = candidate(rawMessage({
     id: 99,
@@ -587,7 +605,7 @@ test('same-millisecond client IDs use delivery order when upstream seq is absent
     JOIN inbound_messages AS inbound ON inbound.message_key = window.source_message_key
     WHERE window.state = 'open'
   `).get() as { msgid: string };
-  assert.equal(finalOpen.msgid, second.providerMessageId);
+  assert.equal(finalOpen.msgid, second.message.providerMessageId);
 });
 
 test('startup backlog stays deferred and is absorbed into the next live direction', async (t) => {
@@ -605,17 +623,14 @@ test('startup backlog stays deferred and is absorbed into the next live directio
     createdAt: now() - 10_000,
     contextToken: 'context-old-backlog',
     text: 'old backlog',
-  }), 'initial', 0);
+  }), '', 0);
   const backlog = ilink.commitPollPage({
     accountKey,
     expectedGeneration: 1,
     expectedCursor: '',
     nextCursor: 'after-backlog',
     deferredBefore: now(),
-    messages: [{
-      ...pageEntry(box, old, 30),
-      candidate: { ...old, sync: { cursor: '', index: 0 } },
-    }],
+    messages: [pageEntry(box, old, 30)],
   });
   assert.deepEqual(backlog.insertedMessageKeys, []);
   assert.equal(backlog.deferredMessageCount, 1);
@@ -640,7 +655,10 @@ test('startup backlog stays deferred and is absorbed into the next live directio
   });
   assert.deepEqual(mergedBacklog.insertedMessageKeys, []);
   assert.equal(mergedBacklog.deferredMessageCount, 1);
-  assert.equal(store.getInbound(stableMessageKey(accountKey, 'message:30'))?.status, 'absorbed');
+  assert.equal(
+    store.getInbound(stableMessageKey('weixin_ilink', accountKey, 'message:30'))?.status,
+    'absorbed',
+  );
 
   const live = candidate(rawMessage({
     id: 32,
@@ -698,20 +716,19 @@ test('iLink image locators are encrypted and retained while their inbox is actio
       },
     },
   }];
-  const image = candidate(raw, 'initial', 0);
-  assert.equal(image.images.length, 1);
+  const image = candidate(raw, '', 0);
+  assert.equal(image.facts.images.length, 1);
   const imageGeneration = 4_040;
   const committed = ilink.commitPollPage({
     accountKey, expectedGeneration: 1, expectedCursor: '', nextCursor: 'image-cursor',
     messages: [{
       ...pageEntry(box, image, 40),
-      candidate: { ...image, sync: { cursor: '', index: 0 } },
       sealedImages: [{
         position: 0,
         secretGeneration: imageGeneration,
         sealedLocator: box.seal(JSON.stringify({
-          downloadUrl: image.images[0]!.downloadUrl,
-          aesKey: image.images[0]!.aesKey,
+          downloadUrl: image.facts.images[0]!.downloadUrl,
+          aesKey: image.facts.images[0]!.aesKey,
         }), {
           secretKind: 'media_locator',
           accountId: accountKey,
@@ -739,8 +756,8 @@ test('iLink image locators are encrypted and retained while their inbox is actio
       peerId: ownerPeerId, generation: imageGeneration,
     })),
     {
-      downloadUrl: image.images[0]!.downloadUrl,
-      aesKey: image.images[0]!.aesKey,
+      downloadUrl: image.facts.images[0]!.downloadUrl,
+      aesKey: image.facts.images[0]!.aesKey,
     },
   );
   const followup = candidate(rawMessage({
@@ -890,12 +907,10 @@ test('one primary can finalize attempts from separate ten-send token generations
   const first = candidate(rawMessage({
     id: 50, seq: 50, createdAt: now() - 1_000,
     contextToken: 'context-50', text: 'first',
-  }), 'initial', 0);
+  }), '', 0);
   const firstPage = ilink.commitPollPage({
     accountKey, expectedGeneration: 1, expectedCursor: '', nextCursor: 'cursor-50',
-    messages: [{ ...pageEntry(box, first, 50), candidate: {
-      ...first, sync: { cursor: '', index: 0 },
-    } }],
+    messages: [pageEntry(box, first, 50)],
   });
   const primary = firstPage.insertedMessageKeys[0]!;
   store.claimInbound({ messageKey: primary });
@@ -964,12 +979,10 @@ test('expired reply-window keeps its audit row until the recoverable inbound ter
   });
   const inbound = candidate(rawMessage({
     id: 60, seq: 60, createdAt: now(), contextToken: 'context-60', text: 'expire',
-  }), 'initial', 0);
+  }), '', 0);
   const committed = ilink.commitPollPage({
     accountKey, expectedGeneration: 1, expectedCursor: '', nextCursor: 'cursor-60',
-    messages: [{ ...pageEntry(box, inbound, 60), candidate: {
-      ...inbound, sync: { cursor: '', index: 0 },
-    } }],
+    messages: [pageEntry(box, inbound, 60)],
   });
   const windowId = committed.replyWindowIds[0]!;
   assert.ok(ilink.getReplyWindowSecret(windowId));

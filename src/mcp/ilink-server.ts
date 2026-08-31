@@ -44,7 +44,7 @@ const EXECUTOR_RECEIPT_SCHEMA = z.strictObject({
   attemptId: z.string(),
   sendIndex: z.number().int().min(-1),
   type: z.enum(['text', 'image']),
-  msgid: z.string(),
+  providerMessageId: z.string(),
   error: ERROR_INPUT_SCHEMA.optional(),
 });
 const ERROR_OUTPUT_SCHEMA = z.strictObject({
@@ -61,7 +61,7 @@ const RECEIPT_SCHEMA = z.strictObject({
   attemptId: z.string(),
   sendIndex: z.number().int().min(-1),
   type: z.enum(['text', 'image']),
-  msgid: z.string(),
+  providerMessageId: z.string(),
   error: ERROR_OUTPUT_SCHEMA.optional(),
 });
 const SEND_TEXT_SCHEMA = z.strictObject({
@@ -98,7 +98,7 @@ export interface IlinkToolReceipt {
   readonly attemptId: string;
   readonly sendIndex: number;
   readonly type: 'text' | 'image';
-  readonly msgid: string;
+  readonly providerMessageId: string;
   readonly error?: IlinkToolError;
 }
 
@@ -156,7 +156,7 @@ function toolFailure(type: 'text' | 'image'): CallToolResult {
     attemptId: '',
     sendIndex: -1,
     type,
-    msgid: '',
+    providerMessageId: '',
     error: {
       kind: 'ilink_tool_error',
       message: SAFE_ERROR_MESSAGES.ilink_tool_error,

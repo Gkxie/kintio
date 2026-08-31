@@ -1,4 +1,7 @@
-import { normalizeIlinkInboundMessage, type IlinkInboundCandidate } from './message.ts';
+import {
+  normalizeIlinkInboundMessage,
+  type IlinkNormalizedInbound,
+} from './message.ts';
 import { IlinkClient, IlinkProtocolError } from './protocol/client.ts';
 import type {
   IlinkGetUpdatesRequest,
@@ -27,7 +30,7 @@ export interface IlinkListenerCommitInput {
   readonly expectedGeneration: number;
   readonly expectedCursor: string;
   readonly nextCursor: string;
-  readonly candidates: readonly IlinkInboundCandidate[];
+  readonly messages: readonly IlinkNormalizedInbound[];
   readonly deferredBefore: number;
 }
 
@@ -313,24 +316,13 @@ export class IlinkListenerManager {
           botId: state.account.providerAccountId,
           ownerUserId: state.account.ownerPeerId,
         } as const;
-        const candidates = (response.msgs ?? []).flatMap((message, index) => {
-          // The first upstream poll legitimately uses an empty cursor. Give the
-          // normalizer a stable key seed, then restore the actual page cursor
-          // required by the store's compare-and-set contract.
-          const normalizationCursor = expectedCursor || 'initial';
+        const messages = (response.msgs ?? []).flatMap((message, index) => {
           const normalized = normalizeIlinkInboundMessage(
             message,
             pair,
-            { cursor: normalizationCursor, index },
+            { cursor: expectedCursor, index },
           );
-          if (!normalized) return [];
-          const candidate = normalizationCursor === expectedCursor
-            ? normalized
-            : Object.freeze({
-              ...normalized,
-              sync: Object.freeze({ cursor: expectedCursor, index }),
-            });
-          return [candidate];
+          return normalized ? [normalized] : [];
         });
 
         let committed: IlinkListenerCommitResult;
@@ -340,7 +332,7 @@ export class IlinkListenerManager {
             expectedGeneration: state.account.generation,
             expectedCursor,
             nextCursor,
-            candidates,
+            messages,
             deferredBefore: state.startedAt,
           });
         } catch (error: unknown) {
@@ -358,7 +350,7 @@ export class IlinkListenerManager {
         if (
           state.catchingUp &&
           ((response.msgs?.length || 0) === 0 ||
-            candidates.some((candidate) => candidate.createTime >= state.startedAt))
+            messages.some(({ message }) => message.sentAt >= state.startedAt))
         ) {
           state.catchingUp = false;
           await this.#notifyBacklogReadyIfAll();

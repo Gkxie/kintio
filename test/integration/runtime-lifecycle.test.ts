@@ -56,7 +56,7 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
   const previousPersistence = new StatePersistence({ filePath: databaseFile });
   const previous = previousPersistence.core;
   previous.ingestSyncPage({
-    openKfId: 'wk-disabled-channel',
+    accountKey: 'wk-disabled-channel',
     nextCursor: 'legacy-live',
     messages: [testWecomMessage({
       id: 'legacy-live', openKfId: 'wk-disabled-channel',
@@ -64,7 +64,7 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
     })],
   });
   previous.ingestSyncPage({
-    openKfId: 'wk-disabled-channel',
+    accountKey: 'wk-disabled-channel',
     expectedCursor: 'legacy-live',
     nextCursor: 'legacy-deferred',
     deferred: true,
@@ -100,10 +100,10 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
   t.onTestFinished(() => preservedPersistence.close());
   assert.deepEqual({
     live: preserved.getInbound(
-      stableMessageKey('wk-disabled-channel', 'legacy-live'),
+      stableMessageKey('wechat_kf', 'wk-disabled-channel', 'legacy-live'),
     )?.status,
     deferred: preserved.getInbound(
-      stableMessageKey('wk-disabled-channel', 'legacy-deferred'),
+      stableMessageKey('wechat_kf', 'wk-disabled-channel', 'legacy-deferred'),
     )?.deferred,
   }, { live: 'received', deferred: true });
 });
@@ -149,7 +149,7 @@ test('runtime readiness does not wait for a blocked startup catch-up backlog', a
   const seededPersistence = new StatePersistence({ filePath: databaseFile });
   const seeded = seededPersistence.core;
   seeded.ingestSyncPage({
-    openKfId: 'wk-catch-up',
+    accountKey: 'wk-catch-up',
     nextCursor: 'cursor-before-start',
     messages: [],
   });

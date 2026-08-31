@@ -19,20 +19,23 @@ async function createStore(t: TestContext) {
 
 function ingest(
   store: CoreState,
-  openKfId: string,
-  externalUserId: string,
+  accountKey: string,
+  peerId: string,
   msgid: string,
   cursor: string,
 ) {
   store.ingestSyncPage({
-    openKfId,
+    accountKey,
     expectedCursor: cursor,
     nextCursor: `${cursor}-${msgid}`,
     messages: [testWecomMessage({
-      id: msgid, openKfId, externalUserId, type: 'image',
+      id: msgid,
+      openKfId: accountKey,
+      externalUserId: peerId,
+      type: 'image',
     })],
   });
-  return stableMessageKey(openKfId, msgid);
+  return stableMessageKey('wechat_kf', accountKey, msgid);
 }
 
 test('media TTL cleanup is conversation scoped and preserves fresh media', async (t) => {
@@ -55,12 +58,16 @@ test('media TTL cleanup is conversation scoped and preserves fresh media', async
   });
 
   assert.deepEqual(
-    store.listRecentMedia({ openKfId: 'wk-a', externalUserId: 'wm-a', maxAgeMs: 2_000 })
+    store.listRecentMedia({
+      channel: 'wechat_kf', accountKey: 'wk-a', peerId: 'wm-a', maxAgeMs: 2_000,
+    })
       .map((item) => item.mediaId),
     ['media-fresh-a', 'media-old-a'],
   );
   assert.deepEqual(
-    store.listRecentMedia({ openKfId: 'wk-b', externalUserId: 'wm-b', maxAgeMs: 2_000 })
+    store.listRecentMedia({
+      channel: 'wechat_kf', accountKey: 'wk-b', peerId: 'wm-b', maxAgeMs: 2_000,
+    })
       .map((item) => item.mediaId),
     ['media-old-b'],
   );
@@ -71,12 +78,16 @@ test('media TTL cleanup is conversation scoped and preserves fresh media', async
   });
   assert.equal(cleaned.media, 2);
   assert.deepEqual(
-    store.listRecentMedia({ openKfId: 'wk-a', externalUserId: 'wm-a' })
+    store.listRecentMedia({
+      channel: 'wechat_kf', accountKey: 'wk-a', peerId: 'wm-a',
+    })
       .map((item) => item.mediaId),
     ['media-fresh-a'],
   );
   assert.deepEqual(
-    store.listRecentMedia({ openKfId: 'wk-b', externalUserId: 'wm-b' }),
+    store.listRecentMedia({
+      channel: 'wechat_kf', accountKey: 'wk-b', peerId: 'wm-b',
+    }),
     [],
   );
 });
@@ -96,15 +107,15 @@ test('cleanup retains uncertain and expires accepted/failed audits', async (t) =
     sendIndex: 0, sentType: 'text',
     payload: { msgtype: 'text', text: { content: 'accepted' } },
   }]);
-  const acceptedSending = store.beginNextSend();
+  const acceptedSending = store.beginNextSend('wechat_kf');
   if (!acceptedSending) throw new Error('Expected accepted send');
-  store.completeSend(acceptedSending.attemptId, { wecomMsgId: 'accepted-id' });
+  store.completeSend(acceptedSending.attemptId, { providerMessageId: 'accepted-id' });
 
   const failed = reserve('failed', [{
     sendIndex: 0, sentType: 'text',
     payload: { msgtype: 'text', text: { content: 'failed' } },
   }]);
-  const failedSending = store.beginNextSend();
+  const failedSending = store.beginNextSend('wechat_kf');
   if (!failedSending) throw new Error('Expected failed send');
   store.failSend(failedSending.attemptId, new Error('definitive'));
 
@@ -112,7 +123,7 @@ test('cleanup retains uncertain and expires accepted/failed audits', async (t) =
     sendIndex: 0, sentType: 'text',
     payload: { msgtype: 'text', text: { content: 'uncertain' } },
   }]);
-  const uncertainSending = store.beginNextSend();
+  const uncertainSending = store.beginNextSend('wechat_kf');
   if (!uncertainSending) throw new Error('Expected uncertain send');
   store.markSendUncertain(uncertainSending.attemptId, new Error('network'));
 

@@ -345,25 +345,29 @@ export async function createRuntime({
                 expectedCursor: input.expectedCursor,
                 nextCursor: input.nextCursor,
                 deferredBefore: input.deferredBefore,
-                messages: input.candidates.map((candidate) => {
+                messages: input.messages.map(({ message, facts }) => {
+                  const { accountKey, peerId } = message.conversation;
                   const secretGeneration = ilinkSecretGeneration(
-                    candidate.providerMessageId,
+                    message.providerMessageId,
                   );
                   return {
-                    candidate,
+                    message,
+                    ...(facts.providerSeq === undefined
+                      ? {}
+                      : { providerSeq: facts.providerSeq }),
                     secretGeneration,
                     sealedContextToken: ilinkSecretBox.seal(
-                      candidate.contextToken,
+                      facts.contextToken,
                       {
                         secretKind: 'context_token',
-                        accountId: candidate.accountKey,
-                        peerId: candidate.peerId,
+                        accountId: accountKey,
+                        peerId,
                         generation: secretGeneration,
                       },
                     ),
-                    sealedImages: candidate.images.map((image) => {
+                    sealedImages: facts.images.map((image) => {
                       const imageGeneration = ilinkSecretGeneration(
-                        `${candidate.providerMessageId}:image:${image.position}`,
+                        `${message.providerMessageId}:image:${image.position}`,
                       );
                       return {
                         position: image.position,
@@ -375,8 +379,8 @@ export async function createRuntime({
                           }),
                           {
                             secretKind: 'media_locator',
-                            accountId: candidate.accountKey,
-                            peerId: candidate.peerId,
+                            accountId: accountKey,
+                            peerId,
                             generation: imageGeneration,
                           },
                         ),

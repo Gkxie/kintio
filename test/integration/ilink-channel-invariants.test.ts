@@ -3,7 +3,7 @@ import { test, type TestContext } from 'vitest';
 
 import {
   normalizeIlinkInboundMessage,
-  type IlinkInboundCandidate,
+  type IlinkNormalizedInbound,
 } from '../../src/ilink/message.ts';
 import {
   IlinkMessageItemType,
@@ -104,7 +104,7 @@ function inboundCandidate({
   cursor: string;
   index?: number;
   text?: string;
-}): IlinkInboundCandidate {
+}): IlinkNormalizedInbound {
   const normalized = normalizeIlinkInboundMessage({
     message_id: providerMessageId,
     seq,
@@ -123,28 +123,26 @@ function inboundCandidate({
     botId: account.botId,
     ownerUserId: account.peerId,
   }, {
-    // The normalizer rejects an empty transport cursor. The store owns the
-    // initial empty cursor and validates the immutable candidate below.
-    cursor: cursor || 'initial-cursor',
+    cursor,
     index,
   });
   assert.ok(normalized);
-  return Object.freeze({
-    ...normalized,
-    sync: Object.freeze({ cursor, index }),
-  });
+  return normalized;
 }
 
 function pageEntry(
   created: StoreFixture,
   account: AccountFixture,
-  candidate: IlinkInboundCandidate,
+  normalized: IlinkNormalizedInbound,
   secretGeneration: number,
 ): IlinkPollPageEntry {
   return {
-    candidate,
+    message: normalized.message,
+    ...(normalized.facts.providerSeq === undefined
+      ? {}
+      : { providerSeq: normalized.facts.providerSeq }),
     secretGeneration,
-    sealedContextToken: created.box.seal(candidate.contextToken, {
+    sealedContextToken: created.box.seal(normalized.facts.contextToken, {
       secretKind: 'context_token',
       accountId: account.accountKey,
       peerId: account.peerId,
@@ -172,7 +170,7 @@ function commitMessage(
     text?: string;
   },
 ) {
-  const candidate = inboundCandidate({
+  const normalized = inboundCandidate({
     account,
     providerMessageId,
     seq,
@@ -185,7 +183,7 @@ function commitMessage(
     expectedGeneration: 1,
     expectedCursor,
     nextCursor,
-    messages: [pageEntry(created, account, candidate, providerMessageId)],
+    messages: [pageEntry(created, account, normalized, providerMessageId)],
   });
 }
 
@@ -359,7 +357,7 @@ test('a new token owns fresh quota while an old-window send is in flight', async
 
   const newWindowBeforeOldResult = created.ilink.getReplyWindow(secondWindowId);
   created.store.completeSend(oldSending.attemptId, {
-    wecomMsgId: 'provider-result-from-old-window',
+    providerMessageId: 'provider-result-from-old-window',
   });
   assert.deepEqual(
     created.ilink.getReplyWindow(secondWindowId),
@@ -414,8 +412,8 @@ test('identical provider message IDs stay isolated across iLink accounts', async
   assert.ok(windowB);
 
   assert.notEqual(messageA, messageB);
-  assert.equal(messageA, stableMessageKey(accountA.accountKey, 'message:303'));
-  assert.equal(messageB, stableMessageKey(accountB.accountKey, 'message:303'));
+  assert.equal(messageA, stableMessageKey('weixin_ilink', accountA.accountKey, 'message:303'));
+  assert.equal(messageB, stableMessageKey('weixin_ilink', accountB.accountKey, 'message:303'));
   assert.deepEqual(
     [
       created.ilink.getCursor(accountA.accountKey)?.cursor,
@@ -436,22 +434,24 @@ test('identical provider message IDs stay isolated across iLink accounts', async
   );
 
   created.store.setConversationThread({
-    openKfId: accountA.accountKey,
-    externalUserId: accountA.peerId,
+    channel: 'weixin_ilink',
+    accountKey: accountA.accountKey,
+    peerId: accountA.peerId,
     threadId: '01900000-0000-7000-8000-00000000030a',
     memoryThreadId: '01900000-0000-7000-8000-00000000031a',
   });
   created.store.setConversationThread({
-    openKfId: accountB.accountKey,
-    externalUserId: accountB.peerId,
+    channel: 'weixin_ilink',
+    accountKey: accountB.accountKey,
+    peerId: accountB.peerId,
     threadId: '01900000-0000-7000-8000-00000000030b',
     memoryThreadId: '01900000-0000-7000-8000-00000000031b',
   });
   assert.deepEqual(
     [
-      created.store.getConversation(accountA.accountKey, accountA.peerId)
+      created.store.getConversation('weixin_ilink', accountA.accountKey, accountA.peerId)
         ?.threadId,
-      created.store.getConversation(accountB.accountKey, accountB.peerId)
+      created.store.getConversation('weixin_ilink', accountB.accountKey, accountB.peerId)
         ?.threadId,
     ],
     [
@@ -466,9 +466,9 @@ test('identical provider message IDs stay isolated across iLink accounts', async
   assert.notEqual(sessionA.token, sessionB.token);
   assert.deepEqual(
     [
-      [sessionA.openKfId, sessionA.externalUserId, sessionA.replyWindowId,
+      [sessionA.accountKey, sessionA.peerId, sessionA.replyWindowId,
         sessionA.memoryThreadId],
-      [sessionB.openKfId, sessionB.externalUserId, sessionB.replyWindowId,
+      [sessionB.accountKey, sessionB.peerId, sessionB.replyWindowId,
         sessionB.memoryThreadId],
     ],
     [
@@ -496,8 +496,8 @@ test('identical provider message IDs stay isolated across iLink accounts', async
   assert.notEqual(attemptA.clientMessageId, attemptB.clientMessageId);
   assert.deepEqual(
     [
-      [attemptA.openKfId, attemptA.externalUserId, attemptA.replyWindowId],
-      [attemptB.openKfId, attemptB.externalUserId, attemptB.replyWindowId],
+      [attemptA.accountKey, attemptA.peerId, attemptA.replyWindowId],
+      [attemptB.accountKey, attemptB.peerId, attemptB.replyWindowId],
     ],
     [
       [accountA.accountKey, accountA.peerId, windowA.replyWindowId],
@@ -520,22 +520,24 @@ test('identical provider message IDs stay isolated across iLink accounts', async
     attemptId: attemptB.attemptId,
   });
   created.store.completeSend(attemptA.attemptId, {
-    wecomMsgId: 'provider-send-account-a',
+    providerMessageId: 'provider-send-account-a',
   });
   created.store.completeSend(attemptB.attemptId, {
-    wecomMsgId: 'provider-send-account-b',
+    providerMessageId: 'provider-send-account-b',
   });
   assert.deepEqual(
     created.store.listRecentConversationAttempts({
-      openKfId: accountA.accountKey,
-      externalUserId: accountA.peerId,
+      channel: 'weixin_ilink',
+      accountKey: accountA.accountKey,
+      peerId: accountA.peerId,
     }).map((attempt) => attempt.attemptId),
     [attemptA.attemptId],
   );
   assert.deepEqual(
     created.store.listRecentConversationAttempts({
-      openKfId: accountB.accountKey,
-      externalUserId: accountB.peerId,
+      channel: 'weixin_ilink',
+      accountKey: accountB.accountKey,
+      peerId: accountB.peerId,
     }).map((attempt) => attempt.attemptId),
     [attemptB.attemptId],
   );
@@ -549,6 +551,186 @@ test('identical provider message IDs stay isolated across iLink accounts', async
   assert.equal(
     created.ilink.getCursor(accountB.accountKey)?.cursor,
     'cursor-account-b',
+  );
+  assert.deepEqual(created.store.foreignKeyCheck(), []);
+});
+
+test('the same account, peer, and provider ID stay isolated across channels', async (t) => {
+  const created = await fixture(t);
+  const account = registerAccount(
+    created,
+    'cross-channel-collision@im.bot',
+    'cross-channel-collision@im.wechat',
+  );
+  const providerMessageId = 'message:404';
+  const wecom = created.store.ingestSyncPage({
+    accountKey: account.accountKey,
+    nextCursor: 'wechat-cursor',
+    messages: [testWecomMessage({
+      id: providerMessageId,
+      openKfId: account.accountKey,
+      externalUserId: account.peerId,
+      sentAt: created.now(),
+      text: 'wechat copy',
+    })],
+  });
+  const ilink = commitMessage(created, account, {
+    providerMessageId: 404,
+    text: 'iLink copy',
+  });
+  const wecomKey = wecom.insertedMessageKeys[0]!;
+  const ilinkKey = ilink.insertedMessageKeys[0]!;
+
+  assert.equal(
+    wecomKey,
+    stableMessageKey(
+      'wechat_kf',
+      account.accountKey,
+      providerMessageId,
+    ),
+  );
+  assert.equal(
+    ilinkKey,
+    stableMessageKey(
+      'weixin_ilink',
+      account.accountKey,
+      providerMessageId,
+    ),
+  );
+  assert.notEqual(wecomKey, ilinkKey);
+  assert.deepEqual(
+    created.store.listPendingInbound({
+      channel: 'wechat_kf',
+      accountKey: account.accountKey,
+      peerId: account.peerId,
+    }).map(({ messageKey }) => messageKey),
+    [wecomKey],
+  );
+  assert.deepEqual(
+    created.store.listPendingInbound({
+      channel: 'weixin_ilink',
+      accountKey: account.accountKey,
+      peerId: account.peerId,
+    }).map(({ messageKey }) => messageKey),
+    [ilinkKey],
+  );
+
+  created.store.setConversationThread({
+    channel: 'wechat_kf',
+    accountKey: account.accountKey,
+    peerId: account.peerId,
+    threadId: '01900000-0000-7000-8000-00000000040c',
+  });
+  created.store.setConversationThread({
+    channel: 'weixin_ilink',
+    accountKey: account.accountKey,
+    peerId: account.peerId,
+    threadId: '01900000-0000-7000-8000-00000000040d',
+  });
+  assert.deepEqual(
+    [
+      created.store.getConversation(
+        'wechat_kf',
+        account.accountKey,
+        account.peerId,
+      )?.threadId,
+      created.store.getConversation(
+        'weixin_ilink',
+        account.accountKey,
+        account.peerId,
+      )?.threadId,
+    ],
+    [
+      '01900000-0000-7000-8000-00000000040c',
+      '01900000-0000-7000-8000-00000000040d',
+    ],
+  );
+
+  created.store.rememberInboundMedia({
+    messageKey: wecomKey,
+    attachments: [{ kind: 'image', mediaId: 'wechat-collision-image' }],
+  });
+  created.store.rememberInboundMedia({
+    messageKey: ilinkKey,
+    attachments: [{ kind: 'image', mediaId: 'ilink-collision-image' }],
+  });
+  assert.deepEqual(
+    created.store.listRecentMedia({
+      channel: 'wechat_kf',
+      accountKey: account.accountKey,
+      peerId: account.peerId,
+    }).map(({ mediaId }) => mediaId),
+    ['wechat-collision-image'],
+  );
+  assert.deepEqual(
+    created.store.listRecentMedia({
+      channel: 'weixin_ilink',
+      accountKey: account.accountKey,
+      peerId: account.peerId,
+    }).map(({ mediaId }) => mediaId),
+    ['ilink-collision-image'],
+  );
+
+  created.store.claimInbound({ messageKey: wecomKey });
+  created.store.claimInbound({ messageKey: ilinkKey });
+  const wecomSession = created.store.createAgentSession({ messageKey: wecomKey });
+  const ilinkSession = created.store.createAgentSession({ messageKey: ilinkKey });
+  assert.deepEqual(
+    [
+      [wecomSession.channel, wecomSession.replyWindowId],
+      [ilinkSession.channel, ilinkSession.replyWindowId],
+    ],
+    [
+      ['wechat_kf', 0],
+      ['weixin_ilink', ilink.replyWindowIds[0]],
+    ],
+  );
+  const wecomAttempt = created.store.reserveAgentSend({
+    sessionToken: wecomSession.token,
+    sentType: 'text',
+    payload: { content: 'wechat collision reply' },
+  });
+  const ilinkAttempt = created.ilink.reserveReplyAttempt({
+    sessionToken: ilinkSession.token,
+    sentType: 'text',
+    payload: { content: 'iLink collision reply' },
+  });
+  assert.deepEqual(
+    [
+      [wecomAttempt.channel, wecomAttempt.messageKey],
+      [ilinkAttempt.channel, ilinkAttempt.messageKey],
+    ],
+    [
+      ['wechat_kf', wecomKey],
+      ['weixin_ilink', ilinkKey],
+    ],
+  );
+  assert.equal(wecomAttempt.status, 'sending');
+  created.ilink.startReplyAttempt({
+    sessionToken: ilinkSession.token,
+    attemptId: ilinkAttempt.attemptId,
+  });
+  created.store.completeSend(wecomAttempt.attemptId, {
+    providerMessageId: 'wechat-collision-result',
+  });
+  created.store.completeSend(ilinkAttempt.attemptId, {
+    providerMessageId: 'ilink-collision-result',
+  });
+  assert.deepEqual(
+    created.store.listRecentConversationAttempts({
+      channel: 'wechat_kf',
+      accountKey: account.accountKey,
+      peerId: account.peerId,
+    }).map(({ attemptId }) => attemptId),
+    [wecomAttempt.attemptId],
+  );
+  assert.deepEqual(
+    created.store.listRecentConversationAttempts({
+      channel: 'weixin_ilink',
+      accountKey: account.accountKey,
+      peerId: account.peerId,
+    }).map(({ attemptId }) => attemptId),
+    [ilinkAttempt.attemptId],
   );
   assert.deepEqual(created.store.foreignKeyCheck(), []);
 });
@@ -577,16 +759,16 @@ test('one human has independent WeCom and iLink authorization, state, media, and
     })
   );
   created.store.ingestSyncPage({
-    openKfId: wecomOpenKfId,
+    accountKey: wecomOpenKfId,
     expectedCursor: '',
     nextCursor: 'wecom-authorized',
     messages: authorizationMessages,
   });
   authorizationMessages.forEach((message, index) => {
     created.store.evaluateAuthorization({
-      messageKey: stableMessageKey(wecomOpenKfId, message.id),
-      openKfId: wecomOpenKfId,
-      externalUserId: wecomPeerId,
+      messageKey: stableMessageKey('wechat_kf', wecomOpenKfId, message.providerMessageId),
+      accountKey: wecomOpenKfId,
+      peerId: wecomPeerId,
       isTrigger: true,
       requiredConsecutive: 3,
     });
@@ -606,7 +788,7 @@ test('one human has independent WeCom and iLink authorization, state, media, and
     text: 'WeCom side of the same human',
   });
   const wecomPage = created.store.ingestSyncPage({
-    openKfId: wecomOpenKfId,
+    accountKey: wecomOpenKfId,
     expectedCursor: 'wecom-authorized',
     nextCursor: 'wecom-live',
     messages: [wecomMessage],
@@ -619,34 +801,39 @@ test('one human has independent WeCom and iLink authorization, state, media, and
   const ilinkMessageKey = ilinkPage.insertedMessageKeys[0]!;
 
   created.store.setConversationThread({
-    openKfId: wecomOpenKfId,
-    externalUserId: wecomPeerId,
+    channel: 'wechat_kf',
+    accountKey: wecomOpenKfId,
+    peerId: wecomPeerId,
     threadId: '01900000-0000-7000-8000-00000000040a',
     memoryThreadId: '01900000-0000-7000-8000-00000000041a',
   });
   assert.deepEqual(
     created.store.getConversation(
+      'weixin_ilink',
       ilinkAccount.accountKey,
       ilinkAccount.peerId,
     ),
     {
-      openKfId: ilinkAccount.accountKey,
-      externalUserId: ilinkAccount.peerId,
+      channel: 'weixin_ilink',
+      accountKey: ilinkAccount.accountKey,
+      peerId: ilinkAccount.peerId,
       threadId: '',
       memoryThreadId: '',
       updatedAt: created.now(),
     },
   );
   created.store.setConversationThread({
-    openKfId: ilinkAccount.accountKey,
-    externalUserId: ilinkAccount.peerId,
+    channel: 'weixin_ilink',
+    accountKey: ilinkAccount.accountKey,
+    peerId: ilinkAccount.peerId,
     threadId: '01900000-0000-7000-8000-00000000040b',
     memoryThreadId: '01900000-0000-7000-8000-00000000041b',
   });
   assert.deepEqual(
     [
-      created.store.getConversation(wecomOpenKfId, wecomPeerId)?.threadId,
+      created.store.getConversation('wechat_kf', wecomOpenKfId, wecomPeerId)?.threadId,
       created.store.getConversation(
+        'weixin_ilink',
         ilinkAccount.accountKey,
         ilinkAccount.peerId,
       )?.threadId,
@@ -675,15 +862,17 @@ test('one human has independent WeCom and iLink authorization, state, media, and
   });
   assert.deepEqual(
     created.store.listRecentMedia({
-      openKfId: wecomOpenKfId,
-      externalUserId: wecomPeerId,
+      channel: 'wechat_kf',
+      accountKey: wecomOpenKfId,
+      peerId: wecomPeerId,
     }).map(({ mediaId }) => mediaId),
     ['wecom-media-for-natural-person-404'],
   );
   assert.deepEqual(
     created.store.listRecentMedia({
-      openKfId: ilinkAccount.accountKey,
-      externalUserId: ilinkAccount.peerId,
+      channel: 'weixin_ilink',
+      accountKey: ilinkAccount.accountKey,
+      peerId: ilinkAccount.peerId,
     }).map(({ mediaId }) => mediaId),
     ['ilink-media-for-natural-person-404'],
   );
@@ -732,7 +921,7 @@ test('one human has independent WeCom and iLink authorization, state, media, and
       payload: { content: `wecom-${index}` },
     });
     created.store.completeSend(attempt.attemptId, {
-      wecomMsgId: `wecom-provider-result-${index}`,
+      providerMessageId: `wecom-provider-result-${index}`,
     });
     return attempt;
   });
@@ -766,21 +955,23 @@ test('one human has independent WeCom and iLink authorization, state, media, and
       attemptId: attempt.attemptId,
     });
     created.store.completeSend(attempt.attemptId, {
-      wecomMsgId: `ilink-provider-result-${index}`,
+      providerMessageId: `ilink-provider-result-${index}`,
     });
   }
 
   assert.deepEqual(
     created.store.listRecentConversationAttempts({
-      openKfId: wecomOpenKfId,
-      externalUserId: wecomPeerId,
+      channel: 'wechat_kf',
+      accountKey: wecomOpenKfId,
+      peerId: wecomPeerId,
     }).map(({ channel, attemptId }) => [channel, attemptId]).sort(),
     wecomAttempts.map(({ attemptId }) => ['wechat_kf', attemptId]).sort(),
   );
   assert.deepEqual(
     created.store.listRecentConversationAttempts({
-      openKfId: ilinkAccount.accountKey,
-      externalUserId: ilinkAccount.peerId,
+      channel: 'weixin_ilink',
+      accountKey: ilinkAccount.accountKey,
+      peerId: ilinkAccount.peerId,
     }).map(({ channel, attemptId }) => [channel, attemptId]).sort(),
     ilinkAttempts.map(({ attemptId }) => ['weixin_ilink', attemptId]).sort(),
   );

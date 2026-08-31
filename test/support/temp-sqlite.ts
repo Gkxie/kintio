@@ -86,6 +86,7 @@ export function openInjectedTestPersistence(
       if (closed) throw new Error('Test persistence is closed');
       return new IlinkSqliteStore({
         database,
+        inbox: core,
         ...(ilinkOptions.clock ? { clock: ilinkOptions.clock } : {}),
       });
     },

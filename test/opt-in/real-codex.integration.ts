@@ -176,7 +176,7 @@ async function createRealHarness(): Promise<RealHarness> {
       const expectedCursor = cursors.get(openKfId) || '';
       const nextCursor = `cursor-${sequence}`;
       const { insertedMessageKeys } = store.ingestSyncPage({
-        openKfId,
+        accountKey: openKfId,
         expectedCursor,
         nextCursor,
         messages: [message],
@@ -189,6 +189,7 @@ async function createRealHarness(): Promise<RealHarness> {
         .update(`${message.conversation.accountKey}\0${message.conversation.peerId}`)
         .digest('hex').slice(0, 32)}`;
       const conversationBefore = store.getConversation(
+        message.conversation.channel,
         message.conversation.accountKey,
         message.conversation.peerId,
       );
@@ -200,13 +201,15 @@ async function createRealHarness(): Promise<RealHarness> {
       const pendingMemoryThreadId = agent.takePendingMemoryThread(conversationId);
       if (!conversationBefore || threadId !== conversationBefore.threadId) {
         store.setConversationThread({
-          openKfId: message.conversation.accountKey,
-          externalUserId: message.conversation.peerId,
+          channel: message.conversation.channel,
+          accountKey: message.conversation.accountKey,
+          peerId: message.conversation.peerId,
           threadId,
           memoryThreadId: pendingMemoryThreadId,
         });
       }
       const memoryThreadId = store.getConversation(
+        message.conversation.channel,
         message.conversation.accountKey,
         message.conversation.peerId,
       )?.memoryThreadId || '';
@@ -215,6 +218,7 @@ async function createRealHarness(): Promise<RealHarness> {
       let completion: AgentCompletion;
       try {
         const submission = await agent.submit({
+          channel: message.conversation.channel,
           mode: 'start',
           conversationId,
           threadId,

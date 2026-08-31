@@ -64,7 +64,7 @@ function receipt(attempt: AttemptRecord, error?: {
     attemptId: attempt.attemptId,
     sendIndex: attempt.sendIndex,
     type: attempt.type === 'image' ? 'image' : 'text',
-    msgid: attempt.wecomMsgId,
+    providerMessageId: attempt.providerMessageId,
     ...(error ? { error } : {}),
   };
 }
@@ -92,7 +92,7 @@ function preflightFailure(
     attemptId: '',
     sendIndex: -1,
     type,
-    msgid: '',
+    providerMessageId: '',
     error: preflightError(error, forcedKind),
   };
 }
@@ -195,7 +195,7 @@ export class IlinkSendExecutor implements IlinkToolExecutor {
       if (session.channel !== 'weixin_ilink') {
         return preflightFailure(new Error('wrong channel'));
       }
-      accountKey = session.openKfId;
+      accountKey = session.accountKey;
     } catch (error: unknown) {
       return preflightFailure(error);
     }
@@ -398,7 +398,7 @@ export class IlinkSendExecutor implements IlinkToolExecutor {
       return receipt(uncertain, deliveryError(error, true));
     }
     const accepted = this.#store.completeSend(attempt.attemptId, {
-      wecomMsgId: clientId,
+      providerMessageId: clientId,
     });
     return receipt(accepted);
   }

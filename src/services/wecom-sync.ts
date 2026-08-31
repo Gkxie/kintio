@@ -25,8 +25,8 @@ export class WecomSync {
   readonly store: Pick<
     CoreState,
     | 'getCursor'
-    | 'listSyncOpenKfIds'
-    | 'registerSyncOpenKfId'
+    | 'listSyncAccountKeys'
+    | 'registerSyncAccountKey'
     | 'ingestSyncPage'
     | 'promoteDeferredConversation'
   >;
@@ -65,8 +65,8 @@ export class WecomSync {
     store: Pick<
       CoreState,
       | 'getCursor'
-      | 'listSyncOpenKfIds'
-      | 'registerSyncOpenKfId'
+      | 'listSyncAccountKeys'
+      | 'registerSyncAccountKey'
       | 'ingestSyncPage'
       | 'promoteDeferredConversation'
     >;
@@ -91,7 +91,7 @@ export class WecomSync {
     openKfId: string;
   }): boolean {
     if (!this.accepting) return false;
-    this.store.registerSyncOpenKfId(openKfId);
+    this.store.registerSyncAccountKey(openKfId);
     this.callbackTokens.set(openKfId, {
       value: callbackToken,
       expiresAt: Date.now() + CALLBACK_TOKEN_LIFETIME_MS,
@@ -105,7 +105,7 @@ export class WecomSync {
     if (this.consuming) {
       throw new Error('startup catch-up requires paused consumption');
     }
-    const openKfIds = this.store.listSyncOpenKfIds();
+    const openKfIds = this.store.listSyncAccountKeys();
     if (openKfIds.length) {
       this.logger.info?.(
         `[wecom] startup catch-up accounts=${openKfIds.length}`,
@@ -301,7 +301,7 @@ export class WecomSync {
           normalizeWecomMessage(raw, openKfId, { cursor, index }),
         );
         const ingested = this.store.ingestSyncPage({
-          openKfId,
+          accountKey: openKfId,
           expectedCursor: cursor,
           nextCursor,
           messages,
@@ -313,7 +313,7 @@ export class WecomSync {
           const pending = this.preemptedConversations.get(openKfId) || new Set<string>();
           for (const message of messages) {
             pending.add(
-              `${message.conversation.accountKey}\0${message.conversation.peerId}`,
+              `wechat_kf\0${message.conversation.accountKey}\0${message.conversation.peerId}`,
             );
           }
           this.preemptedConversations.set(openKfId, pending);
@@ -322,7 +322,7 @@ export class WecomSync {
         if (!deferred) {
           const liveConversations = new Set(
             messages.map((message) =>
-              `${message.conversation.accountKey}\0${message.conversation.peerId}`
+              `wechat_kf\0${message.conversation.accountKey}\0${message.conversation.peerId}`
             ),
           );
           liveConversationPages.push([...liveConversations]);
@@ -359,10 +359,12 @@ export class WecomSync {
     if (!this.consuming) return;
     const seen = new Set<string>();
     for (const conversation of conversations) {
-      const [service = '', customer = ''] = conversation.split('\0');
+      const [channel = '', accountKey = '', peerId = ''] = conversation.split('\0');
+      if (channel !== 'wechat_kf') continue;
       for (const record of this.store.promoteDeferredConversation({
-        openKfId: service,
-        externalUserId: customer,
+        channel,
+        accountKey,
+        peerId,
       })) {
         if (seen.has(record.messageKey)) continue;
         seen.add(record.messageKey);

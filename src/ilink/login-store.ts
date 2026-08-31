@@ -177,7 +177,7 @@ export class IlinkLoginStore {
         SELECT * FROM ilink_login_offers
         WHERE source_open_kfid = ? AND source_external_userid = ?
           AND status IN ('waiting', 'scanned')
-      `).get(session.openKfId, session.externalUserId));
+      `).get(session.accountKey, session.peerId));
       return row ? mapped(row) : undefined;
     });
   }
@@ -203,8 +203,8 @@ export class IlinkLoginStore {
     const generation = secretGeneration(offerId);
     const sealed = this.#secrets.seal(qrCode, {
       secretKind: 'qr_token',
-      accountId: session.openKfId,
-      peerId: session.externalUserId,
+      accountId: session.accountKey,
+      peerId: session.peerId,
       generation,
     });
     const now = Number(this.#clock());
@@ -214,7 +214,7 @@ export class IlinkLoginStore {
         SELECT 1 FROM ilink_login_offers
         WHERE source_open_kfid = ? AND source_external_userid = ?
           AND status IN ('waiting', 'scanned')
-      `).get(session.openKfId, session.externalUserId);
+      `).get(session.accountKey, session.peerId);
       if (existing) throw new Error('An iLink login offer is already pending');
       this.#database.prepare(`
         INSERT INTO ilink_login_offers (
@@ -226,8 +226,8 @@ export class IlinkLoginStore {
       `).run(
         offerId,
         session.messageKey,
-        session.openKfId,
-        session.externalUserId,
+        session.accountKey,
+        session.peerId,
         generation,
         sealed.nonce,
         sealed.ciphertext,

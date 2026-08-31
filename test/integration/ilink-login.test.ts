@@ -23,7 +23,7 @@ async function fixture(t: Parameters<typeof createTempSqlite>[0]) {
     clock: () => now,
   });
   const page = store.ingestSyncPage({
-    openKfId: 'wk-source',
+    accountKey: 'wk-source',
     nextCursor: 'cursor-source',
     messages: [testWecomMessage({
       id: 'source-message',
@@ -103,7 +103,10 @@ test('confirmed QR creates a separate encrypted iLink identity and refreshes lis
   );
   assert.equal(created.offers.listActive().length, 0);
   assert.equal(refreshed, 1);
-  assert.equal(created.store.getConversation(accountKey, owner), undefined);
+  assert.equal(
+    created.store.getConversation('weixin_ilink', accountKey, owner),
+    undefined,
+  );
 
   await manager.offer(created.session.token);
   await eventually(() => created.accounts.getAccount(accountKey)?.generation === 2);

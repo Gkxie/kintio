@@ -1,14 +1,12 @@
 import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
-import { MESSAGE_ORIGINS } from '../domain/message.ts';
 import {
-  stableMessageKey,
   type AttemptRecord,
+  type CoreState,
   type JsonObject,
 } from '../state/sqlite-store.ts';
 import type { NormalizedMessage } from '../types.ts';
-import type { IlinkInboundCandidate } from './message.ts';
 import { normalizeIlinkBaseUrl } from './protocol/client.ts';
 import type { IlinkSealedSecret } from './secret-box.ts';
 import {
@@ -122,7 +120,8 @@ interface AgentSessionWindowRow extends ReplyWindowRow {
 }
 
 export interface IlinkPollPageEntry {
-  readonly candidate: IlinkInboundCandidate;
+  readonly message: NormalizedMessage;
+  readonly providerSeq?: number;
   readonly sealedContextToken: IlinkSealedSecret;
   readonly secretGeneration: number;
   readonly sealedImages?: readonly IlinkSealedInboundImage[];
@@ -418,9 +417,9 @@ function mapAttempt(row: AttemptRow): AttemptRecord {
   return {
     attemptId: row.attempt_key,
     messageKey: row.source_message_key,
-    openKfId: row.open_kfid,
-    externalUserId: row.external_userid,
     channel: ILINK_CHANNEL,
+    accountKey: row.open_kfid,
+    peerId: row.external_userid,
     replyWindowId: Number(row.reply_window_id),
     sendIndex: Number(row.send_index),
     source: row.source,
@@ -430,7 +429,7 @@ function mapAttempt(row: AttemptRow): AttemptRecord {
     fingerprint: row.fingerprint,
     clientMessageId: row.client_message_id,
     status: row.status,
-    wecomMsgId: row.wecom_msgid,
+    providerMessageId: row.wecom_msgid,
     errorCode: row.error_code,
     errorMessage: row.error_message,
     failType: Number(row.fail_type),
@@ -439,76 +438,55 @@ function mapAttempt(row: AttemptRow): AttemptRecord {
   };
 }
 
-function normalizedPayload(
-  candidate: IlinkInboundCandidate,
-  messageKey: string,
-): NormalizedMessage {
-  return {
-    id: candidate.providerMessageId,
-    messageKey,
-    origin: MESSAGE_ORIGINS.CUSTOMER,
-    type: candidate.kind,
-    rawType: `ilink_${candidate.kind}`,
-    sentAt: candidate.createTime,
-    sync: candidate.sync,
-    conversation: {
-      channel: ILINK_CHANNEL,
-      accountKey: candidate.accountKey,
-      peerId: candidate.peerId,
-    },
-    text: candidate.text,
-    summary: candidate.summary,
-    attributes: {
-      provider: ILINK_CHANNEL,
-      itemTypes: [...candidate.itemTypes],
-      ...(candidate.seq === undefined ? {} : { providerSeq: candidate.seq }),
-    },
-    attachments: candidate.images.map((image) => ({
-      kind: 'image' as const,
-      mediaId: `ilink:${image.position}`,
-      filename: `ilink-image-${image.position}`,
-      status: 'unresolved' as const,
-    })),
-  };
-}
-
-function candidateIsNewer(
-  candidate: IlinkInboundCandidate,
+function entryIsNewer(
+  entry: IlinkPollPageEntry,
   open: ReplyWindowRow,
   samePage: boolean,
 ): boolean {
   if (
-    candidate.seq !== undefined &&
+    entry.providerSeq !== undefined &&
     open.provider_seq !== null &&
-    candidate.seq !== open.provider_seq
+    entry.providerSeq !== open.provider_seq
   ) {
-    return candidate.seq > open.provider_seq;
+    return entry.providerSeq > open.provider_seq;
   }
-  if (candidate.createTime !== open.issued_at) {
-    return candidate.createTime > open.issued_at;
+  if (entry.message.sentAt !== open.issued_at) {
+    return entry.message.sentAt > open.issued_at;
   }
   if (
-    (candidate.seq === undefined) !== (open.provider_seq === null)
+    (entry.providerSeq === undefined) !== (open.provider_seq === null)
   ) return samePage;
-  const candidateNumeric = /^message:(\d+)$/u.exec(candidate.providerMessageId)?.[1];
+  const candidateNumeric = /^message:(\d+)$/u.exec(
+    entry.message.providerMessageId,
+  )?.[1];
   const openNumeric = /^message:(\d+)$/u.exec(String(open.provider_message_id || ''))?.[1];
   return candidateNumeric !== undefined && openNumeric !== undefined
     ? BigInt(candidateNumeric) > BigInt(openNumeric)
     : samePage;
 }
 
-function compareCandidates(
-  left: IlinkInboundCandidate,
-  right: IlinkInboundCandidate,
+function compareEntries(
+  left: IlinkPollPageEntry,
+  right: IlinkPollPageEntry,
 ): number {
-  if (left.seq !== undefined && right.seq !== undefined && left.seq !== right.seq) {
-    return left.seq - right.seq;
+  if (
+    left.providerSeq !== undefined &&
+    right.providerSeq !== undefined &&
+    left.providerSeq !== right.providerSeq
+  ) {
+    return left.providerSeq - right.providerSeq;
   }
-  if (left.createTime !== right.createTime) return left.createTime - right.createTime;
-  const leftNumeric = /^message:(\d+)$/u.exec(left.providerMessageId)?.[1];
-  const rightNumeric = /^message:(\d+)$/u.exec(right.providerMessageId)?.[1];
+  if (left.message.sentAt !== right.message.sentAt) {
+    return left.message.sentAt - right.message.sentAt;
+  }
+  const leftNumeric = /^message:(\d+)$/u.exec(
+    left.message.providerMessageId,
+  )?.[1];
+  const rightNumeric = /^message:(\d+)$/u.exec(
+    right.message.providerMessageId,
+  )?.[1];
   if (leftNumeric === undefined || rightNumeric === undefined) {
-    return left.sync.index - right.sync.index;
+    return left.message.sync.index - right.message.sync.index;
   }
   const leftId = BigInt(leftNumeric);
   const rightId = BigInt(rightNumeric);
@@ -518,18 +496,22 @@ function compareCandidates(
 /** @internal Construct through StatePersistence outside persistence tests. */
 interface IlinkSqliteStoreInternalOptions {
   readonly database: DatabaseSync;
+  readonly inbox: Pick<CoreState, 'insertInboundMessages'>;
   readonly clock?: () => number;
 }
 
 export class IlinkSqliteStore {
   readonly #database: DatabaseSync;
+  readonly #inbox: Pick<CoreState, 'insertInboundMessages'>;
   readonly #clock: () => number;
 
   constructor({
     database,
+    inbox,
     clock = Date.now,
   }: IlinkSqliteStoreInternalOptions) {
     this.#database = database;
+    this.#inbox = inbox;
     this.#clock = clock;
   }
 
@@ -953,56 +935,35 @@ export class IlinkSqliteStore {
 
       const insertedEntries: Array<{
         readonly messageKey: string;
-        readonly candidate: IlinkInboundCandidate;
+        readonly entry: IlinkPollPageEntry;
         readonly payload: NormalizedMessage;
       }> = [];
       const replyWindowIds: number[] = [];
       const pageWindowSources = new Set<string>();
       for (const entry of input.messages) {
         this.#validatePageEntry(entry, account, expectedCursor);
-        const { candidate } = entry;
-        const messageKey = stableMessageKey(
-          input.accountKey,
-          candidate.providerMessageId,
-        );
-        const payload = normalizedPayload(candidate, messageKey);
-        const inserted = this.#database.prepare(`
-          INSERT INTO inbound_messages (
-            message_key, open_kfid, msgid, external_userid, channel,
-            origin, msg_type, sent_at, status, deferred, payload_json,
-            created_at, updated_at
-          ) VALUES (?, ?, ?, ?, 'weixin_ilink', 'customer', ?, ?, 'received',
-                    ?, ?, ?, ?)
-          ON CONFLICT(open_kfid, msgid) DO NOTHING
-        `).run(
-          messageKey,
-          input.accountKey,
-          candidate.providerMessageId,
-          candidate.peerId,
-          payload.type,
-          candidate.createTime,
-          input.deferred || (
+      }
+      const inboxResults = this.#inbox.insertInboundMessages({
+        accountKey: input.accountKey,
+        entries: input.messages.map((entry) => ({
+          message: entry.message,
+          deferred: Boolean(input.deferred) || (
             input.deferredBefore !== undefined &&
-            candidate.createTime < input.deferredBefore
-          ) ? 1 : 0,
-          encodeJson(payload),
-          now,
-          now,
-        );
-        if (inserted.changes !== 1) {
-          this.#validateDuplicate(candidate, messageKey);
+            entry.message.sentAt < input.deferredBefore
+          ),
+        })),
+        now,
+      });
+      for (const [index, entry] of input.messages.entries()) {
+        const inbox = inboxResults[index];
+        if (!inbox) fail('dedupe_invariant', 'iLink inbox result is missing');
+        const { messageKey } = inbox;
+        const { message } = entry;
+        if (!inbox.inserted) {
+          this.#validateDuplicate(message, messageKey);
           continue;
         }
-        insertedEntries.push({ messageKey, candidate, payload });
-        this.#database.prepare(`
-          INSERT INTO conversations (open_kfid, external_userid, updated_at)
-          VALUES (?, ?, ?)
-          ON CONFLICT(open_kfid, external_userid) DO NOTHING
-        `).run(input.accountKey, candidate.peerId, now);
-        const inbound = rowAs<{ inbox_seq: number }>(this.#database.prepare(`
-          SELECT inbox_seq FROM inbound_messages WHERE message_key = ?
-        `).get(messageKey));
-        if (!inbound) fail('dedupe_invariant', 'Inserted iLink inbox row is missing');
+        insertedEntries.push({ messageKey, entry, payload: message });
         for (const image of entry.sealedImages || []) {
           this.#database.prepare(`
             INSERT INTO ilink_inbound_images (
@@ -1013,7 +974,7 @@ export class IlinkSqliteStore {
             messageKey,
             image.position,
             input.accountKey,
-            candidate.peerId,
+            message.conversation.peerId,
             image.secretGeneration,
             image.sealedLocator.nonce,
             image.sealedLocator.ciphertext,
@@ -1025,7 +986,7 @@ export class IlinkSqliteStore {
           account,
           entry,
           messageKey,
-          Number(inbound.inbox_seq),
+          inbox.inboxSeq,
           pageWindowSources,
           now,
         );
@@ -1069,13 +1030,14 @@ export class IlinkSqliteStore {
         `).run(now, entry.messageKey);
       }
       const pageSummaries = [...insertedEntries]
-        .sort((left, right) => compareCandidates(left.candidate, right.candidate))
-        .map(({ candidate }) => candidate.summary);
+        .sort((left, right) => compareEntries(left.entry, right.entry))
+        .map(({ payload }) => payload.summary);
       const backlog = deliverable
         ? rowsAs<{ message_key: string; payload_json: string | null }>(
             this.#database.prepare(`
               SELECT message_key, payload_json FROM inbound_messages
-              WHERE open_kfid = ? AND external_userid = ?
+              WHERE channel = 'weixin_ilink'
+                AND open_kfid = ? AND external_userid = ?
                 AND status = 'received' AND message_key <> ?
                 AND inbox_seq < (
                   SELECT inbox_seq FROM inbound_messages WHERE message_key = ?
@@ -1204,49 +1166,58 @@ export class IlinkSqliteStore {
     if (!entry || typeof entry !== 'object') {
       fail('invalid_input', 'iLink poll entry is invalid');
     }
-    const { candidate } = entry;
+    const { message } = entry;
     assertIlinkEncryptedSecret(entry.sealedContextToken);
     nonNegativeInteger(entry.secretGeneration, 'secretGeneration');
     const sealedImages = entry.sealedImages || [];
-    if (sealedImages.length !== candidate?.images?.length) {
+    const imagePositions = new Set(
+      message?.attachments.flatMap((attachment) => {
+        const matched = attachment.kind === 'image'
+          ? /^ilink:(\d+)$/u.exec(attachment.mediaId)
+          : null;
+        return matched?.[1] === undefined ? [] : [Number(matched[1])];
+      }) || [],
+    );
+    if (
+      imagePositions.size !== (message?.attachments.length || 0) ||
+      sealedImages.length !== imagePositions.size
+    ) {
       fail('invalid_input', 'iLink image locator count is inconsistent');
     }
     for (const image of sealedImages) {
       nonNegativeInteger(image.position, 'image position');
       nonNegativeInteger(image.secretGeneration, 'image secretGeneration');
       assertIlinkEncryptedSecret(image.sealedLocator);
-      if (!candidate.images.some((candidateImage) =>
-        candidateImage.position === image.position
-      )) {
+      if (!imagePositions.has(image.position)) {
         fail('invalid_input', 'iLink image locator position is inconsistent');
       }
     }
     if (
-      !candidate ||
-      candidate.provider !== ILINK_CHANNEL ||
-      candidate.accountKey !== account.account_key ||
-      candidate.providerAccountId !== account.provider_account_id ||
-      candidate.peerId !== account.owner_peer_id ||
-      candidate.messageKeyMaterial.accountKey !== account.account_key ||
-      candidate.messageKeyMaterial.providerMessageId !==
-        candidate.providerMessageId
+      !message ||
+      message.conversation.channel !== ILINK_CHANNEL ||
+      message.conversation.accountKey !== account.account_key ||
+      message.conversation.peerId !== account.owner_peer_id
     ) {
       fail('pair_mismatch', 'iLink poll message does not match its account');
     }
-    if (candidate.sync.cursor !== expectedCursor) {
+    if (message.sync.cursor !== expectedCursor) {
       fail('cursor_conflict', 'iLink message cursor does not match its page');
     }
-    nonNegativeInteger(candidate.sync.index, 'message sync index');
-    nonNegativeInteger(candidate.createTime, 'message createTime');
-    if (candidate.seq !== undefined) {
-      nonNegativeInteger(candidate.seq, 'message seq');
+    nonNegativeInteger(message.sync.index, 'message sync index');
+    nonNegativeInteger(message.sentAt, 'message sentAt');
+    if (entry.providerSeq !== undefined) {
+      nonNegativeInteger(entry.providerSeq, 'message providerSeq');
     }
-    if (!candidate.providerMessageId || !candidate.contextToken) {
-      fail('invalid_input', 'iLink message identity or context token is missing');
+    if (
+      !message.providerMessageId ||
+      Buffer.byteLength(message.providerMessageId, 'utf8') >
+        ILINK_MAX_PROVIDER_ID_BYTES
+    ) {
+      fail('invalid_input', 'iLink message identity is invalid');
     }
   }
 
-  #validateDuplicate(candidate: IlinkInboundCandidate, messageKey: string): void {
+  #validateDuplicate(message: NormalizedMessage, messageKey: string): void {
     const existing = rowAs<{
       message_key: string;
       open_kfid: string;
@@ -1256,14 +1227,14 @@ export class IlinkSqliteStore {
     }>(this.#database.prepare(`
       SELECT message_key, open_kfid, msgid, external_userid, channel
       FROM inbound_messages
-      WHERE open_kfid = ? AND msgid = ?
-    `).get(candidate.accountKey, candidate.providerMessageId));
+      WHERE message_key = ?
+    `).get(messageKey));
     if (
       !existing ||
       existing.message_key !== messageKey ||
-      existing.open_kfid !== candidate.accountKey ||
-      existing.msgid !== candidate.providerMessageId ||
-      existing.external_userid !== candidate.peerId ||
+      existing.open_kfid !== message.conversation.accountKey ||
+      existing.msgid !== message.providerMessageId ||
+      existing.external_userid !== message.conversation.peerId ||
       existing.channel !== ILINK_CHANNEL
     ) {
       fail('dedupe_invariant', 'iLink message dedupe identity conflicts');
@@ -1295,10 +1266,13 @@ export class IlinkSqliteStore {
     pageWindowSources: ReadonlySet<string>,
     now: number,
   ): number {
-    const { candidate } = entry;
-    const current = this.#openWindow(account.account_key, candidate.peerId);
-    const becomesOpen = !current || candidateIsNewer(
-      candidate,
+    const { message } = entry;
+    const current = this.#openWindow(
+      account.account_key,
+      message.conversation.peerId,
+    );
+    const becomesOpen = !current || entryIsNewer(
+      entry,
       current,
       pageWindowSources.has(current.source_message_key),
     );
@@ -1310,12 +1284,12 @@ export class IlinkSqliteStore {
         'superseded_by_newer_ilink_message',
       );
     }
-    if (candidate.createTime > now + MAX_UPSTREAM_CLOCK_SKEW_MS) {
+    if (message.sentAt > now + MAX_UPSTREAM_CLOCK_SKEW_MS) {
       fail('invalid_input', 'iLink message timestamp is too far in the future');
     }
-    const expiresAt = Math.min(candidate.createTime, now) +
+    const expiresAt = Math.min(message.sentAt, now) +
       ILINK_REPLY_WINDOW_LIFETIME_MS;
-    if (!Number.isSafeInteger(expiresAt) || expiresAt <= candidate.createTime) {
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= message.sentAt) {
       fail('invalid_input', 'iLink reply window expiry is invalid');
     }
     const inserted = this.#database.prepare(`
@@ -1328,12 +1302,12 @@ export class IlinkSqliteStore {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0, ?, ?, ?, ?)
     `).run(
       account.account_key,
-      candidate.peerId,
+      message.conversation.peerId,
       account.generation,
       sourceMessageKey,
       sourceInboxSeq,
-      candidate.seq ?? null,
-      candidate.createTime,
+      entry.providerSeq ?? null,
+      message.sentAt,
       expiresAt,
       ILINK_REPLY_WINDOW_MAX_SENDS,
       becomesOpen ? 'open' : 'superseded',

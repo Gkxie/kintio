@@ -115,9 +115,9 @@ test('sync persists known and unknown messages with the page cursor before enque
   );
   assert.equal(store.getCursor('wk-one'), 'cursor-two');
   assert.deepEqual(enqueued, [
-    stableMessageKey('wk-one', 'customer-one'),
-    stableMessageKey('wk-one', 'link-one'),
-    stableMessageKey('wk-one', 'unknown-one'),
+    stableMessageKey('wechat_kf', 'wk-one', 'customer-one'),
+    stableMessageKey('wechat_kf', 'wk-one', 'link-one'),
+    stableMessageKey('wechat_kf', 'wk-one', 'unknown-one'),
   ]);
   const firstKey = enqueued[0];
   const secondKey = enqueued[1];
@@ -148,7 +148,7 @@ test('a live callback during startup catch-up joins the recovery snapshot', asyn
   });
   const store = persistence.core;
   store.ingestSyncPage({
-    openKfId: 'wk-one',
+    accountKey: 'wk-one',
     nextCursor: 'cursor-one',
     messages: [],
   });
@@ -206,11 +206,12 @@ test('a live callback during startup catch-up joins the recovery snapshot', asyn
   ]);
   assert.equal(store.getCursor('wk-one'), 'cursor-three');
   assert.deepEqual(enqueued, [
-    stableMessageKey('wk-one', 'missed'),
-    stableMessageKey('wk-one', 'live'),
+    stableMessageKey('wechat_kf', 'wk-one', 'missed'),
+    stableMessageKey('wechat_kf', 'wk-one', 'live'),
   ]);
   assert.deepEqual(
-    store.recoverStartup().inbound.slice(-2).map((record) => record.msgid),
+    store.recoverStartup().inbound.slice(-2)
+      .map((record) => record.providerMessageId),
     ['missed', 'live'],
   );
 });
@@ -222,7 +223,7 @@ test('a live callback preempts startup catch-up after the current cursor page', 
   });
   const store = persistence.core;
   store.ingestSyncPage({
-    openKfId: 'wk-one',
+    accountKey: 'wk-one',
     nextCursor: 'cursor-one',
     messages: [],
   });
@@ -308,7 +309,9 @@ test('a live callback preempts startup catch-up after the current cursor page', 
     { cursor: 'cursor-two', callbackToken: 'live-token', openKfId: 'wk-one' },
   ]);
   assert.equal(store.getCursor('wk-one'), 'cursor-three');
-  const liveKey = stableMessageKey('wk-one', 'live-current-page');
+  const liveKey = stableMessageKey(
+    'wechat_kf', 'wk-one', 'live-current-page',
+  );
   assert.deepEqual(enqueued, [liveKey]);
   assert.equal(store.getInbound(liveKey)?.deferred, false);
 });
@@ -320,7 +323,7 @@ test('live-page conversations enqueue before unrelated preempted backlog', async
   });
   const store = persistence.core;
   store.ingestSyncPage({
-    openKfId: 'wk-one',
+    accountKey: 'wk-one',
     nextCursor: 'cursor-one',
     messages: [],
   });
@@ -396,11 +399,16 @@ test('live-page conversations enqueue before unrelated preempted backlog', async
   releaseFirst();
   await Promise.all([catchUp, live, sync.waitForIdle()]);
 
-  assert.equal(enqueued[0], stableMessageKey('wk-one', 'live-next-page'));
+  assert.equal(
+    enqueued[0],
+    stableMessageKey('wechat_kf', 'wk-one', 'live-next-page'),
+  );
   assert.equal(enqueued.length, 12);
   for (let index = 0; index < 11; index += 1) {
     assert.equal(
-      store.getInbound(stableMessageKey('wk-one', `missed-${index}`))?.deferred,
+      store.getInbound(
+        stableMessageKey('wechat_kf', 'wk-one', `missed-${index}`),
+      )?.deferred,
       true,
     );
   }
@@ -502,7 +510,9 @@ test('live pages committed before a later sync failure are still enqueued', asyn
   await waitFor(() => call === 3, 'partial sync did not resume after failure');
   await sync.waitForIdle();
 
-  const key = stableMessageKey('wk-one', 'committed-before-failure');
+  const key = stableMessageKey(
+    'wechat_kf', 'wk-one', 'committed-before-failure',
+  );
   assert.equal(store.getCursor('wk-one'), 'cursor-two');
   assert.equal(store.getInbound(key)?.deferred, false);
   assert.deepEqual(enqueued, [key]);
@@ -565,9 +575,9 @@ test('a lone callback retries its first failed sync without another callback', a
   await waitFor(() => call === 2, 'lone callback did not retry');
   await sync.waitForIdle();
 
-  const key = stableMessageKey('wk-one', 'arrived-on-retry');
+  const key = stableMessageKey('wechat_kf', 'wk-one', 'arrived-on-retry');
   assert.equal(call, 2);
-  assert.deepEqual(store.listSyncOpenKfIds(), ['wk-one']);
+  assert.deepEqual(store.listSyncAccountKeys(), ['wk-one']);
   assert.deepEqual(enqueued, [key]);
   assert.equal(store.getCursor('wk-one'), 'cursor-one');
   assert.equal(errors.length, 1);
