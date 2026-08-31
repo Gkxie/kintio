@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
-import type { SqliteStore } from '../state/sqlite-store.ts';
+import type { CoreState } from '../state/sqlite-store.ts';
 import { normalizeIlinkBaseUrl } from './protocol/client.ts';
 import { IlinkSecretBox } from './secret-box.ts';
 
@@ -72,23 +72,28 @@ function mapped(row: OfferRow): IlinkLoginOffer {
   };
 }
 
+/** @internal Construct through StatePersistence outside persistence tests. */
+interface IlinkLoginStoreInternalOptions {
+  readonly store: Pick<CoreState, 'getAgentSession'>;
+  readonly database: DatabaseSync;
+  readonly secretBox: IlinkSecretBox;
+  readonly clock?: () => number;
+}
+
 export class IlinkLoginStore {
-  readonly #store: Pick<SqliteStore, 'database' | 'getAgentSession'>;
+  readonly #store: Pick<CoreState, 'getAgentSession'>;
   readonly #database: DatabaseSync;
   readonly #secrets: IlinkSecretBox;
   readonly #clock: () => number;
 
   constructor({
     store,
+    database,
     secretBox,
     clock = Date.now,
-  }: {
-    store: Pick<SqliteStore, 'database' | 'getAgentSession'>;
-    secretBox: IlinkSecretBox;
-    clock?: () => number;
-  }) {
+  }: IlinkLoginStoreInternalOptions) {
     this.#store = store;
-    this.#database = store.database;
+    this.#database = database;
     this.#secrets = secretBox;
     this.#clock = clock;
   }

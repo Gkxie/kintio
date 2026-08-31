@@ -21,7 +21,7 @@ import type {
   AgentRuntime,
   AgentSubmission,
 } from '../agent/runtime.ts';
-import type { InboundRecord, SqliteStore } from '../state/sqlite-store.ts';
+import type { CoreState, InboundRecord } from '../state/sqlite-store.ts';
 
 type ChannelMessage = NormalizedMessage & { readonly messageKey: string };
 type WorkPriority = 'high' | 'low';
@@ -42,7 +42,7 @@ interface SendDrain {
 }
 
 interface ProcessorOptions {
-  readonly store: SqliteStore;
+  readonly store: CoreState;
   readonly agent: AgentRuntime;
   readonly mediaGateway: MediaGateway;
   readonly channel: SendDrain;
@@ -116,7 +116,7 @@ function conversationId(record: Pick<InboundRecord, 'openKfId' | 'externalUserId
 }
 
 export class ConversationProcessor {
-  readonly #store: SqliteStore;
+  readonly #store: CoreState;
   readonly #pipeline: Pick<
     ProcessorOptions,
     'agent' | 'mediaGateway' | 'channel'

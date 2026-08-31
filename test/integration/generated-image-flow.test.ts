@@ -16,7 +16,7 @@ import type {
 } from '../../src/services/codex-app-server.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -115,7 +115,10 @@ test('generated image flows through the channel runtime and a same-thread delta 
   const png = Buffer.from('89504e470d0a1a0a04040404', 'hex');
   await fs.writeFile(savedPath, png);
 
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   const boundary = new ImageBoundary(png);
   const agent = new CodexAgent({
     codex: boundary,
@@ -180,7 +183,7 @@ test('generated image flows through the channel runtime and a same-thread delta 
   t.onTestFinished(async () => {
     await processor.close();
     await channel.close();
-    store.close();
+    persistence.close();
   });
 
   const primaryKey = ingest({

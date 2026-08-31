@@ -32,7 +32,11 @@ import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
 import { WecomApiClient } from '../../src/services/wecom-api.ts';
-import { SqliteStore, type AttemptRecord } from '../../src/state/sqlite-store.ts';
+import {
+  type AttemptRecord,
+  type CoreState,
+} from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 import type { ResolvedImage } from '../../src/types.ts';
 
 if (process.env.RUN_REAL_CODEX !== '1') {
@@ -57,7 +61,7 @@ interface RealHarness {
   readonly agent: CodexAgent;
   readonly codex: CodexBoundary;
   readonly directory: string;
-  readonly store: SqliteStore;
+  readonly store: CoreState;
   readonly memoryReads: string[];
   submit(options: SubmitOptions): Promise<SubmissionResult>;
   archiveThread(threadId: string): Promise<void>;
@@ -66,7 +70,10 @@ interface RealHarness {
 
 async function createRealHarness(): Promise<RealHarness> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-real-codex-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'state.sqlite'),
+  });
+  const store = persistence.core;
   const imageTempDirectory = path.join(directory, 'input');
   const generatedImageDirectory = path.resolve('codex-workspace/generated_images');
   await fs.mkdir(imageTempDirectory, { recursive: true, mode: 0o700 });
@@ -273,7 +280,7 @@ async function createRealHarness(): Promise<RealHarness> {
         await mcpHost.close();
         fakeWechat.close();
         await once(fakeWechat, 'close');
-        store.close();
+        persistence.close();
         await fs.rm(directory, { recursive: true, force: true });
         const generatedAfter = await fs.readdir(generatedImageDirectory);
         const leftovers = generatedAfter.filter((name) => !generatedBefore.has(name));

@@ -4,7 +4,7 @@ import * as z from 'zod/v4';
 
 import { KINTIO_VERSION } from '../version.ts';
 import type { CodexBoundary } from '../services/codex-app-server.ts';
-import { AgentSessionError, type SqliteStore } from '../state/sqlite-store.ts';
+import { AgentSessionError, type CoreState } from '../state/sqlite-store.ts';
 import type { ChatChannel } from '../types.ts';
 
 const MAX_MEMORY_CHARACTERS = 24_000;
@@ -12,7 +12,7 @@ const MAX_ENTRY_CHARACTERS = 4_000;
 const SESSION = z.string().regex(/^ws_[A-Za-z0-9_-]{32}$/u);
 
 type JsonRecord = Record<string, unknown>;
-type MemoryStore = Pick<SqliteStore, 'getAgentSession'>;
+type MemoryStore = Pick<CoreState, 'getAgentSession'>;
 type ThreadReader = Pick<CodexBoundary, 'readThread'>;
 
 export interface ArchivedMemoryResult {

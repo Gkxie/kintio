@@ -13,16 +13,18 @@ import {
   IlinkMessageType,
 } from '../../src/ilink/protocol/types.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
-import { IlinkSqliteStore } from '../../src/ilink/sqlite-store.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import type { AgentRuntime } from '../../src/agent/runtime.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 
 test('completed Agent image artifact recovers through send_image MCP without host spool', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'image-artifact-recovery-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'state.sqlite'),
+  });
+  const store = persistence.core;
   const png = Buffer.from('89504e470d0a1a0a09090909', 'hex');
   const page = store.ingestSyncPage({
     openKfId: 'wk-image',
@@ -117,7 +119,7 @@ test('completed Agent image artifact recovers through send_image MCP without hos
   t.onTestFinished(async () => {
     await processor.close();
     await channel.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -141,11 +143,12 @@ test('completed Agent image artifact recovers through send_image MCP without hos
 test('accepted iLink generated image finalizes after restart without another send', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'ilink-image-recovery-'));
   const now = 1_800_000_000_000;
-  const store = new SqliteStore({
+  const persistence = new StatePersistence({
     filePath: path.join(directory, 'state.sqlite'),
     clock: () => now,
   });
-  const ilink = new IlinkSqliteStore({ store, clock: () => now });
+  const store = persistence.core;
+  const ilink = persistence.createIlinkStore({ clock: () => now });
   const secretBox = new IlinkSecretBox(Buffer.alloc(32, 31).toString('base64url'));
   const botId = 'image-recovery-bot@im.bot';
   const peerId = 'image-recovery-user@im.wechat';
@@ -275,7 +278,7 @@ test('accepted iLink generated image finalizes after restart without another sen
   t.onTestFinished(async () => {
     await processor.close();
     await executor.waitForIdle();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 

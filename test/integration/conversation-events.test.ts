@@ -7,13 +7,16 @@ import type { TestContext } from 'vitest';
 
 import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
-import { inspectAttempts } from '../support/sqlite-inspect.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
+import { stableMessageKey } from '../../src/state/sqlite-store.ts';
 import { seedPendingAttempts } from '../support/pending-attempt.ts';
+import { withTestDatabase } from '../support/temp-sqlite.ts';
 
 async function createHarness(t: TestContext) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'conversation-events-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const databaseFile = path.join(directory, 'wecom.sqlite');
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  const store = persistence.core;
   let cursor = '';
   let kicks = 0;
   const processor = new ConversationProcessor({
@@ -51,10 +54,10 @@ async function createHarness(t: TestContext) {
 
   t.onTestFinished(async () => {
     await processor.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
-  return { store, processor, ingest, kicks: () => kicks };
+  return { databaseFile, store, processor, ingest, kicks: () => kicks };
 }
 
 function event(msgid: string, attributes: Record<string, unknown>) {
@@ -81,11 +84,13 @@ test('persisted inbox identity rejects payload account peer or channel mismatch'
       msgid: `identity-${field}`, open_kfid: 'wk-one', external_userid: 'wm-one',
       origin: 3, msgtype: 'text', text: { content: '不要改变持久化身份' },
     });
-    harness.store.database.prepare(`
-      UPDATE inbound_messages
-      SET payload_json = json_set(payload_json, ?, ?)
-      WHERE message_key = ?
-    `).run(`$.conversation.${field}`, value, key);
+    withTestDatabase(harness.databaseFile, (database) => {
+      database.prepare(`
+        UPDATE inbound_messages
+        SET payload_json = json_set(payload_json, ?, ?)
+        WHERE message_key = ?
+      `).run(`$.conversation.${field}`, value, key);
+    });
     await harness.processor.enqueue(key);
     assert.equal(harness.store.getInbound(key)?.status, 'ignored', field);
   }
@@ -111,16 +116,18 @@ test('msg_send_fail reports the failed fact without automatic resend', async (t)
   const foreign = harness.ingest(event('foreign-event', {
     event_type: 'msg_send_fail', fail_msgid: 'wecom-failed', fail_type: 13,
   }));
-  harness.store.database.prepare(`
-    UPDATE inbound_messages
-    SET channel = 'weixin_ilink',
-        payload_json = json_set(payload_json, '$.conversation.channel', 'weixin_ilink')
-    WHERE message_key = ?
-  `).run(foreign);
+  withTestDatabase(harness.databaseFile, (database) => {
+    database.prepare(`
+      UPDATE inbound_messages
+      SET channel = 'weixin_ilink',
+          payload_json = json_set(payload_json, '$.conversation.channel', 'weixin_ilink')
+      WHERE message_key = ?
+    `).run(foreign);
+  });
   await harness.processor.enqueue(foreign);
   assert.equal(harness.store.getInbound(foreign)?.status, 'ignored');
   assert.deepEqual(
-    inspectAttempts(harness.store.database, sourceKey).map((item) => item.status),
+    harness.store.listMessageAttempts(sourceKey).map((item) => item.status),
     ['accepted'],
   );
 
@@ -128,7 +135,7 @@ test('msg_send_fail reports the failed fact without automatic resend', async (t)
     event_type: 'msg_send_fail', fail_msgid: 'wecom-failed', fail_type: 13,
   }));
   await harness.processor.enqueue(failureKey);
-  const attempts = inspectAttempts(harness.store.database, sourceKey);
+  const attempts = harness.store.listMessageAttempts(sourceKey);
   assert.deepEqual(attempts.map((item) => item.status), ['failed']);
   assert.equal(attempts[0]?.failType, 13);
   assert.match(attempts[0]?.errorMessage || '', /fail_type=13/u);

@@ -4,6 +4,10 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Made one Worker-owned persistence root the only production owner of the raw
+  SQLite connection; Runtime, channels, MCP, and Agent code now consume JS/TS
+  state facades instead of a public database handle
+  ([#29](https://github.com/Gkxie/kintio/issues/29)).
 - Installed and refreshed the managed conversation Skill in the effective
   configured Agent workspace, so a custom `CODEX_WORKING_DIRECTORY` cannot
   leave a dangling session-level Skill reference

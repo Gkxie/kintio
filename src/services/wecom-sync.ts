@@ -1,6 +1,6 @@
 import { normalizeWecomMessage } from '../domain/wecom-message.ts';
 import type { Logger } from '../types.ts';
-import type { SqliteStore } from '../state/sqlite-store.ts';
+import type { CoreState } from '../state/sqlite-store.ts';
 import type { ConversationProcessor } from './conversation-processor.ts';
 import { WecomApiError, type WecomApiClient } from './wecom-api.ts';
 
@@ -23,7 +23,7 @@ function jitteredRetry(baseMs: number, key: string): number {
 export class WecomSync {
   readonly apiClient: Pick<WecomApiClient, 'syncMessages'>;
   readonly store: Pick<
-    SqliteStore,
+    CoreState,
     | 'getCursor'
     | 'listSyncOpenKfIds'
     | 'registerSyncOpenKfId'
@@ -63,7 +63,7 @@ export class WecomSync {
   }: {
     apiClient: Pick<WecomApiClient, 'syncMessages'>;
     store: Pick<
-      SqliteStore,
+      CoreState,
       | 'getCursor'
       | 'listSyncOpenKfIds'
       | 'registerSyncOpenKfId'

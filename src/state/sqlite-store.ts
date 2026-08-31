@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
+import type { DatabaseSync } from 'node:sqlite';
 import {
   MAX_WECHAT_IMAGE_BYTES,
   detectImageFormat,
@@ -38,7 +38,7 @@ const SEND_STATUSES = [
 ] as const;
 
 export type InboundStatus = (typeof INBOUND_STATUSES)[number];
-export type SendStatus = (typeof SEND_STATUSES)[number];
+type SendStatus = (typeof SEND_STATUSES)[number];
 type JsonPrimitive = null | boolean | number | string;
 type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
 export interface JsonObject {
@@ -218,6 +218,11 @@ type SqlInputValue = null | number | bigint | string | Uint8Array;
 type SqlRow = Record<string, unknown>;
 type Clock = () => number;
 
+/** @internal Connection injection is reserved for the persistence boundary and tests. */
+interface SqliteStoreInternalOptions {
+  readonly database: DatabaseSync;
+}
+
 function rowAs<T>(row: unknown): T | undefined {
   return row === undefined ? undefined : row as T;
 }
@@ -228,6 +233,17 @@ function rowsAs<T>(rows: readonly unknown[]): T[] {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** @internal Persistence lifecycle helper shared by initialization and close. */
+export function secureSqliteFiles(filePath: string): void {
+  for (const candidate of [filePath, `${filePath}-wal`, `${filePath}-shm`]) {
+    try {
+      fs.chmodSync(candidate, 0o600);
+    } catch (error) {
+      if (errorCode(error) !== 'ENOENT') throw error;
+    }
+  }
 }
 
 function errorCode(error: unknown): string {
@@ -492,9 +508,8 @@ export class AgentSessionError extends Error {
 
 export class SqliteStore {
   readonly filePath: string;
-  readonly database: DatabaseSync;
+  readonly #database: DatabaseSync;
   private readonly clock: Clock;
-  private closed = false;
 
   constructor({
     filePath,
@@ -504,7 +519,7 @@ export class SqliteStore {
     filePath: string;
     clock?: Clock;
     journalMode?: 'WAL' | 'DELETE';
-  }) {
+  }, internal: SqliteStoreInternalOptions) {
     if (!filePath) throw new Error('SQLite filePath is required');
     if (!['WAL', 'DELETE'].includes(journalMode)) {
       throw new Error(`Unsupported SQLite journal mode: ${journalMode}`);
@@ -514,19 +529,14 @@ export class SqliteStore {
     this.clock = clock;
     const databaseDirectory = path.dirname(this.filePath);
     ensurePrivateDirectory(databaseDirectory);
-    this.database = new DatabaseSync(this.filePath);
+    this.#database = internal.database;
     fs.chmodSync(this.filePath, 0o600);
-    this.database.exec('PRAGMA busy_timeout = 5000');
-    this.database.exec(`PRAGMA journal_mode = ${journalMode}`);
-    this.database.exec('PRAGMA synchronous = FULL');
-    this.database.exec('PRAGMA foreign_keys = ON');
-    try {
-      this.#initializeSchema();
-      this.#secureDatabaseFiles();
-    } catch (error) {
-      this.database.close();
-      throw error;
-    }
+    this.#database.exec('PRAGMA busy_timeout = 5000');
+    this.#database.exec(`PRAGMA journal_mode = ${journalMode}`);
+    this.#database.exec('PRAGMA synchronous = FULL');
+    this.#database.exec('PRAGMA foreign_keys = ON');
+    this.#initializeSchema();
+    secureSqliteFiles(this.filePath);
   }
 
   #now(): number {
@@ -535,7 +545,7 @@ export class SqliteStore {
 
   #initializeSchema(): void {
     const versionRow = rowAs<{ user_version: number }>(
-      this.database.prepare('PRAGMA user_version').get(),
+      this.#database.prepare('PRAGMA user_version').get(),
     );
     let version = Number(versionRow?.user_version ?? 0);
     if (version > SCHEMA_VERSION) {
@@ -556,13 +566,13 @@ export class SqliteStore {
     }
 
     if (version === 11) {
-      this.database.exec(`
+      this.#database.exec(`
         PRAGMA foreign_keys = OFF;
         PRAGMA legacy_alter_table = ON;
         BEGIN IMMEDIATE;
       `);
       try {
-        this.database.exec(`
+        this.#database.exec(`
           CREATE TEMP TABLE stale_v11_sources (
             message_key TEXT PRIMARY KEY
           ) STRICT;
@@ -713,13 +723,13 @@ export class SqliteStore {
         if (violations.length) {
           throw new Error('SQLite migration v12 created foreign-key violations');
         }
-        this.database.exec('COMMIT');
+        this.#database.exec('COMMIT');
         version = 12;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       } finally {
-        this.database.exec(`
+        this.#database.exec(`
           PRAGMA legacy_alter_table = OFF;
           PRAGMA foreign_keys = ON;
         `);
@@ -727,9 +737,9 @@ export class SqliteStore {
     }
 
     if (version === 12) {
-      this.database.exec('BEGIN IMMEDIATE');
+      this.#database.exec('BEGIN IMMEDIATE');
       try {
-        this.database.exec(`
+        this.#database.exec(`
           ALTER TABLE inbound_messages
             ADD COLUMN deferred INTEGER NOT NULL DEFAULT 0
               CHECK (deferred IN (0, 1));
@@ -740,15 +750,15 @@ export class SqliteStore {
         `);
         version = 13;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       }
     }
 
     if (version === 13) {
-      this.database.exec('BEGIN IMMEDIATE');
+      this.#database.exec('BEGIN IMMEDIATE');
       try {
-        this.database.exec(`
+        this.#database.exec(`
           ALTER TABLE conversations
             ADD COLUMN memory_thread_id TEXT NOT NULL DEFAULT '';
           ALTER TABLE agent_sessions
@@ -758,15 +768,15 @@ export class SqliteStore {
         `);
         version = 14;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       }
     }
 
     if (version === 14) {
-      this.database.exec('BEGIN IMMEDIATE');
+      this.#database.exec('BEGIN IMMEDIATE');
       try {
-        this.database.exec(`
+        this.#database.exec(`
           CREATE TABLE IF NOT EXISTS maintainer_binding (
             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
             open_kfid TEXT NOT NULL,
@@ -780,15 +790,15 @@ export class SqliteStore {
         `);
         version = 15;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       }
     }
 
     if (version === 15) {
-      this.database.exec('BEGIN IMMEDIATE');
+      this.#database.exec('BEGIN IMMEDIATE');
       try {
-        this.database.exec(`
+        this.#database.exec(`
           ALTER TABLE inbound_messages
             ADD COLUMN channel TEXT NOT NULL DEFAULT 'wechat_kf'
               CHECK (channel IN ('wechat_kf', 'weixin_ilink'));
@@ -926,15 +936,15 @@ export class SqliteStore {
         `);
         version = 16;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       }
     }
 
     if (version === 16) {
-      this.database.exec('BEGIN IMMEDIATE');
+      this.#database.exec('BEGIN IMMEDIATE');
       try {
-        this.database.exec(`
+        this.#database.exec(`
           CREATE TABLE ilink_login_offers (
             offer_id TEXT PRIMARY KEY,
             source_message_key TEXT NOT NULL,
@@ -963,15 +973,15 @@ export class SqliteStore {
         `);
         version = 17;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       }
     }
 
     if (version === 17) {
-      this.database.exec('BEGIN IMMEDIATE');
+      this.#database.exec('BEGIN IMMEDIATE');
       try {
-        this.database.exec(`
+        this.#database.exec(`
           CREATE TABLE IF NOT EXISTS ilink_enrollment_audit (
             offer_id TEXT PRIMARY KEY,
             source_message_key TEXT NOT NULL,
@@ -1083,15 +1093,15 @@ export class SqliteStore {
         `);
         version = 18;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       }
     }
 
     if (version === 18) {
-      this.database.exec('BEGIN IMMEDIATE');
+      this.#database.exec('BEGIN IMMEDIATE');
       try {
-        this.database.exec(`
+        this.#database.exec(`
           CREATE TABLE ilink_inbound_images (
             message_key TEXT NOT NULL,
             position INTEGER NOT NULL CHECK (position >= 0),
@@ -1114,15 +1124,15 @@ export class SqliteStore {
         `);
         version = 19;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       }
     }
 
     if (version === 19) {
-      this.database.exec('BEGIN IMMEDIATE');
+      this.#database.exec('BEGIN IMMEDIATE');
       try {
-        this.database.exec(`
+        this.#database.exec(`
           CREATE INDEX IF NOT EXISTS ilink_reply_windows_expiry_idx
             ON ilink_reply_windows(expires_at, state);
           CREATE INDEX IF NOT EXISTS ilink_reply_windows_updated_idx
@@ -1132,15 +1142,15 @@ export class SqliteStore {
         `);
         version = 20;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       }
     }
 
     if (version === 20) {
-      this.database.exec('BEGIN IMMEDIATE');
+      this.#database.exec('BEGIN IMMEDIATE');
       try {
-        this.database.exec(`
+        this.#database.exec(`
           UPDATE send_attempts
           SET status = 'failed', error_code = 'feature_removed',
               error_message = 'Retired notification tool removed before transmission'
@@ -1152,14 +1162,14 @@ export class SqliteStore {
         `);
         return;
       } catch (error) {
-        this.database.exec('ROLLBACK');
+        this.#database.exec('ROLLBACK');
         throw error;
       }
     }
 
-    this.database.exec('BEGIN IMMEDIATE');
+    this.#database.exec('BEGIN IMMEDIATE');
     try {
-      this.database.exec(`
+      this.#database.exec(`
         CREATE TABLE sync_cursors (
           open_kfid TEXT PRIMARY KEY,
           cursor TEXT NOT NULL,
@@ -1516,36 +1526,23 @@ export class SqliteStore {
           SELECT 1 FROM agent_sessions WHERE reply_window_id = OLD.reply_window_id
         ) BEGIN SELECT RAISE(ABORT, 'reply window still has agent sessions'); END;
       `);
-      this.database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-      this.database.exec('COMMIT');
+      this.#database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+      this.#database.exec('COMMIT');
     } catch (error) {
-      this.database.exec('ROLLBACK');
+      this.#database.exec('ROLLBACK');
       throw error;
     }
   }
 
-  #secureDatabaseFiles(): void {
-    for (const candidate of [
-      this.filePath,
-      `${this.filePath}-wal`,
-      `${this.filePath}-shm`,
-    ]) {
-      try {
-        fs.chmodSync(candidate, 0o600);
-      } catch (error) {
-        if (errorCode(error) !== 'ENOENT') throw error;
-      }
-    }
-  }
-
   #transaction<T>(operation: () => T): T {
-    this.database.exec('BEGIN IMMEDIATE');
+    if (this.#database.isTransaction) return operation();
+    this.#database.exec('BEGIN IMMEDIATE');
     try {
       const result = operation();
-      this.database.exec('COMMIT');
+      this.#database.exec('COMMIT');
       return result;
     } catch (error) {
-      this.database.exec('ROLLBACK');
+      this.#database.exec('ROLLBACK');
       throw error;
     }
   }
@@ -1556,7 +1553,7 @@ export class SqliteStore {
     now = this.#now(),
   ): void {
     if (!externalUserId) return;
-    this.database
+    this.#database
       .prepare(`
         INSERT INTO conversations (
           open_kfid, external_userid, updated_at
@@ -1568,7 +1565,7 @@ export class SqliteStore {
 
   #inboundRow(messageKey: string): InboundRow | undefined {
     return rowAs<InboundRow>(
-      this.database
+      this.#database
         .prepare('SELECT * FROM inbound_messages WHERE message_key = ?')
         .get(messageKey),
     );
@@ -1576,14 +1573,14 @@ export class SqliteStore {
 
   #attemptRow(attemptKey: string): AttemptRow | undefined {
     return rowAs<AttemptRow>(
-      this.database
+      this.#database
         .prepare('SELECT * FROM send_attempts WHERE attempt_key = ?')
         .get(attemptKey),
     );
   }
 
   #agentSessionRow(token: string): AgentSessionRow | undefined {
-    return rowAs<AgentSessionRow>(this.database
+    return rowAs<AgentSessionRow>(this.#database
       .prepare('SELECT * FROM agent_sessions WHERE token_hash = ?')
       .get(sha256(requiredText(token, 'agent session token'))));
   }
@@ -1602,7 +1599,7 @@ export class SqliteStore {
     }
     const inbound = this.#inboundRow(row.source_message_key);
     const laterCustomer = inbound
-      ? this.database.prepare(`
+      ? this.#database.prepare(`
           SELECT 1 FROM inbound_messages
           WHERE open_kfid = ? AND external_userid = ?
             AND inbox_seq > ?
@@ -1625,7 +1622,7 @@ export class SqliteStore {
         'stale_agent_session',
       );
     }
-    const used = rowAs<{ count: number }>(this.database.prepare(`
+    const used = rowAs<{ count: number }>(this.#database.prepare(`
       SELECT COUNT(*) AS count FROM send_attempts
       WHERE source_message_key = ?
     `).get(row.source_message_key));
@@ -1665,7 +1662,7 @@ export class SqliteStore {
     const actualAttemptKey = stableAttemptKey(sourceMessageKey, index);
     const now = this.#now();
 
-    const result = this.database
+    const result = this.#database
       .prepare(`
         INSERT INTO send_attempts (
           attempt_key, source_message_key, open_kfid, external_userid,
@@ -1701,7 +1698,7 @@ export class SqliteStore {
       );
 
     const existing = rowAs<AttemptRow>(
-      this.database
+      this.#database
         .prepare(`
           SELECT * FROM send_attempts
           WHERE source_message_key = ? AND send_index = ?
@@ -1729,7 +1726,7 @@ export class SqliteStore {
   }
 
   #settleSourceMessage(sourceMessageKey: string, now = this.#now()): void {
-    const activeRow = rowAs<{ count: number }>(this.database
+    const activeRow = rowAs<{ count: number }>(this.#database
       .prepare(`
         SELECT COUNT(*) AS count
         FROM send_attempts
@@ -1738,14 +1735,14 @@ export class SqliteStore {
       .get(sourceMessageKey));
     const active = Number(activeRow?.count ?? 0);
     if (Number(active) > 0) return;
-    const activeAgent = rowAs<{ count: number }>(this.database.prepare(`
+    const activeAgent = rowAs<{ count: number }>(this.#database.prepare(`
       SELECT COUNT(*) AS count FROM agent_sessions
       WHERE source_message_key = ? AND closed_at = 0 AND expires_at > ?
     `).get(sourceMessageKey, now));
     if (Number(activeAgent?.count || 0) > 0) return;
     const source = this.#inboundRow(sourceMessageKey);
     const laterCustomer = source
-      ? this.database.prepare(`
+      ? this.#database.prepare(`
           SELECT 1 FROM inbound_messages
           WHERE open_kfid = ? AND external_userid = ?
             AND inbox_seq > ? AND origin = 'customer'
@@ -1757,7 +1754,7 @@ export class SqliteStore {
         `).get(source.open_kfid, source.external_userid, source.inbox_seq)
       : undefined;
     if (laterCustomer) return;
-    this.database
+    this.#database
       .prepare(`
         UPDATE inbound_messages
         SET status = CASE WHEN status = 'suppressed' THEN status ELSE 'completed' END,
@@ -1769,7 +1766,7 @@ export class SqliteStore {
   }
 
   #applyDeliveryFailure(attempt: AttemptRow, failType: number, now: number): void {
-    this.database.prepare(`
+    this.#database.prepare(`
       UPDATE send_attempts
       SET status = 'failed', fail_type = ?, error_code = 'msg_send_fail',
           error_message = ?, updated_at = ?
@@ -1780,7 +1777,7 @@ export class SqliteStore {
       now,
       attempt.attempt_key,
     );
-    this.database.prepare(`
+    this.#database.prepare(`
       UPDATE delivery_failures
       SET matched_attempt_key = ?, matched_at = ?
       WHERE wecom_msgid = ?
@@ -1788,13 +1785,13 @@ export class SqliteStore {
   }
 
   #suppressGroup(messageKey: string, reason: string, now: number): void {
-    this.database.prepare(`
+    this.#database.prepare(`
       UPDATE inbound_messages
       SET status = 'suppressed', error_message = ?, updated_at = ?
       WHERE (message_key = ? OR primary_message_key = ?)
         AND status NOT IN ('completed', 'ignored', 'absorbed')
     `).run(reason, now, messageKey, messageKey);
-    this.database.prepare(`
+    this.#database.prepare(`
       UPDATE send_attempts
       SET status = 'failed', error_code = 'suppressed',
           error_message = ?, updated_at = ?
@@ -1814,7 +1811,7 @@ export class SqliteStore {
       throw new Error(`Cannot mark send ${status} in status ${current.status}`);
     }
     const now = this.#now();
-    this.database.prepare(`
+    this.#database.prepare(`
       UPDATE send_attempts
       SET status = ?, wecom_msgid = ?, error_code = ?, error_message = ?,
           updated_at = ?
@@ -1829,13 +1826,13 @@ export class SqliteStore {
 
   integrityCheck(): SqlRow[] {
     return rowsAs<SqlRow>(
-      this.database.prepare('PRAGMA integrity_check').all(),
+      this.#database.prepare('PRAGMA integrity_check').all(),
     );
   }
 
   foreignKeyCheck(): SqlRow[] {
     return rowsAs<SqlRow>(
-      this.database.prepare('PRAGMA foreign_key_check').all(),
+      this.#database.prepare('PRAGMA foreign_key_check').all(),
     );
   }
 
@@ -1846,13 +1843,13 @@ export class SqliteStore {
       throw new Error(`Unsupported checkpoint mode: ${mode}`);
     }
     return rowAs<SqlRow>(
-      this.database.prepare(`PRAGMA wal_checkpoint(${mode})`).get(),
+      this.#database.prepare(`PRAGMA wal_checkpoint(${mode})`).get(),
     );
   }
 
   getCursor(openKfId: string): string {
     const cursor = rowAs<{ cursor: unknown }>(
-      this.database
+      this.#database
         .prepare('SELECT cursor FROM sync_cursors WHERE open_kfid = ?')
         .get(String(openKfId)),
     )?.cursor;
@@ -1860,14 +1857,14 @@ export class SqliteStore {
   }
 
   listSyncOpenKfIds(): string[] {
-    return rowsAs<{ open_kfid: string }>(this.database.prepare(`
+    return rowsAs<{ open_kfid: string }>(this.#database.prepare(`
       SELECT open_kfid FROM sync_cursors ORDER BY open_kfid
     `).all()).map((row) => row.open_kfid);
   }
 
   registerSyncOpenKfId(openKfId: string): void {
     const service = requiredText(openKfId, 'openKfId');
-    this.database.prepare(`
+    this.#database.prepare(`
       INSERT INTO sync_cursors (open_kfid, cursor, updated_at)
       VALUES (?, '', ?)
       ON CONFLICT(open_kfid) DO NOTHING
@@ -1903,7 +1900,7 @@ export class SqliteStore {
       }
       const now = this.#now();
       const insertedMessageKeys: string[] = [];
-      const statement = this.database.prepare(`
+      const statement = this.#database.prepare(`
         INSERT INTO inbound_messages (
           message_key, open_kfid, msgid, external_userid, channel, origin, msg_type,
           sent_at, status, deferred, payload_json, created_at, updated_at
@@ -1931,7 +1928,7 @@ export class SqliteStore {
         if (result.changes === 1) insertedMessageKeys.push(message.messageKey);
       }
 
-      this.database
+      this.#database
         .prepare(`
           INSERT INTO sync_cursors (open_kfid, cursor, updated_at)
           VALUES (?, ?, ?)
@@ -1955,12 +1952,12 @@ export class SqliteStore {
     return this.#transaction(() => {
       const service = requiredText(openKfId, 'openKfId');
       const customer = String(externalUserId || '');
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE inbound_messages SET deferred = 0, updated_at = ?
         WHERE open_kfid = ? AND external_userid = ?
           AND deferred = 1 AND status = 'received'
       `).run(this.#now(), service, customer);
-      return rowsAs<InboundRow>(this.database.prepare(`
+      return rowsAs<InboundRow>(this.#database.prepare(`
         SELECT * FROM inbound_messages
         WHERE open_kfid = ? AND external_userid = ?
           AND deferred = 0 AND status = 'received'
@@ -1981,7 +1978,7 @@ export class SqliteStore {
         external_userid: string;
         channel: ChatChannel;
       }>(
-        this.database.prepare(`
+        this.#database.prepare(`
           SELECT open_kfid, external_userid, channel FROM inbound_messages
           WHERE deferred = 1 AND status = 'received'
             AND channel IN (${channelPlaceholders})
@@ -1989,13 +1986,13 @@ export class SqliteStore {
         `).get(...selected),
       );
       if (!next) return [];
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE inbound_messages SET deferred = 0, updated_at = ?
         WHERE open_kfid = ? AND external_userid = ?
           AND channel = ?
           AND deferred = 1 AND status = 'received'
       `).run(this.#now(), next.open_kfid, next.external_userid, next.channel);
-      return rowsAs<InboundRow>(this.database.prepare(`
+      return rowsAs<InboundRow>(this.#database.prepare(`
         SELECT * FROM inbound_messages
         WHERE open_kfid = ? AND external_userid = ?
           AND channel = ?
@@ -2040,7 +2037,7 @@ export class SqliteStore {
       )?.memoryThreadId || '';
       const now = this.#now();
       const replyWindowId = inbound.channel === 'weixin_ilink'
-        ? Number(rowAs<{ reply_window_id: number }>(this.database.prepare(`
+        ? Number(rowAs<{ reply_window_id: number }>(this.#database.prepare(`
             SELECT reply_window_id FROM ilink_reply_windows
             WHERE source_message_key = ?
           `).get(boundary.message_key))?.reply_window_id || 0)
@@ -2049,7 +2046,7 @@ export class SqliteStore {
         throw new AgentSessionError('iLink message has no reply window');
       }
       const token = `ws_${randomBytes(24).toString('base64url')}`;
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE agent_sessions SET closed_at = ?, updated_at = ?
         WHERE open_kfid = ? AND external_userid = ?
           AND closed_at = 0 AND expires_at > ?
@@ -2060,7 +2057,7 @@ export class SqliteStore {
         inbound.external_userid,
         now,
       );
-      this.database.prepare(`
+      this.#database.prepare(`
         INSERT INTO agent_sessions (
           token_hash, source_message_key, open_kfid, external_userid,
           channel, reply_window_id,
@@ -2096,7 +2093,7 @@ export class SqliteStore {
 
   closeAgentSession(token: string): boolean {
     const now = this.#now();
-    return Number(this.database.prepare(`
+    return Number(this.#database.prepare(`
       UPDATE agent_sessions SET closed_at = ?, updated_at = ?
       WHERE token_hash = ? AND closed_at = 0
     `).run(now, now, sha256(requiredText(token, 'agent session token'))).changes) === 1;
@@ -2104,7 +2101,7 @@ export class SqliteStore {
 
   closeAgentSessions(messageKey: string): number {
     const now = this.#now();
-    return Number(this.database.prepare(`
+    return Number(this.#database.prepare(`
       UPDATE agent_sessions SET closed_at = ?, updated_at = ?
       WHERE source_message_key = ? AND closed_at = 0
     `).run(now, now, String(messageKey)).changes);
@@ -2137,14 +2134,14 @@ export class SqliteStore {
       throw new AgentSessionError('Agent image artifact filename exceeds 128 UTF-8 bytes');
     }
     const tokenHash = sha256(session.token);
-    const count = rowAs<{ count: number }>(this.database.prepare(`
+    const count = rowAs<{ count: number }>(this.#database.prepare(`
       SELECT COUNT(*) AS count FROM agent_artifacts WHERE token_hash = ?
     `).get(tokenHash));
     if (Number(count?.count || 0) >= 5) {
       throw new AgentSessionError('Agent session permits at most five artifacts');
     }
     const ref = `artifact:${Number(count?.count || 0)}`;
-    this.database.prepare(`
+    this.#database.prepare(`
       INSERT INTO agent_artifacts (
         token_hash, ref, bytes, filename, content_type, metadata_json, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -2172,7 +2169,7 @@ export class SqliteStore {
       filename: string;
       content_type: 'image/png' | 'image/jpeg';
       metadata_json: string | null;
-    }>(this.database.prepare(`
+    }>(this.#database.prepare(`
       SELECT bytes, filename, content_type, metadata_json FROM agent_artifacts
       WHERE token_hash = ? AND ref = ?
     `).get(sha256(session.token), String(ref)));
@@ -2207,7 +2204,7 @@ export class SqliteStore {
           'wrong_channel',
         );
       }
-      const indexRow = rowAs<{ next_index: number }>(this.database.prepare(`
+      const indexRow = rowAs<{ next_index: number }>(this.#database.prepare(`
         SELECT COALESCE(MAX(send_index) + 1, 0) AS next_index
         FROM send_attempts WHERE source_message_key = ?
       `).get(session.messageKey));
@@ -2218,7 +2215,7 @@ export class SqliteStore {
           'send_budget_exceeded',
         );
       }
-      const directionRow = rowAs<{ direction: number }>(this.database.prepare(`
+      const directionRow = rowAs<{ direction: number }>(this.#database.prepare(`
         SELECT MAX(inbox_seq) AS direction FROM inbound_messages
         WHERE message_key = ? OR (
           primary_message_key = ? AND status IN ('steering', 'steered')
@@ -2237,7 +2234,7 @@ export class SqliteStore {
           direction: Number(directionRow?.direction || session.boundaryInboxSeq),
         },
       }).attempt;
-      const claimed = this.database.prepare(`
+      const claimed = this.#database.prepare(`
         UPDATE send_attempts SET status = 'sending', updated_at = ?
         WHERE attempt_key = ? AND status = 'pending'
       `).run(this.#now(), reserved.attemptId);
@@ -2261,13 +2258,13 @@ export class SqliteStore {
       if (!inbound || inbound.status !== 'received' || inbound.deferred === 1) {
         throw new Error('Queue notice requires a live received message');
       }
-      const existing = rowAs<AttemptRow>(this.database.prepare(`
+      const existing = rowAs<AttemptRow>(this.#database.prepare(`
         SELECT * FROM send_attempts
         WHERE source_message_key = ? AND source = 'queue_notice'
         LIMIT 1
       `).get(messageKey));
       if (existing) return mapAttempt(existing)!;
-      const next = rowAs<{ send_index: number }>(this.database.prepare(`
+      const next = rowAs<{ send_index: number }>(this.#database.prepare(`
         SELECT COALESCE(MAX(send_index) + 1, 0) AS send_index
         FROM send_attempts WHERE source_message_key = ?
       `).get(messageKey));
@@ -2284,7 +2281,7 @@ export class SqliteStore {
   }
 
   listMessageAttempts(messageKey: string): AttemptRecord[] {
-    return rowsAs<AttemptRow>(this.database.prepare(`
+    return rowsAs<AttemptRow>(this.#database.prepare(`
       SELECT * FROM send_attempts
       WHERE source_message_key = ? ORDER BY send_index
     `).all(String(messageKey || ''))).map((row) => mapAttempt(row)!);
@@ -2316,7 +2313,7 @@ export class SqliteStore {
         reply_window_id: number | null;
         error_code: string;
       }>(
-        this.database.prepare(`
+        this.#database.prepare(`
           SELECT attempt_key, status, channel, reply_window_id, error_code
           FROM send_attempts
           WHERE source_message_key = ? AND source = 'mcp_tool'
@@ -2359,7 +2356,7 @@ export class SqliteStore {
         throw new Error('Agent execution does not match every terminal MCP attempt');
       }
       const now = this.#now();
-      const updated = this.database.prepare(`
+      const updated = this.#database.prepare(`
         UPDATE inbound_messages
         SET status = 'completed', payload_json = NULL, updated_at = ?
         WHERE message_key = ? AND status IN (
@@ -2372,7 +2369,7 @@ export class SqliteStore {
       const steeringKeys = [...new Set(steeringMessageKeys.map(String))];
       if (steeringKeys.length) {
         const steeringPlaceholders = steeringKeys.map(() => '?').join(',');
-        const absorbed = this.database.prepare(`
+        const absorbed = this.#database.prepare(`
           UPDATE inbound_messages
           SET status = 'absorbed', payload_json = NULL, updated_at = ?
           WHERE message_key IN (${steeringPlaceholders})
@@ -2382,11 +2379,11 @@ export class SqliteStore {
           throw new Error('Not every steering message belongs to the MCP execution');
         }
       }
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE agent_sessions SET closed_at = ?, updated_at = ?
         WHERE source_message_key = ? AND closed_at = 0
       `).run(now, now, messageKey);
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE conversations SET memory_thread_id = '', updated_at = ?
         WHERE open_kfid = ? AND external_userid = ?
       `).run(now, primary.open_kfid, primary.external_userid);
@@ -2425,7 +2422,7 @@ export class SqliteStore {
       parameters.push(String(externalUserId));
     }
     parameters.push(Math.max(1, Math.min(Number(limit) || 100, 1000)));
-    return rowsAs<InboundRow>(this.database
+    return rowsAs<InboundRow>(this.#database
       .prepare(`
         SELECT * FROM inbound_messages
         WHERE ${clauses.join(' AND ')}
@@ -2442,7 +2439,7 @@ export class SqliteStore {
   ): ConversationRecord | undefined {
     return mapConversation(
       rowAs<ConversationRow>(
-        this.database
+        this.#database
           .prepare(`
             SELECT * FROM conversations
             WHERE open_kfid = ? AND external_userid = ?
@@ -2465,7 +2462,7 @@ export class SqliteStore {
   }): ConversationRecord {
     return this.#transaction(() => {
       const now = this.#now();
-      this.database
+      this.#database
         .prepare(`
           INSERT INTO conversations (
             open_kfid, external_userid, thread_id, memory_thread_id, updated_at
@@ -2496,7 +2493,7 @@ export class SqliteStore {
       authorized_at: number;
       updated_at: number;
     }>(
-      this.database
+      this.#database
         .prepare('SELECT * FROM authorizations WHERE external_userid = ?')
         .get(String(externalUserId)),
     );
@@ -2564,7 +2561,7 @@ export class SqliteStore {
         : 0;
       const newlyAuthorized = consecutiveMatches >= threshold;
       const now = this.#now();
-      this.database
+      this.#database
         .prepare(`
           INSERT INTO authorizations (
             external_userid, authorized, consecutive_matches,
@@ -2601,7 +2598,7 @@ export class SqliteStore {
             text: { content: String(confirmationText) },
           },
         });
-        this.database
+        this.#database
           .prepare(`
             UPDATE inbound_messages
             SET status = 'ready',
@@ -2613,7 +2610,7 @@ export class SqliteStore {
             messageKey,
           );
       } else {
-        this.database
+        this.#database
           .prepare(`
             UPDATE inbound_messages
             SET status = 'ignored', payload_json = NULL, updated_at = ?
@@ -2641,7 +2638,7 @@ export class SqliteStore {
       if (!row) throw new Error(`Unknown inbound message: ${messageKey}`);
       if (['processing', 'preparing'].includes(row.status)) {
         if (clientInputId && row.client_input_id !== String(clientInputId)) {
-          this.database
+          this.#database
             .prepare(`
               UPDATE inbound_messages
               SET client_input_id = ?, updated_at = ?
@@ -2655,7 +2652,7 @@ export class SqliteStore {
         throw new Error(`Cannot claim inbound message in status ${row.status}`);
       }
       const now = this.#now();
-      this.database
+      this.#database
         .prepare(`
           UPDATE inbound_messages
           SET status = 'processing',
@@ -2677,7 +2674,7 @@ export class SqliteStore {
     messageKey: string,
     codexTurnId = '',
   ): InboundRecord {
-    const result = this.database
+    const result = this.#database
       .prepare(`
         UPDATE inbound_messages
         SET status = 'preparing', codex_turn_id = ?, updated_at = ?
@@ -2712,7 +2709,7 @@ export class SqliteStore {
       ) {
         throw new Error('Steer message must belong to the primary conversation');
       }
-      const updated = this.database
+      const updated = this.#database
         .prepare(`
           UPDATE inbound_messages
           SET status = 'steering',
@@ -2744,7 +2741,7 @@ export class SqliteStore {
       steeringBoundary = 0,
     }: { codexTurnId?: string; steeringBoundary?: number } = {},
   ): InboundRecord {
-    const updated = this.database
+    const updated = this.#database
       .prepare(`
         UPDATE inbound_messages
         SET status = 'steered', codex_turn_id = ?, steering_boundary = ?,
@@ -2768,7 +2765,7 @@ export class SqliteStore {
     primaryMessageKey: string,
   ): InboundRecord {
     return this.#transaction(() => {
-      const updated = this.database
+      const updated = this.#database
         .prepare(`
           UPDATE inbound_messages
           SET status = 'received',
@@ -2795,7 +2792,7 @@ export class SqliteStore {
     return this.#transaction(() => {
       const now = this.#now();
       const message = errorMessage(error) || 'unknown error';
-      const primary = this.database
+      const primary = this.#database
         .prepare(`
           UPDATE inbound_messages
           SET status = 'failed', error_message = ?, updated_at = ?
@@ -2803,7 +2800,7 @@ export class SqliteStore {
         `)
         .run(message, now, messageKey);
       if (primary.changes === 1) {
-        this.database
+        this.#database
           .prepare(`
             UPDATE inbound_messages
             SET status = 'received', primary_message_key = NULL,
@@ -2820,13 +2817,13 @@ export class SqliteStore {
 
   deferActiveInbound(messageKey: string): boolean {
     return this.#transaction(() => {
-      const attempts = rowAs<{ count: number }>(this.database.prepare(`
+      const attempts = rowAs<{ count: number }>(this.#database.prepare(`
         SELECT COUNT(*) AS count FROM send_attempts
         WHERE source_message_key = ?
       `).get(messageKey));
       if (Number(attempts?.count || 0) > 0) return false;
       const now = this.#now();
-      const updated = this.database.prepare(`
+      const updated = this.#database.prepare(`
         UPDATE inbound_messages
         SET status = 'received', deferred = 1,
             primary_message_key = NULL, codex_turn_id = '',
@@ -2837,7 +2834,7 @@ export class SqliteStore {
             'failed', 'processing', 'preparing', 'steering', 'steered'
           )
       `).run(now, messageKey, messageKey);
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE agent_sessions SET closed_at = ?, updated_at = ?
         WHERE source_message_key = ? AND closed_at = 0
       `).run(now, now, messageKey);
@@ -2846,7 +2843,7 @@ export class SqliteStore {
   }
 
   markInboundIgnored(messageKey: string): InboundRecord {
-    const updated = this.database
+    const updated = this.#database
       .prepare(`
         UPDATE inbound_messages
         SET status = 'ignored', payload_json = NULL, updated_at = ?
@@ -2860,7 +2857,7 @@ export class SqliteStore {
   }
 
   markInboundCompleted(messageKey: string): InboundRecord {
-    const updated = this.database
+    const updated = this.#database
       .prepare(`
         UPDATE inbound_messages
         SET status = 'completed', payload_json = NULL, updated_at = ?
@@ -2893,7 +2890,7 @@ export class SqliteStore {
     externalUserId: string;
     limit?: number;
   }): AttemptRecord[] {
-    return rowsAs<AttemptRow>(this.database
+    return rowsAs<AttemptRow>(this.#database
       .prepare(`
         SELECT * FROM send_attempts
         WHERE open_kfid = ? AND external_userid = ?
@@ -2911,7 +2908,7 @@ export class SqliteStore {
 
   beginNextSend(channel: ChatChannel = 'wechat_kf'): AttemptRecord | undefined {
     return this.#transaction(() => {
-      const candidate = rowAs<AttemptRow>(this.database.prepare(`
+      const candidate = rowAs<AttemptRow>(this.#database.prepare(`
         SELECT * FROM send_attempts
         WHERE channel = ? AND status = 'pending' AND NOT EXISTS (
           SELECT 1 FROM send_attempts AS active
@@ -2923,7 +2920,7 @@ export class SqliteStore {
         LIMIT 1
       `).get(channel));
       if (!candidate) return undefined;
-      const claimed = this.database.prepare(`
+      const claimed = this.#database.prepare(`
         UPDATE send_attempts SET status = 'sending', updated_at = ?
         WHERE attempt_key = ? AND status = 'pending'
       `).run(this.#now(), candidate.attempt_key);
@@ -2942,7 +2939,7 @@ export class SqliteStore {
         wecomMsgId: acceptedMessageId,
       });
       if (accepted.channel !== 'wechat_kf') return accepted;
-      const failure = rowAs<{ fail_type: number }>(this.database.prepare(`
+      const failure = rowAs<{ fail_type: number }>(this.#database.prepare(`
         SELECT fail_type FROM delivery_failures WHERE wecom_msgid = ?
       `).get(acceptedMessageId));
       if (!failure) return accepted;
@@ -2962,7 +2959,7 @@ export class SqliteStore {
         throw new Error(`Cannot fail send attempt in status ${current.status}`);
       }
       const now = this.#now();
-      this.database
+      this.#database
         .prepare(`
           UPDATE send_attempts
           SET status = 'failed', error_code = ?, error_message = ?, updated_at = ?
@@ -2998,7 +2995,7 @@ export class SqliteStore {
       const messageId = String(wecomMsgId);
       const fail = Number(failType || 0);
       const now = this.#now();
-      this.database.prepare(`
+      this.#database.prepare(`
         INSERT INTO delivery_failures (
           wecom_msgid, fail_type, observed_at
         ) VALUES (?, ?, ?)
@@ -3006,7 +3003,7 @@ export class SqliteStore {
           fail_type = excluded.fail_type,
           observed_at = excluded.observed_at
       `).run(messageId, fail, now);
-      const current = rowAs<AttemptRow>(this.database
+      const current = rowAs<AttemptRow>(this.#database
         .prepare(`
           SELECT * FROM send_attempts
           WHERE channel = 'wechat_kf'
@@ -3023,11 +3020,11 @@ export class SqliteStore {
   recoverStartup(): StartupRecovery {
     return this.#transaction(() => {
       const now = this.#now();
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE agent_sessions SET closed_at = ?, updated_at = ?
         WHERE closed_at = 0
       `).run(now, now);
-      const sending = this.database
+      const sending = this.#database
         .prepare(`
           UPDATE send_attempts
           SET status = 'uncertain', error_code = 'startup_recovery',
@@ -3036,7 +3033,7 @@ export class SqliteStore {
           WHERE status = 'sending'
         `)
         .run(now).changes;
-      const sources = rowsAs<{ source_message_key: string }>(this.database
+      const sources = rowsAs<{ source_message_key: string }>(this.#database
         .prepare(`
           SELECT DISTINCT source_message_key FROM send_attempts
           WHERE status = 'uncertain' AND error_code = 'startup_recovery'
@@ -3045,7 +3042,7 @@ export class SqliteStore {
       for (const source of sources) {
         this.#settleSourceMessage(source.source_message_key, now);
       }
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE inbound_messages
         SET status = 'received', primary_message_key = NULL,
             codex_turn_id = '', client_input_id = '', steering_boundary = 0,
@@ -3055,7 +3052,7 @@ export class SqliteStore {
       return {
         uncertainSends: Number(sending),
         inbound: rowsAs<InboundRow>(
-          this.database
+          this.#database
             .prepare(`
               SELECT * FROM inbound_messages
               WHERE status IN (
@@ -3084,11 +3081,11 @@ export class SqliteStore {
     return this.#transaction(() => {
       const message = this.#inboundRow(messageKey);
       if (!message) throw new Error(`Unknown inbound message: ${messageKey}`);
-      this.database
+      this.#database
         .prepare('DELETE FROM inbound_media WHERE message_key = ?')
         .run(messageKey);
       const now = this.#now();
-      const insert = this.database.prepare(`
+      const insert = this.#database.prepare(`
         INSERT INTO inbound_media (
           message_key, open_kfid, external_userid, position, kind,
           media_id, filename, sent_at, remembered_at
@@ -3134,7 +3131,7 @@ export class SqliteStore {
       filename: string;
       sent_at: number;
       remembered_at: number;
-    }>(this.database
+    }>(this.#database
       .prepare(`
         SELECT * FROM inbound_media
         WHERE open_kfid = ? AND external_userid = ? AND remembered_at >= ?
@@ -3177,10 +3174,10 @@ export class SqliteStore {
   } {
     return this.#transaction(() => {
       const now = this.#now();
-      const wecomMedia = this.database
+      const wecomMedia = this.#database
         .prepare('DELETE FROM inbound_media WHERE remembered_at < ?')
         .run(now - mediaMaxAgeMs).changes;
-      const ilinkMedia = this.database
+      const ilinkMedia = this.#database
         .prepare(`
           DELETE FROM ilink_inbound_images
           WHERE created_at < ? AND EXISTS (
@@ -3192,7 +3189,7 @@ export class SqliteStore {
           )
         `)
         .run(now - mediaMaxAgeMs).changes;
-      const inboundPayloads = this.database
+      const inboundPayloads = this.#database
         .prepare(`
           UPDATE inbound_messages SET payload_json = NULL
           WHERE updated_at < ? AND status IN (
@@ -3200,32 +3197,32 @@ export class SqliteStore {
           )
         `)
         .run(now - payloadMaxAgeMs).changes;
-      const sendPayloads = this.database
+      const sendPayloads = this.#database
         .prepare(`
           UPDATE send_attempts SET payload_json = NULL, metadata_json = NULL
           WHERE updated_at < ? AND status IN ('accepted', 'failed')
         `)
         .run(now - payloadMaxAgeMs).changes;
-      const audits = this.database
+      const audits = this.#database
         .prepare(`
           DELETE FROM send_attempts
           WHERE updated_at < ? AND status IN ('accepted', 'failed')
         `)
         .run(now - acceptedAuditMaxAgeMs).changes;
-      this.database.prepare(`
+      this.#database.prepare(`
         DELETE FROM delivery_failures WHERE observed_at < ?
       `).run(now - acceptedAuditMaxAgeMs);
-      this.database.prepare(`
+      this.#database.prepare(`
         DELETE FROM agent_sessions
         WHERE expires_at < ? OR (closed_at > 0 AND closed_at < ?)
       `).run(now, now - 60 * 60 * 1000);
-      this.database.prepare(`
+      this.#database.prepare(`
         DELETE FROM ilink_reply_window_secrets
         WHERE reply_window_id IN (
           SELECT reply_window_id FROM ilink_reply_windows WHERE expires_at <= ?
         )
       `).run(now);
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE ilink_reply_windows
         SET state = 'closed', reserved_send_count = 0, updated_at = ?
         WHERE state = 'open' AND expires_at <= ?
@@ -3243,7 +3240,7 @@ export class SqliteStore {
               )
           )
       `).run(now, now);
-      const ilinkReplyWindows = this.database.prepare(`
+      const ilinkReplyWindows = this.#database.prepare(`
         DELETE FROM ilink_reply_windows
         WHERE state <> 'open' AND updated_at < ?
           AND NOT EXISTS (
@@ -3251,7 +3248,7 @@ export class SqliteStore {
             WHERE send_attempts.reply_window_id = ilink_reply_windows.reply_window_id
           )
       `).run(now - acceptedAuditMaxAgeMs).changes;
-      this.database.prepare(`
+      this.#database.prepare(`
         DELETE FROM ilink_account_secrets
         WHERE account_key IN (
           SELECT account_key FROM ilink_accounts
@@ -3268,10 +3265,6 @@ export class SqliteStore {
     });
   }
 
-  close() {
-    if (this.closed) return;
-    this.#secureDatabaseFiles();
-    this.database.close();
-    this.closed = true;
-  }
 }
+
+export type CoreState = SqliteStore;

@@ -12,12 +12,14 @@ import type {
 } from '../../src/agent/runtime.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
+import { stableMessageKey, type CoreState } from '../../src/state/sqlite-store.ts';
 import {
   SimulatedToolAgent,
   type SimulatedAgentCompletion,
   type SimulatedAgentSubmission,
 } from '../support/executing-agent.ts';
+import { withTestDatabase } from '../support/temp-sqlite.ts';
 
 interface Deferred<T> {
   readonly promise: Promise<T>;
@@ -35,7 +37,7 @@ type SubmitHandler = (
 ) => Promise<SimulatedAgentSubmission> | SimulatedAgentSubmission;
 
 function statefulFakeAgent(
-  _store: SqliteStore,
+  _store: CoreState,
   submitHandler: SubmitHandler,
   inspect?: (
     threadId: string,
@@ -54,7 +56,8 @@ function statefulFakeAgent(
 }
 
 interface Harness {
-  readonly store: SqliteStore;
+  readonly databaseFile: string;
+  readonly store: CoreState;
   readonly sent: Array<{
     readonly toUser: string;
     readonly openKfId: string;
@@ -70,7 +73,7 @@ interface Harness {
 async function createHarness(
   t: TestContext,
   options: {
-    readonly createAgent: (store: SqliteStore) => ReturnType<typeof statefulFakeAgent>;
+    readonly createAgent: (store: CoreState) => ReturnType<typeof statefulFakeAgent>;
     readonly allowedUserIds?: readonly string[];
     readonly authorization?: {
       readonly trigger?: string;
@@ -81,7 +84,9 @@ async function createHarness(
   },
 ): Promise<Harness> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'message-flow-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const databaseFile = path.join(directory, 'wecom.sqlite');
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  const store = persistence.core;
   const sent: Harness['sent'] = [];
   const mediaDownloads: string[] = [];
   const mediaGateway = {
@@ -143,10 +148,10 @@ async function createHarness(
 
   t.onTestFinished(async () => {
     await channel.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
-  return { store, sent, mediaDownloads, processor, ingest, idle };
+  return { databaseFile, store, sent, mediaDownloads, processor, ingest, idle };
 }
 
 function customer(msgid: string, content: string, overrides: Record<string, unknown> = {}) {
@@ -241,11 +246,13 @@ test('start plus steer executes one latest-direction reply', async (t) => {
     damagedKey = harness.ingest(customer('damaged-followup', '损坏消息', {
       send_time: 102,
     }));
-    harness.store.database.prepare(`
-      UPDATE inbound_messages
-      SET payload_json = json_set(payload_json, '$.conversation.channel', 'weixin_ilink')
-      WHERE message_key = ?
-    `).run(damagedKey);
+    withTestDatabase(harness.databaseFile, (database) => {
+      database.prepare(`
+        UPDATE inbound_messages
+        SET payload_json = json_set(payload_json, '$.conversation.channel', 'weixin_ilink')
+        WHERE message_key = ?
+      `).run(damagedKey);
+    });
   };
   completion.resolve({
     replies: [{ type: 'text', content: '故宫、长城、云冈石窟。' }],

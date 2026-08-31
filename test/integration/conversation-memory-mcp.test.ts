@@ -13,13 +13,16 @@ import {
   createConversationMemoryMcpServer,
 } from '../../src/mcp/conversation-memory-server.ts';
 import {
-  SqliteStore,
   type AgentSessionRecord,
 } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 
 async function harness(t: TestContext, memoryThreadId = '01900000-0000-7000-8000-000000000001') {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'conversation-memory-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'state.sqlite'),
+  });
+  const store = persistence.core;
   const page = store.ingestSyncPage({
     openKfId: 'wk-memory',
     nextCursor: 'memory-one',
@@ -94,7 +97,7 @@ async function harness(t: TestContext, memoryThreadId = '01900000-0000-7000-8000
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   t.onTestFinished(async () => {
     await client.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
   return { client, executor, reads, session };

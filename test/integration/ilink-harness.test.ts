@@ -11,10 +11,8 @@ import {
   IlinkMessageType,
 } from '../../src/ilink/protocol/types.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
-import { IlinkSqliteStore } from '../../src/ilink/sqlite-store.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 test('iLink inbound traverses the shared Harness and replies through its bound MCP executor', async (t) => {
@@ -23,8 +21,9 @@ test('iLink inbound traverses the shared Harness and replies through its bound M
   const botId = 'harness-bot@im.bot';
   const peerId = 'harness-user@im.wechat';
   const accountKey = createIlinkAccountKey(botId);
-  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock: () => now }));
-  const ilinkStore = new IlinkSqliteStore({ store, clock: () => now });
+  const persistence = temp.openPersistence({ clock: () => now });
+  const store = persistence.core;
+  const ilinkStore = persistence.createIlinkStore({ clock: () => now });
   const box = new IlinkSecretBox(Buffer.alloc(32, 29).toString('base64url'));
   ilinkStore.registerAccount({
     providerAccountId: botId,
@@ -174,8 +173,9 @@ test('a newer iLink direction atomically absorbs older unprocessed input', async
   const botId = 'recovery-bot@im.bot';
   const peerId = 'recovery-user@im.wechat';
   const accountKey = createIlinkAccountKey(botId);
-  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock: () => now }));
-  const ilinkStore = new IlinkSqliteStore({ store, clock: () => now });
+  const persistence = temp.openPersistence({ clock: () => now });
+  const store = persistence.core;
+  const ilinkStore = persistence.createIlinkStore({ clock: () => now });
   const box = new IlinkSecretBox(Buffer.alloc(32, 18).toString('base64url'));
   ilinkStore.registerAccount({
     providerAccountId: botId,

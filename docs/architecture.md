@@ -120,9 +120,12 @@ Each adapter has distinct identity keys, authorization rules, and reply windows.
 
 ### 2. Conversation scheduling and state
 
-[src/services/conversation-processor.ts](../src/services/conversation-processor.ts) manages concurrency windows, live-versus-backfill priority, and steering within a conversation. [src/state/sqlite-store.ts](../src/state/sqlite-store.ts) owns the Inbox, authorization, short-lived capabilities, thread bindings, and send records.
+[src/services/conversation-processor.ts](../src/services/conversation-processor.ts) manages concurrency windows, live-versus-backfill priority, and steering within a conversation. [src/state/persistence.ts](../src/state/persistence.ts) owns the single SQLite connection and creates the core, iLink, and enrollment state facades. [src/state/sqlite-store.ts](../src/state/sqlite-store.ts) implements the shared Inbox, authorization, short-lived capabilities, thread bindings, and send records.
 
-In-process queues only drive work forward; SQLite owns recoverable state. Database transactions are never held open during network requests.
+Runtime, messaging adapters, MCP, and Agent code receive only JS/TS state
+methods; the raw database handle stays inside the persistence implementation.
+In-process queues only drive work forward; SQLite owns recoverable state.
+Database transactions are never held open during network requests.
 
 ### 3. Agent adapter
 

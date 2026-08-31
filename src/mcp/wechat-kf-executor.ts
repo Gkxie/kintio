@@ -5,7 +5,7 @@ import {
 import {
   AgentSessionError,
   type AttemptRecord,
-  type SqliteStore,
+  type CoreState,
 } from '../state/sqlite-store.ts';
 import { WecomApiError, type WecomApiClient } from '../services/wecom-api.ts';
 import type { WecomMediaGateway } from '../services/media-gateway.ts';
@@ -35,7 +35,7 @@ export interface WechatToolReceipt {
 }
 
 type ExecutorStore = Pick<
-  SqliteStore,
+  CoreState,
   | 'getAgentSession'
   | 'reserveAgentSend'
   | 'completeSend'

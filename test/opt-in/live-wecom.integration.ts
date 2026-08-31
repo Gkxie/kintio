@@ -17,8 +17,8 @@ import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
 import { WecomApiClient } from '../../src/services/wecom-api.ts';
 import { WecomSync } from '../../src/services/wecom-sync.ts';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
-import { inspectAttempts } from '../support/sqlite-inspect.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
+import { stableMessageKey } from '../../src/state/sqlite-store.ts';
 
 const targetOpenKfId = process.env.LIVE_WECOM_OPEN_KFID || '';
 const targetUserId = process.env.LIVE_WECOM_EXTERNAL_USER_ID || '';
@@ -43,7 +43,10 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
   );
   const config = loadConfig();
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-live-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'state.sqlite'),
+  });
+  const store = persistence.core;
   const apiClient = new WecomApiClient({
     corpId: config.wecom.api.corpId,
     kfSecret: config.wecom.api.kfSecret,
@@ -126,7 +129,7 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
       await processor.close();
       await channel.close();
       await mcpHost.close();
-      store.close();
+      persistence.close();
       await fs.rm(directory, { recursive: true, force: true });
     }
     if (deletionError) throw deletionError;
@@ -139,7 +142,7 @@ test('mock upstream sends one accepted text through real Codex and real WeChat',
   await processor.waitForIdle();
   await channel.waitForIdle();
   const messageKey = stableMessageKey(targetOpenKfId, sourceMessageId);
-  const attempts = inspectAttempts(store.database, messageKey);
+  const attempts = store.listMessageAttempts(messageKey);
   assert.equal(syncCalls, 1);
   assert.equal(attempts.length, 1, 'live test refuses split or fallback sends');
   assert.equal(attempts[0]?.type, 'text');

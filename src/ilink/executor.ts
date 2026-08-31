@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 
 import type { IlinkToolExecutor, IlinkToolReceipt } from '../mcp/ilink-server.ts';
-import type { AttemptRecord, SqliteStore } from '../state/sqlite-store.ts';
+import type { AttemptRecord, CoreState } from '../state/sqlite-store.ts';
 import {
   IlinkClient,
   IlinkProtocolError,
@@ -25,7 +25,7 @@ import {
 } from './sqlite-store.ts';
 
 type CoreStore = Pick<
-  SqliteStore,
+  CoreState,
   | 'getAgentSession'
   | 'completeSend'
   | 'failSend'

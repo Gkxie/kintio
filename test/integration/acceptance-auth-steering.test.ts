@@ -15,12 +15,13 @@ import {
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import type { WecomApiClient } from '../../src/services/wecom-api.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 import {
-  SqliteStore,
   stableMessageKey,
+  type CoreState,
 } from '../../src/state/sqlite-store.ts';
 import type { ResolvedImage } from '../../src/types.ts';
-import { inspectAttempts } from '../support/sqlite-inspect.ts';
+import { withTestDatabase } from '../support/temp-sqlite.ts';
 import {
   SimulatedToolAgent,
   type SimulatedAgentCompletion,
@@ -124,7 +125,7 @@ function customerPayload(type: string, label: string): Record<string, unknown> {
 }
 
 interface HarnessOptions {
-  readonly createAgent: (store: SqliteStore) => ProcessorAgent;
+  readonly createAgent: (store: CoreState) => ProcessorAgent;
   readonly allowedUserIds?: readonly string[];
   readonly authorization?: {
     readonly trigger?: string;
@@ -137,7 +138,8 @@ interface HarnessOptions {
 
 interface Harness {
   readonly directory: string;
-  readonly store: SqliteStore;
+  readonly databaseFile: string;
+  readonly store: CoreState;
   readonly processor: ConversationProcessor;
   readonly sent: PreparedSendInput[];
   ingest(raw: Record<string, unknown>, openKfId?: string): string | undefined;
@@ -152,9 +154,9 @@ async function createHarness(
   const directory = await fs.mkdtemp(
     path.join(os.tmpdir(), 'acceptance-auth-steering-'),
   );
-  const store = new SqliteStore({
-    filePath: path.join(directory, 'wecom.sqlite'),
-  });
+  const databaseFile = path.join(directory, 'wecom.sqlite');
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  const store = persistence.core;
   const sent: PreparedSendInput[] = [];
   const apiClient = {
     async sendPreparedMessage(input: PreparedSendInput) {
@@ -237,10 +239,19 @@ async function createHarness(
   t.onTestFinished(async () => {
     await processor.close();
     await channel.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
-  return { directory, store, processor, sent, ingest, process, idle };
+  return {
+    directory,
+    databaseFile,
+    store,
+    processor,
+    sent,
+    ingest,
+    process,
+    idle,
+  };
 }
 
 function forbiddenAgent(calls: { value: number }): ProcessorAgent {
@@ -578,9 +589,11 @@ test('a new live customer preempts a different deferred conversation', async (t)
     payload: { text: { content: '遗漏问题' } },
   }));
   assert.ok(backlogKey);
-  harness.store.database.prepare(`
-    UPDATE inbound_messages SET deferred = 1 WHERE message_key = ?
-  `).run(backlogKey);
+  withTestDatabase(harness.databaseFile, (database) => {
+    database.prepare(`
+      UPDATE inbound_messages SET deferred = 1 WHERE message_key = ?
+    `).run(backlogKey);
+  });
   const backlog = harness.store.activateNextDeferredConversation();
   assert.equal(backlog.length, 1);
   const recovery = harness.processor.recover(backlog, { priority: 'low' });
@@ -771,7 +784,10 @@ describe.each([2, 3, 5, 10])('%i mixed follow-ups', (count) => {
 
 test('identical raw msgids remain isolated across MCP sessions attempts and client IDs', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'r08-isolation-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   const channel = new WechatKfToolExecutor({
     store,
     apiClient: {
@@ -789,7 +805,7 @@ test('identical raw msgids remain isolated across MCP sessions attempts and clie
   });
   t.onTestFinished(async () => {
     await channel.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
   const sameMsgid = 'same-msgid';
@@ -821,8 +837,8 @@ test('identical raw msgids remain isolated across MCP sessions attempts and clie
   assert.notEqual(keys[0], keys[1]);
   assert.equal(keys[0], stableMessageKey('wk-a', sameMsgid));
   assert.equal(keys[1], stableMessageKey('wk-b', sameMsgid));
-  const attemptsA = inspectAttempts(store.database, keys[0]!);
-  const attemptsB = inspectAttempts(store.database, keys[1]!);
+  const attemptsA = store.listMessageAttempts(keys[0]!);
+  const attemptsB = store.listMessageAttempts(keys[1]!);
   assert.equal(attemptsA.length, 1);
   assert.equal(attemptsB.length, 1);
   assert.notEqual(attemptsA[0]?.attemptId, attemptsB[0]?.attemptId);

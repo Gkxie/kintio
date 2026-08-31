@@ -1,33 +1,24 @@
 import assert from 'node:assert/strict';
-import fs from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import { test } from 'vitest';
 import type { TestContext } from 'vitest';
 
-import { IlinkLoginStore } from '../../src/ilink/login-store.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
-import { inspectAttempt } from '../support/sqlite-inspect.ts';
+import { stableMessageKey, type CoreState } from '../../src/state/sqlite-store.ts';
 import { seedPendingAttempts } from '../support/pending-attempt.ts';
+import { createTempSqlite } from '../support/temp-sqlite.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 async function createStore(t: TestContext) {
-  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'sqlite-retention-'));
+  const temporary = await createTempSqlite(t, { prefix: 'sqlite-retention-' });
   const clock = { value: 1_000 };
-  const store = new SqliteStore({
-    filePath: path.join(directory, 'wecom.sqlite'),
+  const persistence = temporary.openInjectedPersistenceForTest({
     clock: () => clock.value,
   });
-  t.onTestFinished(async () => {
-    store.close();
-    await fs.rm(directory, { recursive: true, force: true });
-  });
-  return { store, clock };
+  return { persistence, store: persistence.core, clock };
 }
 
 function ingest(
-  store: SqliteStore,
+  store: CoreState,
   openKfId: string,
   externalUserId: string,
   msgid: string,
@@ -132,15 +123,15 @@ test('cleanup retains uncertain and expires accepted/failed audits', async (t) =
     acceptedAuditMaxAgeMs: 100,
   });
   assert.equal(result.audits, 2);
-  assert.equal(inspectAttempt(store.database, uncertain[0]!.attemptId)?.status, 'uncertain');
-  assert.ok(inspectAttempt(store.database, uncertain[0]!.attemptId)?.payload);
-  assert.equal(inspectAttempt(store.database, accepted[0]!.attemptId), undefined);
-  assert.equal(inspectAttempt(store.database, failed[0]!.attemptId), undefined);
+  assert.equal(store.getAttempt(uncertain[0]!.attemptId)?.status, 'uncertain');
+  assert.ok(store.getAttempt(uncertain[0]!.attemptId)?.payload);
+  assert.equal(store.getAttempt(accepted[0]!.attemptId), undefined);
+  assert.equal(store.getAttempt(failed[0]!.attemptId), undefined);
 });
 
 test('iLink login cleanup audits an expired offer before deleting its secret', async (t) => {
-  const { store, clock } = await createStore(t);
-  store.database.prepare(`
+  const { persistence, clock } = await createStore(t);
+  persistence.database.prepare(`
     INSERT INTO ilink_login_offers (
       offer_id, source_message_key, source_open_kfid, source_external_userid,
       secret_generation, nonce, ciphertext, auth_tag, api_base_url, status,
@@ -162,17 +153,16 @@ test('iLink login cleanup audits an expired offer before deleting its secret', a
   );
   clock.value = 2_000;
 
-  const offers = new IlinkLoginStore({
-    store,
+  const offers = persistence.createIlinkLoginStore({
     secretBox: new IlinkSecretBox(Buffer.alloc(32, 7).toString('base64url')),
     clock: () => clock.value,
   });
   offers.cleanup();
 
-  assert.equal(store.database.prepare(`
+  assert.equal(persistence.database.prepare(`
     SELECT 1 FROM ilink_login_offers WHERE offer_id = 'qo_expired_cleanup'
   `).get(), undefined);
-  assert.deepEqual({ ...(store.database.prepare(`
+  assert.deepEqual({ ...(persistence.database.prepare(`
     SELECT result, account_key, offered_at, completed_at
     FROM ilink_enrollment_audit WHERE offer_id = 'qo_expired_cleanup'
   `).get() as Record<string, unknown>) }, {

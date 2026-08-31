@@ -15,7 +15,9 @@ import {
   type WechatToolReceipt,
 } from '../../src/mcp/wechat-kf-executor.ts';
 import { WecomApiError } from '../../src/services/wecom-api.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
+import type { CoreState } from '../../src/state/sqlite-store.ts';
+import { withTestDatabase } from '../support/temp-sqlite.ts';
 
 type SendInput = {
   toUser: string;
@@ -39,7 +41,9 @@ async function harness(
   } = {},
 ) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-mcp-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
+  const databaseFile = path.join(directory, 'state.sqlite');
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  const store = persistence.core;
   const normalized = normalizeWecomMessage({
     msgid: 'customer-one',
     open_kfid: 'wk-one',
@@ -101,10 +105,19 @@ async function harness(
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
   t.onTestFinished(async () => {
     await client.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
-  return { client, store, messageKey, session, sends, mediaCalls, executor };
+  return {
+    client,
+    databaseFile,
+    store,
+    messageKey,
+    session,
+    sends,
+    mediaCalls,
+    executor,
+  };
 }
 
 async function receiptHarness(
@@ -332,7 +345,7 @@ test('a standard MCP Client executes send_text and receives accepted facts', asy
 });
 
 test('fail_type=13 enters context only through the tool result as sensitive-content policy', async (t) => {
-  let store: SqliteStore | undefined;
+  let store: CoreState | undefined;
   let messageKey = '';
   const created = await harness(t, {
     observeMs: 100,
@@ -369,7 +382,7 @@ test('fail_type=13 enters context only through the tool result as sensitive-cont
 });
 
 test('a failure callback that precedes send_msg response reconciles during completeSend', async (t) => {
-  let raceStore: SqliteStore | undefined;
+  let raceStore: CoreState | undefined;
   const created = await harness(t, {
     sendPreparedMessage: async () => {
       raceStore?.markSendMsgFailed({
@@ -386,10 +399,11 @@ test('a failure callback that precedes send_msg response reconciles during compl
   });
   assert.equal(result.isError, true);
   assert.match(JSON.stringify(result.structuredContent), /sensitive_content/u);
-  const failure = created.store.database.prepare(`
-    SELECT matched_attempt_key FROM delivery_failures
-    WHERE wecom_msgid = 'wx-early-failure'
-  `).get() as { matched_attempt_key?: unknown } | undefined;
+  const failure = withTestDatabase(created.databaseFile, (database) =>
+    database.prepare(`
+      SELECT matched_attempt_key FROM delivery_failures
+      WHERE wecom_msgid = 'wx-early-failure'
+    `).get() as { matched_attempt_key?: unknown } | undefined);
   assert.equal(
     failure?.matched_attempt_key,
     created.store.listMessageAttempts(created.messageKey)[0]?.attemptId,
