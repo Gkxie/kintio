@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'vitest';
@@ -228,8 +229,53 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(release, /git merge-base --is-ancestor/u);
   assert.match(release, /Release tags must be annotated tags/u);
   assert.match(release, /contents: read[\s\S]+contents: write/u);
+  assert.match(release, /npm pack --json --ignore-scripts/u);
+  assert.match(release, /environment: npm-release/u);
+  assert.equal(release.match(/id-token: write/gu)?.length, 1);
+  assert.equal(release.match(/retention-days: 30/gu)?.length, 2);
+  assert.match(release, /createHash\('sha512'\)/u);
+  assert.match(release, /const minimum = \[11, 5, 1\]/u);
+  assert.match(release, /npm publish-time scan pending/u);
+  assert.match(release, /\['dist-tag', 'ls', metadata\.name/u);
+  assert.match(release, /attempt <= 80/u);
+  assert.match(release, /needs: \[verify, publish-npm, smoke-registry\]/u);
+  assert.match(release, /npm install --global/u);
+  assert.match(release, /npm audit signatures --prefix/u);
+  assert.match(release, /--include-attestations/u);
+  assert.match(release, /attestationBundles/u);
   assert.match(release, /gh release create/u);
-  assert.doesNotMatch(release, /pnpm audit|gh release edit/u);
+  assert.doesNotMatch(
+    release,
+    /pnpm audit|gh release edit|NPM_TOKEN|NODE_AUTH_TOKEN|secrets\./u,
+  );
+  const publishJob = /^  publish-npm:[\s\S]+?(?=^  smoke-registry:)/mu.exec(release)?.[0] || '';
+  const smokeJob = /^  smoke-registry:[\s\S]+?(?=^  release:)/mu.exec(release)?.[0] || '';
+  const verifyJob = /^  verify:[\s\S]+?(?=^  publish-npm:)/mu.exec(release)?.[0] || '';
+  assert.match(verifyJob, /tag_type=\$\(git cat-file -t/u);
+  assert.match(verifyJob, /Release tags must be annotated tags/u);
+  assert.ok(verifyJob.indexOf('tag_type=$(') < verifyJob.indexOf('npm pack'));
+  assert.match(publishJob, /id-token: write/u);
+  assert.doesNotMatch(publishJob, /actions\/checkout|pnpm install/u);
+  assert.doesNotMatch(smokeJob, /id-token: write/u);
+});
+
+test('release workflow inline modules remain syntactically executable', async () => {
+  const release = await read('.github/workflows/release.yml');
+  const modules = [...release.matchAll(
+    /node --input-type=module <<'NODE'\n([\s\S]*?)\n\s+NODE/gmu,
+  )].map((match) => (match[1] || '')
+    .split('\n')
+    .map((line) => line.replace(/^ {10}/u, ''))
+    .join('\n'));
+  assert.equal(modules.length, 4);
+  for (const [index, source] of modules.entries()) {
+    const checked = spawnSync(
+      process.execPath,
+      ['--input-type=module', '--check'],
+      { input: source, encoding: 'utf8' },
+    );
+    assert.equal(checked.status, 0, `inline module ${index + 1}: ${checked.stderr}`);
+  }
 });
 
 test('deterministic behavior specifications cannot be skipped or left todo', async () => {

@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Added approval-gated npm Trusted Publishing with an exact artifact integrity
+  boundary, publish-time scan awareness, and public Registry installation before
+  each GitHub Release
+  ([#42](https://github.com/Gkxie/kintio/issues/42)).
+
 ## 0.6.0 - 2026-08-31
 
 - Published the global `kintio` command as `@kin-tio/cli` through the public
