@@ -4,6 +4,8 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.6.1 - 2026-08-31
+
 - Added approval-gated npm Trusted Publishing with an exact artifact integrity
   boundary, publish-time scan awareness, and public Registry installation before
   each GitHub Release
