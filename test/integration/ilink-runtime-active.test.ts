@@ -11,7 +11,6 @@ import type {
 } from '../../src/agent/runtime.ts';
 import { createConfig } from '../../src/config.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
-import { IlinkSqliteStore } from '../../src/ilink/sqlite-store.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import {
   IlinkMessageItemType,
@@ -21,7 +20,6 @@ import {
 import { CodexAgent } from '../../src/services/codex-agent.ts';
 import { McpIpcHost, type LocalMcpLaunches } from '../../src/mcp/ipc-host.ts';
 import { createRuntime } from '../../src/runtime.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 interface Deferred<T> {
@@ -103,8 +101,8 @@ async function fixture(t: TestContext) {
     ILINK_MAX_ACCOUNTS: '2',
   });
   const accounts = [account('one'), account('two')];
-  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath }));
-  const ilink = new IlinkSqliteStore({ store });
+  const persistence = temp.openPersistence();
+  const ilink = persistence.createIlinkStore();
   const secrets = new IlinkSecretBox(storageKey);
   const now = Date.now() - 1_000;
   for (const value of accounts) {
@@ -128,7 +126,7 @@ async function fixture(t: TestContext) {
       now: now + 1,
     });
   }
-  store.close();
+  persistence.close();
   return { temp, config, accounts };
 }
 

@@ -11,13 +11,15 @@ import type {
 } from '../../src/agent/runtime.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
+import { stableMessageKey, type CoreState } from '../../src/state/sqlite-store.ts';
 import {
   SimulatedToolAgent,
   type SimulatedAgentCompletion,
   type SimulatedAgentRuntime,
   type SimulatedAgentSubmission,
 } from '../support/executing-agent.ts';
+import { withTestDatabase } from '../support/temp-sqlite.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 class RecoveryAgent implements SimulatedAgentRuntime {
@@ -63,7 +65,9 @@ class RecoveryAgent implements SimulatedAgentRuntime {
 
 async function harness(t: TestContext, sendMode: 'accepted' | 'uncertain' = 'accepted') {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'codex-reconcile-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
+  const databaseFile = path.join(directory, 'state.sqlite');
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  const store = persistence.core;
   const rawAgent = new RecoveryAgent();
   const sends: Record<string, unknown>[] = [];
   const errors: string[] = [];
@@ -94,14 +98,14 @@ async function harness(t: TestContext, sendMode: 'accepted' | 'uncertain' = 'acc
   t.onTestFinished(async () => {
     await processor.close();
     await channel.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
-  return { store, rawAgent, channel, processor, sends, errors };
+  return { databaseFile, store, rawAgent, channel, processor, sends, errors };
 }
 
 function seed(
-  store: SqliteStore,
+  store: CoreState,
   id: string,
   status: 'processing' | 'preparing' = 'preparing',
 ): string {
@@ -188,11 +192,13 @@ test('unlinked startup messages stay independent even across one conversation', 
 test('damaged recovery payload is quarantined without blocking later input', async (t) => {
   const active = await harness(t);
   const damaged = seed(active.store, 'damaged-primary', 'processing');
-  active.store.database.prepare(`
-    UPDATE inbound_messages
-    SET payload_json = json_set(payload_json, '$.conversation.channel', 'weixin_ilink')
-    WHERE message_key = ?
-  `).run(damaged);
+  withTestDatabase(active.databaseFile, (database) => {
+    database.prepare(`
+      UPDATE inbound_messages
+      SET payload_json = json_set(payload_json, '$.conversation.channel', 'weixin_ilink')
+      WHERE message_key = ?
+    `).run(damaged);
+  });
   const later = active.store.ingestSyncPage({
     openKfId: 'wk-recovery',
     expectedCursor: active.store.getCursor('wk-recovery'),

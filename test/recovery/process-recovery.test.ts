@@ -6,14 +6,13 @@ import { test } from 'vitest';
 import { fileURLToPath } from 'node:url';
 
 import { acquireSingleInstanceLock } from '../../src/runtime/single-instance-lock.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 import {
-  SqliteStore,
   stableMessageKey,
 } from '../../src/state/sqlite-store.ts';
 import { isForcedExit, startTestChild } from '../support/child-process.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 import { seedPendingAttempts } from '../support/pending-attempt.ts';
-import { inspectAttempt } from '../support/sqlite-inspect.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -67,10 +66,11 @@ async function runLockWorker(lockFile: string): Promise<void> {
 }
 
 async function runSendingWorker(databaseFile: string): Promise<void> {
-  const store = new SqliteStore({ filePath: databaseFile });
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  const store = persistence.core;
   const attempt = store.beginNextSend();
   if (!attempt) {
-    store.close();
+    persistence.close();
     sendToParent({ type: 'send-claim-failed' }, () => process.exit(1));
     return;
   }
@@ -82,7 +82,7 @@ async function runSendingWorker(databaseFile: string): Promise<void> {
   process.on('message', (message: unknown) => {
     if (!message || typeof message !== 'object' ||
         !('type' in message) || message.type !== 'close') return;
-    store.close();
+    persistence.close();
     sendToParent({ type: 'store-closed' }, () => process.exit(0));
   });
 }
@@ -98,13 +98,14 @@ test('two real processes reject a live owner and recover its stale lock after SI
       filename: 'wecom.sqlite',
     });
     const lockFile = path.join(temporary.directory, 'wecom.lock');
-    const seed = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
+    const seedPersistence = temporary.openPersistence();
+    const seed = seedPersistence.core;
     seed.ingestSyncPage({
       openKfId: 'wk-lock-sentinel',
       nextCursor: 'intact',
       messages: [],
     });
-    seed.close();
+    seedPersistence.close();
 
     const first = startTestChild(t, currentFile, {
       args: ['--lock-worker', lockFile],
@@ -146,8 +147,7 @@ test('two real processes reject a live owner and recover its stale lock after SI
     assert.deepEqual(await recovered.waitForExit(), { code: 0, signal: null });
     await assert.rejects(() => fs.access(lockFile), { code: 'ENOENT' });
 
-    const verified = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
-    t.onTestFinished(() => verified.close());
+    const verified = temporary.openPersistence().core;
     assert.equal(verified.getCursor('wk-lock-sentinel'), 'intact');
     assert.deepEqual(verified.integrityCheck().map(Object.values), [['ok']]);
     assert.deepEqual(verified.foreignKeyCheck(), []);
@@ -158,7 +158,8 @@ test('SIGKILL after claiming a send changes sending to uncertain on startup with
       prefix: 'wechat-process-send-',
       filename: 'wecom.sqlite',
     });
-    const first = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
+    const firstPersistence = temporary.openPersistence();
+    const first = firstPersistence.core;
     first.ingestSyncPage({
       openKfId: 'wk-recovery',
       nextCursor: 'cursor-one',
@@ -181,7 +182,7 @@ test('SIGKILL after claiming a send changes sending to uncertain on startup with
       ]);
     const attemptId = finalized[0]?.attemptId;
     assert.ok(attemptId);
-    first.close();
+    firstPersistence.close();
 
     const sender = startTestChild(t, currentFile, {
       args: ['--sending-worker', temporary.filePath],
@@ -193,12 +194,11 @@ test('SIGKILL after claiming a send changes sending to uncertain on startup with
     });
     assert.equal(isForcedExit(await sender.stop('SIGKILL'), 'SIGKILL'), true);
 
-    const recovered = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
-    t.onTestFinished(() => recovered.close());
-    assert.equal(inspectAttempt(recovered.database, attemptId)?.status, 'sending');
+    const recovered = temporary.openPersistence().core;
+    assert.equal(recovered.getAttempt(attemptId)?.status, 'sending');
     const summary = recovered.recoverStartup();
     assert.equal(summary.uncertainSends, 1);
-    assert.equal(inspectAttempt(recovered.database, attemptId)?.status, 'uncertain');
+    assert.equal(recovered.getAttempt(attemptId)?.status, 'uncertain');
     assert.equal(recovered.beginNextSend(), undefined);
     assert.equal(recovered.getInbound(messageKey)?.status, 'completed');
     assert.deepEqual(recovered.integrityCheck().map(Object.values), [['ok']]);

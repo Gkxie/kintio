@@ -2,13 +2,10 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 
 import { IlinkLoginManager } from '../../src/ilink/login-manager.ts';
-import { IlinkLoginStore } from '../../src/ilink/login-store.ts';
 import type { IlinkQrStatusResponse } from '../../src/ilink/protocol/types.ts';
 import { IlinkProtocolError } from '../../src/ilink/protocol/client.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
-import { IlinkSqliteStore } from '../../src/ilink/sqlite-store.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
@@ -17,10 +14,14 @@ const key = Buffer.alloc(32, 23).toString('base64url');
 async function fixture(t: Parameters<typeof createTempSqlite>[0]) {
   const temp = await createTempSqlite(t, { prefix: 'ilink-login-' });
   let now = 1_800_000_000_000;
-  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock: () => now }));
-  const accounts = new IlinkSqliteStore({ store, clock: () => now });
   const secretBox = new IlinkSecretBox(key);
-  const offers = new IlinkLoginStore({ store, secretBox, clock: () => now });
+  const persistence = temp.openInjectedPersistenceForTest({ clock: () => now });
+  const store = persistence.core;
+  const accounts = persistence.createIlinkStore({ clock: () => now });
+  const offers = persistence.createIlinkLoginStore({
+    secretBox,
+    clock: () => now,
+  });
   const page = store.ingestSyncPage({
     openKfId: 'wk-source',
     nextCursor: 'cursor-source',
@@ -36,6 +37,7 @@ async function fixture(t: Parameters<typeof createTempSqlite>[0]) {
   const session = store.createAgentSession({ messageKey });
   return {
     store, accounts, secretBox, offers, session,
+    database: persistence.database,
     clock: () => now,
     advance(milliseconds: number) { now += milliseconds; },
   };
@@ -114,7 +116,7 @@ test('confirmed QR creates a separate encrypted iLink identity and refreshes lis
     'new-bot-secret',
   );
   assert.equal(refreshed, 2);
-  const audits = created.store.database.prepare(`
+  const audits = created.database.prepare(`
     SELECT result, account_key FROM ilink_enrollment_audit ORDER BY completed_at
   `).all() as Array<{ result: string; account_key: string }>;
   assert.equal(audits.length, 2);
@@ -139,7 +141,7 @@ test('confirmed account and enrollment audit commit in one transaction', async (
     peerId: ownerPeerId,
     generation: 1,
   });
-  created.store.database.exec(`
+  created.database.exec(`
     CREATE TRIGGER reject_confirm_audit
     BEFORE INSERT ON ilink_enrollment_audit
     WHEN NEW.result = 'confirmed'
@@ -158,11 +160,11 @@ test('confirmed account and enrollment audit commit in one transaction', async (
   }), /forced confirm audit failure/u);
   assert.equal(created.accounts.getAccount(accountKey), undefined);
   assert.equal(created.offers.listActive().length, 1);
-  assert.equal(created.store.database.prepare(`
+  assert.equal(created.database.prepare(`
     SELECT 1 FROM ilink_enrollment_audit WHERE offer_id = ?
   `).get(offer.offerId), undefined);
 
-  created.store.database.exec('DROP TRIGGER reject_confirm_audit');
+  created.database.exec('DROP TRIGGER reject_confirm_audit');
   const account = created.accounts.confirmEnrollment({
     offerId: offer.offerId,
     accountGeneration: 1,
@@ -176,7 +178,7 @@ test('confirmed account and enrollment audit commit in one transaction', async (
   assert.equal(account.accountKey, accountKey);
   assert.equal(account.generation, 1);
   assert.equal(created.offers.listActive().length, 0);
-  assert.deepEqual({ ...(created.store.database.prepare(`
+  assert.deepEqual({ ...(created.database.prepare(`
     SELECT result, account_key FROM ilink_enrollment_audit WHERE offer_id = ?
   `).get(offer.offerId) as Record<string, unknown>) }, {
     result: 'confirmed', account_key: accountKey,
@@ -193,7 +195,7 @@ test('confirmed account and enrollment audit commit in one transaction', async (
     peerId: ownerPeerId,
     generation: 2,
   });
-  created.store.database.exec(`
+  created.database.exec(`
     CREATE TRIGGER reject_rotation_audit
     BEFORE INSERT ON ilink_enrollment_audit
     WHEN NEW.offer_id = '${rotationOffer.offerId}'
@@ -279,7 +281,7 @@ test('already-connected QR status retires the offer without rotating credentials
   assert.deepEqual(info, ['[ilink-login] account is already connected']);
   assert.equal(created.accounts.listActiveAccounts().length, 0);
   assert.equal(
-    (created.store.database.prepare(`
+    (created.database.prepare(`
       SELECT result FROM ilink_enrollment_audit WHERE offer_id = ?
     `).get(offered.offerId) as { result: string }).result,
     'cancelled',
@@ -340,7 +342,7 @@ test('pending QR offer resumes after manager restart and confirms once', async (
   assert.equal(created.accounts.listActiveAccounts().length, 1);
   assert.equal(refreshed, 1);
   assert.equal(
-    (created.store.database.prepare(`
+    (created.database.prepare(`
       SELECT result FROM ilink_enrollment_audit WHERE offer_id = ?
     `).get(offered.offerId) as { result: string }).result,
     'confirmed',
@@ -396,7 +398,7 @@ test('only one pending QR offer is allowed for a bound WeChat conversation', asy
   assert.equal(created.offers.listActive().length, 0);
   assert.equal(created.offers.finish('missing-offer'), false);
   assert.equal(
-    (created.store.database.prepare(`
+    (created.database.prepare(`
       SELECT result FROM ilink_enrollment_audit WHERE offer_id = ?
     `).get(first.offerId) as { result: string }).result,
     'cancelled',

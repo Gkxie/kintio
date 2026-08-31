@@ -7,7 +7,8 @@ import { test } from 'vitest';
 import type { WecomApiClient } from '../../src/services/wecom-api.ts';
 import { WecomApiError } from '../../src/services/wecom-api.ts';
 import { WecomSync } from '../../src/services/wecom-sync.ts';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 
 type SyncInput = Parameters<WecomApiClient['syncMessages']>[0];
 type SyncResult = Awaited<ReturnType<WecomApiClient['syncMessages']>>;
@@ -31,9 +32,12 @@ async function waitFor(
 
 test('sync persists known and unknown messages with the page cursor before enqueueing', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   t.onTestFinished(async () => {
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
   const pages: SyncResult[] = [
@@ -139,7 +143,10 @@ test('sync persists known and unknown messages with the page cursor before enque
 
 test('a live callback during startup catch-up joins the recovery snapshot', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-startup-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   store.ingestSyncPage({
     openKfId: 'wk-one',
     nextCursor: 'cursor-one',
@@ -183,7 +190,7 @@ test('a live callback during startup catch-up joins the recovery snapshot', asyn
   });
   t.onTestFinished(async () => {
     await sync.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -210,7 +217,10 @@ test('a live callback during startup catch-up joins the recovery snapshot', asyn
 
 test('a live callback preempts startup catch-up after the current cursor page', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-preempt-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   store.ingestSyncPage({
     openKfId: 'wk-one',
     nextCursor: 'cursor-one',
@@ -263,7 +273,7 @@ test('a live callback preempts startup catch-up after the current cursor page', 
     releaseFirst();
     releaseProcessing();
     await sync.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -305,7 +315,10 @@ test('a live callback preempts startup catch-up after the current cursor page', 
 
 test('live-page conversations enqueue before unrelated preempted backlog', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-live-first-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   store.ingestSyncPage({
     openKfId: 'wk-one',
     nextCursor: 'cursor-one',
@@ -372,7 +385,7 @@ test('live-page conversations enqueue before unrelated preempted backlog', async
   t.onTestFinished(async () => {
     releaseFirst();
     await sync.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -395,9 +408,12 @@ test('live-page conversations enqueue before unrelated preempted backlog', async
 
 test('has_more without a new cursor is rejected without advancing state', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-stall-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   t.onTestFinished(async () => {
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
   const errors: string[] = [];
@@ -434,7 +450,10 @@ test('has_more without a new cursor is rejected without advancing state', async 
 
 test('live pages committed before a later sync failure are still enqueued', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-partial-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   const errors: string[] = [];
   const enqueued: string[] = [];
   let call = 0;
@@ -475,7 +494,7 @@ test('live pages committed before a later sync failure are still enqueued', asyn
   });
   t.onTestFinished(async () => {
     await sync.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -493,7 +512,10 @@ test('live pages committed before a later sync failure are still enqueued', asyn
 
 test('a lone callback retries its first failed sync without another callback', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-retry-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   const errors: string[] = [];
   const enqueued: string[] = [];
   let call = 0;
@@ -532,7 +554,7 @@ test('a lone callback retries its first failed sync without another callback', a
   });
   t.onTestFinished(async () => {
     await sync.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -554,7 +576,10 @@ test('a lone callback retries its first failed sync without another callback', a
 
 test('callbacks for one account coalesce into one in-flight run and one rerun', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-coalesce-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   let releaseFirst!: () => void;
   const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
   let markFirstStarted!: () => void;
@@ -579,7 +604,7 @@ test('callbacks for one account coalesce into one in-flight run and one rerun', 
   t.onTestFinished(async () => {
     releaseFirst();
     await sync.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -602,7 +627,10 @@ test('callbacks for one account coalesce into one in-flight run and one rerun', 
 
 test('shutdown cancels a scheduled sync retry', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-stop-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   let calls = 0;
   const errors: string[] = [];
   const sync = new WecomSync({
@@ -622,7 +650,7 @@ test('shutdown cancels a scheduled sync retry', async (t) => {
   });
   t.onTestFinished(async () => {
     await sync.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -637,7 +665,10 @@ test('shutdown cancels a scheduled sync retry', async (t) => {
 
 test('provider business errors use a slow jittered retry instead of a hot loop', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-provider-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   const errors: string[] = [];
   const sync = new WecomSync({
     store,
@@ -655,7 +686,7 @@ test('provider business errors use a slow jittered retry instead of a hot loop',
   });
   t.onTestFinished(async () => {
     await sync.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 
@@ -667,7 +698,10 @@ test('provider business errors use a slow jittered retry instead of a hot loop',
 
 test('message synchronization caps provider request concurrency across accounts', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wecom-sync-limit-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   let release!: () => void;
   const blocked = new Promise<void>((resolve) => { release = resolve; });
   let active = 0;
@@ -691,7 +725,7 @@ test('message synchronization caps provider request concurrency across accounts'
   t.onTestFinished(async () => {
     release();
     await sync.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 

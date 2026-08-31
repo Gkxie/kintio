@@ -9,13 +9,13 @@ import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
 import type { AgentInput } from '../../src/agent/runtime.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
+import type { CoreState } from '../../src/state/sqlite-store.ts';
 import {
   SimulatedToolAgent,
   type SimulatedAgentCompletion,
   type SimulatedAgentSubmission,
 } from '../support/executing-agent.ts';
-import { inspectAttempts } from '../support/sqlite-inspect.ts';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -26,7 +26,7 @@ function deferred<T>() {
 }
 
 interface Harness {
-  readonly store: SqliteStore;
+  readonly store: CoreState;
   readonly processor: ConversationProcessor;
   readonly inputs: AgentInput[];
   readonly downloads: string[];
@@ -36,12 +36,15 @@ interface Harness {
 
 async function createHarness(
   t: TestContext,
-  handler: (input: AgentInput, store: SqliteStore) => Promise<SimulatedAgentSubmission>,
+  handler: (input: AgentInput, store: CoreState) => Promise<SimulatedAgentSubmission>,
   resolveMedia: (input: AgentInput['message']) => Promise<readonly []> = async () => [],
   allowedUserIds: readonly string[] = ['wm-one'],
 ): Promise<Harness> {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'conversation-gates-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'wecom.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'wecom.sqlite'),
+  });
+  const store = persistence.core;
   const inputs: AgentInput[] = [];
   const downloads: string[] = [];
   const errors: string[] = [];
@@ -106,7 +109,7 @@ async function createHarness(
   t.onTestFinished(async () => {
     await processor.abort();
     await channel.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
   return { store, processor, inputs, downloads, errors, ingest };
@@ -256,7 +259,7 @@ test('transient media failure retries online and completes without a duplicate s
   assert.equal(calls, 3);
   assert.equal(harness.inputs.length, 1);
   assert.equal(harness.store.getInbound(key)?.status, 'completed');
-  assert.equal(inspectAttempts(harness.store.database, key).length, 1);
+  assert.equal(harness.store.listMessageAttempts(key).length, 1);
 });
 
 test('synchronous Codex start failure preserves claimed input for recovery', async (t) => {
@@ -281,7 +284,7 @@ test('transient Agent start failure inspects recovery state and succeeds online'
   await harness.processor.waitForIdle();
   assert.equal(calls, 2);
   assert.equal(harness.store.getInbound(key)?.status, 'completed');
-  assert.equal(inspectAttempts(harness.store.database, key).length, 1);
+  assert.equal(harness.store.listMessageAttempts(key).length, 1);
 });
 
 test('synchronous steer failure requeues follow-up while primary remains active', async (t) => {
@@ -326,7 +329,7 @@ test('transient asynchronous completion failure is re-enqueued with a bounded re
   await harness.processor.waitForIdle();
   assert.equal(calls, 2);
   assert.equal(harness.store.getInbound(key)?.status, 'completed');
-  assert.equal(inspectAttempts(harness.store.database, key).length, 1);
+  assert.equal(harness.store.listMessageAttempts(key).length, 1);
 });
 
 test('repeated completion validation failure stops after two online recoveries', async (t) => {
@@ -340,7 +343,7 @@ test('repeated completion validation failure stops after two online recoveries',
   await harness.processor.waitForIdle();
   assert.equal(calls, 3);
   assert.equal(harness.store.getInbound(key)?.status, 'failed');
-  assert.equal(inspectAttempts(harness.store.database, key).length, 0);
+  assert.equal(harness.store.listMessageAttempts(key).length, 0);
 });
 
 test('no-action decision is rejected outside recovery with a terminal attempt', async (t) => {
@@ -354,7 +357,7 @@ test('no-action decision is rejected outside recovery with a terminal attempt', 
   await harness.processor.waitForIdle();
   assert.equal(calls, 3);
   assert.equal(harness.store.getInbound(key)?.status, 'failed');
-  assert.equal(inspectAttempts(harness.store.database, key).length, 0);
+  assert.equal(harness.store.listMessageAttempts(key).length, 0);
 });
 
 test('failed primary with two steers recovers the latest direction once', async (t) => {
@@ -389,7 +392,7 @@ test('failed primary with two steers recovers the latest direction once', async 
   assert.equal(harness.store.getInbound(primary)?.status, 'completed');
   assert.equal(harness.store.getInbound(firstSteer)?.status, 'absorbed');
   assert.equal(harness.store.getInbound(secondSteer)?.status, 'absorbed');
-  const attempts = inspectAttempts(harness.store.database, primary);
+  const attempts = harness.store.listMessageAttempts(primary);
   assert.equal(attempts.length, 1);
   assert.equal(
     attempts[0]?.metadata?.direction,
@@ -436,6 +439,6 @@ test('follow-ups that arrived before completion supersede the old result even wh
   await harness.processor.waitForIdle();
   assert.equal(harness.store.getInbound(followOne)?.status, 'completed');
   assert.equal(harness.store.getInbound(followTwo)?.status, 'absorbed');
-  assert.deepEqual(inspectAttempts(harness.store.database, primary), []);
-  assert.equal(inspectAttempts(harness.store.database, followOne)[0]?.status, 'accepted');
+  assert.deepEqual(harness.store.listMessageAttempts(primary), []);
+  assert.equal(harness.store.listMessageAttempts(followOne)[0]?.status, 'accepted');
 });

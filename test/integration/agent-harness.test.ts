@@ -10,11 +10,14 @@ import type {
   AgentSubmission,
 } from '../../src/agent/runtime.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 
 test('the harness accepts delivery attempts from any Agent through the channel MCP', async (t) => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'agent-harness-'));
-  const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'state.sqlite'),
+  });
+  const store = persistence.core;
   const processor = new ConversationProcessor({
     store,
     agent: {
@@ -53,7 +56,7 @@ test('the harness accepts delivery attempts from any Agent through the channel M
   });
   t.onTestFinished(async () => {
     await processor.close();
-    store.close();
+    persistence.close();
     await fs.rm(directory, { recursive: true, force: true });
   });
 

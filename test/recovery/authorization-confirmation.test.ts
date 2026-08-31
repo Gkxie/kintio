@@ -8,12 +8,15 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 
 import {
-  SqliteStore,
   stableMessageKey,
+  type CoreState,
 } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 import { isForcedExit, startTestChild } from '../support/child-process.ts';
-import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.ts';
-import { createTempSqlite } from '../support/temp-sqlite.ts';
+import {
+  createTempSqlite,
+  openInjectedTestPersistence,
+} from '../support/temp-sqlite.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 const currentFile = fileURLToPath(import.meta.url);
@@ -37,12 +40,12 @@ function sendToParent(
   else process.send(message);
 }
 
-function finishWorker(store: SqliteStore, message: Serializable): void {
-  store.close();
+function finishWorker(persistence: StatePersistence, message: Serializable): void {
+  persistence.close();
   sendToParent(message, () => process.exit(0));
 }
 
-function evaluateThird(store: SqliteStore, messageKey: string): void {
+function evaluateThird(store: CoreState, messageKey: string): void {
   store.evaluateAuthorization({
     messageKey,
     openKfId,
@@ -62,13 +65,14 @@ function runAtomicWorker(
   messageKey: string,
   barrierFile: string,
 ): void {
-  const store = new SqliteStore({ filePath: databaseFile });
-  store.database.function('authorization_crash_barrier', () => {
+  const persistence = openInjectedTestPersistence(databaseFile);
+  persistence.database.function('authorization_crash_barrier', () => {
     fs.writeFileSync(barrierFile, 'inside-transaction', { mode: 0o600 });
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0);
     return 0;
   });
-  store.database.exec(`
+  const store = persistence.core;
+  persistence.database.exec(`
     CREATE TEMP TRIGGER crash_before_authorization_attempt
     BEFORE INSERT ON send_attempts
     WHEN NEW.source = 'authorization'
@@ -81,11 +85,12 @@ function runAtomicWorker(
 }
 
 function runAuthorizationWorker(databaseFile: string, messageKey: string): void {
-  const store = new SqliteStore({ filePath: databaseFile });
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  const store = persistence.core;
   evaluateThird(store, messageKey);
-  const attempt = inspectAttempts(store.database, messageKey)[0];
+  const attempt = store.listMessageAttempts(messageKey)[0];
   if (!attempt) {
-    finishWorker(store, { type: 'authorization-failed' });
+    finishWorker(persistence, { type: 'authorization-failed' });
     return;
   }
   holdWorker();
@@ -97,10 +102,11 @@ function runAuthorizationWorker(databaseFile: string, messageKey: string): void 
 }
 
 function runSendWorker(databaseFile: string, behavior: string): void {
-  const store = new SqliteStore({ filePath: databaseFile });
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  const store = persistence.core;
   const attempt = store.beginNextSend();
   if (!attempt) {
-    finishWorker(store, { type: 'no-send' });
+    finishWorker(persistence, { type: 'no-send' });
     return;
   }
   if (behavior === 'hold') {
@@ -125,7 +131,7 @@ function runSendWorker(databaseFile: string, behavior: string): void {
     sendToParent(message);
     return;
   }
-  finishWorker(store, message);
+  finishWorker(persistence, message);
 }
 
 async function waitForFile(filePath: string, timeoutMs = 5_000): Promise<void> {
@@ -148,7 +154,7 @@ async function waitForFile(filePath: string, timeoutMs = 5_000): Promise<void> {
   throw new Error(`Timed out waiting for crash barrier ${filePath}`);
 }
 
-function seedAuthorizationPrelude(store: SqliteStore, suffix: string): string {
+function seedAuthorizationPrelude(store: CoreState, suffix: string): string {
   let cursor = '';
   for (let index = 1; index <= 3; index += 1) {
     const msgid = `${suffix}-${index}`;
@@ -191,9 +197,10 @@ async function seedDatabase(
     prefix: `wechat-auth-${suffix}-`,
     filename: 'wecom.sqlite',
   });
-  const store = temporary.trackSqlite(new SqliteStore({ filePath: temporary.filePath }));
+  const persistence = temporary.openPersistence();
+  const store = persistence.core;
   const messageKey = seedAuthorizationPrelude(store, suffix);
-  store.close();
+  persistence.close();
   return { filePath: temporary.filePath, messageKey };
 }
 
@@ -234,8 +241,9 @@ if (workerMode === '--atomic-worker') {
       await waitForFile(barrierFile);
       assert.equal(isForcedExit(await child.stop('SIGKILL'), 'SIGKILL'), true);
 
-      const recovered = new SqliteStore({ filePath: seeded.filePath });
-      subtest.onTestFinished(() => recovered.close());
+      const recoveredPersistence = new StatePersistence({ filePath: seeded.filePath });
+      const recovered = recoveredPersistence.core;
+      subtest.onTestFinished(() => recoveredPersistence.close());
       assert.deepEqual(recovered.getAuthorization(externalUserId), {
         externalUserId,
         authorized: false,
@@ -246,13 +254,13 @@ if (workerMode === '--atomic-worker') {
         updatedAt: recovered.getAuthorization(externalUserId)?.updatedAt,
       });
       assert.equal(recovered.getInbound(seeded.messageKey)?.status, 'received');
-      assert.equal(inspectAttempts(recovered.database, seeded.messageKey).length, 0);
+      assert.equal(recovered.listMessageAttempts(seeded.messageKey).length, 0);
 
       evaluateThird(recovered, seeded.messageKey);
       assert.equal(recovered.getAuthorization(externalUserId)?.authorized, true);
-      assert.equal(inspectAttempts(recovered.database, seeded.messageKey).length, 1);
+      assert.equal(recovered.listMessageAttempts(seeded.messageKey).length, 1);
       evaluateThird(recovered, seeded.messageKey);
-      assert.equal(inspectAttempts(recovered.database, seeded.messageKey).length, 1);
+      assert.equal(recovered.listMessageAttempts(seeded.messageKey).length, 1);
     });
 
     test('committed confirmation survives a crash and sends once', async (subtest) => {
@@ -268,13 +276,14 @@ if (workerMode === '--atomic-worker') {
       assert.equal(committed.status, 'pending');
       assert.equal(isForcedExit(await authorizer.stop('SIGKILL'), 'SIGKILL'), true);
 
-      const audit = new SqliteStore({ filePath: seeded.filePath });
-      const attempt = inspectAttempts(audit.database, seeded.messageKey)[0];
+      const auditPersistence = new StatePersistence({ filePath: seeded.filePath });
+      const audit = auditPersistence.core;
+      const attempt = audit.listMessageAttempts(seeded.messageKey)[0];
       assert.ok(attempt);
       assert.equal(attempt.attemptId, committed.attemptId);
       assert.equal(attempt.status, 'pending');
       assert.equal(audit.getAuthorization(externalUserId)?.authorized, true);
-      audit.close();
+      auditPersistence.close();
 
       const sender = startTestChild(subtest, currentFile, {
         args: ['--send-worker', seeded.filePath, 'accept-exit'],
@@ -291,11 +300,12 @@ if (workerMode === '--atomic-worker') {
 
     test('claimed confirmation becomes uncertain and is never retried', async (subtest) => {
       const seeded = await seedDatabase(subtest, 'sending');
-      const prepared = new SqliteStore({ filePath: seeded.filePath });
+      const preparedPersistence = new StatePersistence({ filePath: seeded.filePath });
+      const prepared = preparedPersistence.core;
       evaluateThird(prepared, seeded.messageKey);
-      const attempt = inspectAttempts(prepared.database, seeded.messageKey)[0];
+      const attempt = prepared.listMessageAttempts(seeded.messageKey)[0];
       assert.ok(attempt);
-      prepared.close();
+      preparedPersistence.close();
 
       const sender = startTestChild(subtest, currentFile, {
         args: ['--send-worker', seeded.filePath, 'hold'],
@@ -308,22 +318,24 @@ if (workerMode === '--atomic-worker') {
       );
       assert.equal(isForcedExit(await sender.stop('SIGKILL'), 'SIGKILL'), true);
 
-      const recovered = new SqliteStore({ filePath: seeded.filePath });
-      assert.equal(inspectAttempt(recovered.database, attempt.attemptId)?.status, 'sending');
+      const recoveredPersistence = new StatePersistence({ filePath: seeded.filePath });
+      const recovered = recoveredPersistence.core;
+      assert.equal(recovered.getAttempt(attempt.attemptId)?.status, 'sending');
       assert.equal(recovered.recoverStartup().uncertainSends, 1);
-      assert.equal(inspectAttempt(recovered.database, attempt.attemptId)?.status, 'uncertain');
+      assert.equal(recovered.getAttempt(attempt.attemptId)?.status, 'uncertain');
       assert.equal(recovered.beginNextSend(), undefined);
-      recovered.close();
+      recoveredPersistence.close();
       await assertNoChildSend(subtest, seeded.filePath);
     });
 
     test('accepted confirmation is never resent after a crash', async (subtest) => {
       const seeded = await seedDatabase(subtest, 'accepted');
-      const prepared = new SqliteStore({ filePath: seeded.filePath });
+      const preparedPersistence = new StatePersistence({ filePath: seeded.filePath });
+      const prepared = preparedPersistence.core;
       evaluateThird(prepared, seeded.messageKey);
-      const attempt = inspectAttempts(prepared.database, seeded.messageKey)[0];
+      const attempt = prepared.listMessageAttempts(seeded.messageKey)[0];
       assert.ok(attempt);
-      prepared.close();
+      preparedPersistence.close();
 
       const sender = startTestChild(subtest, currentFile, {
         args: ['--send-worker', seeded.filePath, 'accept-hold'],
@@ -336,11 +348,12 @@ if (workerMode === '--atomic-worker') {
       );
       assert.equal(isForcedExit(await sender.stop('SIGKILL'), 'SIGKILL'), true);
 
-      const recovered = new SqliteStore({ filePath: seeded.filePath });
+      const recoveredPersistence = new StatePersistence({ filePath: seeded.filePath });
+      const recovered = recoveredPersistence.core;
       assert.equal(recovered.recoverStartup().uncertainSends, 0);
-      assert.equal(inspectAttempt(recovered.database, attempt.attemptId)?.status, 'accepted');
+      assert.equal(recovered.getAttempt(attempt.attemptId)?.status, 'accepted');
       assert.equal(recovered.beginNextSend(), undefined);
-      recovered.close();
+      recoveredPersistence.close();
       await assertNoChildSend(subtest, seeded.filePath);
     });
   });

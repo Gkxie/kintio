@@ -12,7 +12,8 @@ import type {
 } from '../../src/agent/runtime.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
+import type { CoreState } from '../../src/state/sqlite-store.ts';
 import type { NormalizedMessage } from '../../src/types.ts';
 import {
   isForcedExit,
@@ -25,7 +26,6 @@ import {
   type SimulatedAgentRuntime,
   type SimulatedAgentSubmission,
 } from '../support/executing-agent.ts';
-import { inspectAttempt, inspectAttempts } from '../support/sqlite-inspect.ts';
 import { seedPendingAttempts } from '../support/pending-attempt.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
@@ -52,7 +52,7 @@ function normalized(
 }
 
 function ingest(
-  store: SqliteStore,
+  store: CoreState,
   message: NormalizedMessage,
 ): string {
   const openKfId = message.conversation.accountKey;
@@ -67,7 +67,7 @@ function ingest(
 }
 
 function reserve(
-  store: SqliteStore,
+  store: CoreState,
   key: string,
   contents: readonly string[],
 ): string[] {
@@ -85,7 +85,8 @@ function sendParent(message: SeedMessage): void {
 }
 
 async function seedWorker(databaseFile: string, scenario: string): Promise<void> {
-  const store = new SqliteStore({ filePath: databaseFile });
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  const store = persistence.core;
   const keys: string[] = [];
   const attempts: string[] = [];
   if (scenario === 'codex') {
@@ -119,7 +120,7 @@ async function seedWorker(databaseFile: string, scenario: string): Promise<void>
     }
   }
   sendParent({ type: 'seeded', scenario, keys, attempts });
-  process.on('message', () => store.close());
+  process.on('message', () => persistence.close());
 }
 
 if (mode === '--seed') {
@@ -178,7 +179,7 @@ if (mode === '--seed') {
   }
 
   function channel(
-    store: SqliteStore,
+    store: CoreState,
     sendPreparedMessage: (input: Parameters<
       import('../../src/services/wecom-api.ts').WecomApiClient['sendPreparedMessage']
     >[0]) => Promise<Record<string, unknown>>,
@@ -200,7 +201,8 @@ if (mode === '--seed') {
     const root = await workspace(t);
     const database = path.join(root, 'state.sqlite');
     const seeded = await crashSeed(t, database, 'codex');
-    const store = new SqliteStore({ filePath: database });
+    const persistence = new StatePersistence({ filePath: database });
+    const store = persistence.core;
     const agent = new RecoveryAgent();
     const activeChannel = channel(store, async () => ({ msgid: 'wx-recovered' }));
     const processor = new ConversationProcessor({
@@ -215,14 +217,14 @@ if (mode === '--seed') {
     await processor.waitForIdle();
     assert.equal(agent.submissions, 2);
     for (const key of seeded.keys) {
-      assert.equal(inspectAttempts(store.database, key).length, 1);
+      assert.equal(store.listMessageAttempts(key).length, 1);
     }
     await processor.recover(store.recoverStartup().inbound);
     await processor.waitForIdle();
     assert.equal(agent.submissions, 2, 'terminal attempts must not start Codex again');
     await processor.close();
     await activeChannel.close();
-    store.close();
+    persistence.close();
   });
 
   describe.each(['pending', 'sending', 'accepted', 'partial'] as const)(
@@ -232,7 +234,8 @@ if (mode === '--seed') {
         const root = await workspace(t);
         const database = path.join(root, 'state.sqlite');
         const seeded = await crashSeed(t, database, scenario);
-        const store = new SqliteStore({ filePath: database });
+        const persistence = new StatePersistence({ filePath: database });
+        const store = persistence.core;
         const recovery = store.recoverStartup();
         const calls: Array<{ content: string; messageId: string }> = [];
         const delivery = channel(store,
@@ -250,7 +253,7 @@ if (mode === '--seed') {
           assert.equal(recovery.uncertainSends, 1);
           assert.equal(calls.length, 0);
           assert.equal(
-            inspectAttempt(store.database, seeded.attempts[0]!)?.status,
+            store.getAttempt(seeded.attempts[0]!)?.status,
             'uncertain',
           );
         }
@@ -258,12 +261,12 @@ if (mode === '--seed') {
         if (scenario === 'partial') {
           assert.deepEqual(calls.map((call) => call.content), ['second']);
           assert.equal(
-            inspectAttempt(store.database, seeded.attempts[0]!)?.status,
+            store.getAttempt(seeded.attempts[0]!)?.status,
             'accepted',
           );
         }
         await delivery.close();
-        store.close();
+        persistence.close();
       });
     },
   );
@@ -273,7 +276,8 @@ if (mode === '--seed') {
     const database = path.join(root, 'state.sqlite');
     const seeded = await crashSeed(t, database, 'isolation');
     assert.notEqual(seeded.keys[0], seeded.keys[1]);
-    const store = new SqliteStore({ filePath: database });
+    const persistence = new StatePersistence({ filePath: database });
+    const store = persistence.core;
     store.recoverStartup();
     const calls: Array<{ openKfId: string; messageId: string }> = [];
     const delivery = channel(store,
@@ -288,6 +292,6 @@ if (mode === '--seed') {
     assert.deepEqual(calls.map((call) => call.openKfId).sort(), ['wk-a', 'wk-b']);
     assert.equal(new Set(calls.map((call) => call.messageId)).size, 2);
     await delivery.close();
-    store.close();
+    persistence.close();
   });
 }

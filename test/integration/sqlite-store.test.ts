@@ -6,32 +6,41 @@ import assert from 'node:assert/strict';
 
 import {
   CursorConflictError,
-  SqliteStore,
   stableMessageKey,
+  type CoreState,
 } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 import type { NormalizedMessage } from '../../src/types.ts';
 import {
-  inspectAttempt,
-  inspectAttempts,
   inspectPragmas,
   inspectSchemaVersion,
 } from '../support/sqlite-inspect.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 import { seedPendingAttempts } from '../support/pending-attempt.ts';
+import {
+  openInjectedTestPersistence,
+  withTestDatabase,
+} from '../support/temp-sqlite.ts';
 
 function createStore(
   t: TestContext,
   { now = 1_700_000_000_000 }: { now?: number } = {},
-): { store: SqliteStore; filePath: string; clock: { value: number } } {
+): {
+  persistence: StatePersistence;
+  store: CoreState;
+  filePath: string;
+  clock: { value: number };
+} {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-sqlite-'));
   const filePath = path.join(directory, 'state.sqlite');
   const clock = { value: now };
-  const store = new SqliteStore({ filePath, clock: () => clock.value });
+  const persistence = new StatePersistence({ filePath, clock: () => clock.value });
+  const store = persistence.core;
   t.onTestFinished(() => {
-    store.close();
+    persistence.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  return { store, filePath, clock };
+  return { persistence, store, filePath, clock };
 }
 
 function customerMessage(
@@ -50,16 +59,22 @@ function customerMessage(
 }
 
 test('SQLite store creates private directory and WAL/FULL/FK schema', (t) => {
-  const { store, filePath } = createStore(t);
-  assert.equal(inspectSchemaVersion(store.database), 21);
-  assert.deepEqual(inspectPragmas(store.database), {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-sqlite-pragmas-'));
+  const filePath = path.join(directory, 'state.sqlite');
+  const persistence = openInjectedTestPersistence(filePath);
+  const { core: store, database } = persistence;
+  t.onTestFinished(() => {
+    persistence.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  });
+  assert.equal(inspectSchemaVersion(database), 21);
+  assert.deepEqual(inspectPragmas(database), {
     journalMode: 'wal',
     synchronous: 2,
     foreignKeys: 1,
     busyTimeout: 5000,
   });
-  const tables = (store.database
-    .prepare(`
+  const tables = (database.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
       ORDER BY name
@@ -95,9 +110,12 @@ test('SQLite store creates private directory and WAL/FULL/FK schema', (t) => {
 test('SQLite store preserves an existing shared parent directory mode', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-sqlite-shared-'));
   fs.chmodSync(directory, 0o777);
-  const store = new SqliteStore({ filePath: path.join(directory, 'state.sqlite') });
+  const persistence = new StatePersistence({
+    filePath: path.join(directory, 'state.sqlite'),
+  });
+  const store = persistence.core;
   t.onTestFinished(() => {
-    store.close();
+    persistence.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
 
@@ -256,7 +274,7 @@ test('authorization is global but consecutive trigger counting resets by open_kf
   assert.equal(authorized.decision, 'authorized_now');
   assert.equal(store.getAuthorization('wm-auth')?.authorized, true);
   assert.equal(store.getInbound(b3)?.status, 'ready');
-  const confirmation = inspectAttempts(store.database, b3)[0];
+  const confirmation = store.listMessageAttempts(b3)[0];
   assert.ok(confirmation);
   assert.deepEqual(confirmation.payload, {
     msgtype: 'text',
@@ -344,7 +362,8 @@ test('a steer rejected at the completed-turn boundary can become a fresh turn on
 test('startup converts only in-flight sends to uncertain and never requeues them', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-recover-'));
   const filePath = path.join(directory, 'state.sqlite');
-  const first = new SqliteStore({ filePath });
+  const firstPersistence = new StatePersistence({ filePath });
+  const first = firstPersistence.core;
   first.ingestSyncPage({
     openKfId: 'wk-a',
     nextCursor: 'one',
@@ -361,16 +380,17 @@ test('startup converts only in-flight sends to uncertain and never requeues them
     ]);
   const sending = first.beginNextSend();
   assert.ok(sending);
-  first.close();
+  firstPersistence.close();
 
-  const second = new SqliteStore({ filePath });
+  const secondPersistence = new StatePersistence({ filePath });
+  const second = secondPersistence.core;
   t.onTestFinished(() => {
-    second.close();
+    secondPersistence.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
   const recovered = second.recoverStartup();
   assert.equal(recovered.uncertainSends, 1);
-  assert.equal(inspectAttempt(second.database, sending.attemptId)?.status, 'uncertain');
+  assert.equal(second.getAttempt(sending.attemptId)?.status, 'uncertain');
   assert.equal(second.beginNextSend(), undefined);
   assert.equal(second.getInbound(messageKey)?.status, 'completed');
 });
@@ -378,7 +398,8 @@ test('startup converts only in-flight sends to uncertain and never requeues them
 test('startup revokes every capability issued by the previous process', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'wechat-session-recover-'));
   const filePath = path.join(directory, 'state.sqlite');
-  const first = new SqliteStore({ filePath });
+  const firstPersistence = new StatePersistence({ filePath });
+  const first = firstPersistence.core;
   first.ingestSyncPage({
     openKfId: 'wk-a',
     nextCursor: 'one',
@@ -387,11 +408,12 @@ test('startup revokes every capability issued by the previous process', (t) => {
   const messageKey = stableMessageKey('wk-a', 'active-session');
   first.claimInbound({ messageKey });
   const session = first.createAgentSession({ messageKey });
-  first.close();
+  firstPersistence.close();
 
-  const second = new SqliteStore({ filePath });
+  const secondPersistence = new StatePersistence({ filePath });
+  const second = secondPersistence.core;
   t.onTestFinished(() => {
-    second.close();
+    secondPersistence.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
   assert.equal(second.getAgentSession(session.token).messageKey, messageKey);
@@ -523,7 +545,7 @@ test('archived memory binding follows the short-lived session and clears on comp
 });
 
 test('recent channel facts are conversation scoped and use the conversation index', (t) => {
-  const { store } = createStore(t);
+  const { store, filePath } = createStore(t);
   store.ingestSyncPage({
     openKfId: 'wk-a',
     nextCursor: 'one',
@@ -558,15 +580,14 @@ test('recent channel facts are conversation scoped and use the conversation inde
   assert.equal(facts.length, 1);
   assert.equal(facts[0]?.externalUserId, 'wm-a');
   assert.equal(facts[0]?.wecomMsgId, 'wx-wm-a');
-  const plan = (store.database
-    .prepare(`
+  const plan = withTestDatabase(filePath, (database) => database.prepare(`
       EXPLAIN QUERY PLAN
       SELECT * FROM send_attempts
       WHERE open_kfid = ? AND external_userid = ?
         AND status IN ('accepted', 'failed', 'uncertain')
       ORDER BY updated_at DESC LIMIT ?
     `)
-    .all('wk-a', 'wm-a', 10)) as { detail: string }[];
+    .all('wk-a', 'wm-a', 10) as unknown as { detail: string }[]);
   assert.match(
     plan.map((row) => String(row.detail)).join('\n'),
     /send_conversation_idx/u,
@@ -574,7 +595,7 @@ test('recent channel facts are conversation scoped and use the conversation inde
 });
 
 test('startup recovery returns every pending inbound beyond the old 1000-row cap', (t) => {
-  const { store } = createStore(t);
+  const { store, filePath } = createStore(t);
   const messages = Array.from({ length: 1_001 }, (_, index) =>
     customerMessage(`recover-${index}`, 'wm-many')
   );
@@ -583,10 +604,12 @@ test('startup recovery returns every pending inbound beyond the old 1000-row cap
     nextCursor: 'many-cursor',
     messages,
   });
-  store.database.exec(`
-    UPDATE inbound_messages
-    SET status = 'processing', client_input_id = message_key
-  `);
+  withTestDatabase(filePath, (database) => {
+    database.exec(`
+      UPDATE inbound_messages
+      SET status = 'processing', client_input_id = message_key
+    `);
+  });
   assert.equal(store.recoverStartup().inbound.length, 1_001);
 });
 
@@ -611,31 +634,33 @@ test('primary failure requeues its steering input for bounded recovery', (t) => 
 });
 
 test('composite foreign keys reject cross-customer media and send targets', (t) => {
-  const { store } = createStore(t);
+  const { store, filePath } = createStore(t);
   store.ingestSyncPage({
     openKfId: 'wk-a',
     nextCursor: 'fk-cursor',
     messages: [customerMessage('owner', 'wm-owner')],
   });
   const messageKey = stableMessageKey('wk-a', 'owner');
-  assert.throws(() =>
-    store.database.prepare(`
-      INSERT INTO inbound_media (
-        message_key, open_kfid, external_userid, position, kind,
-        media_id, remembered_at
-      ) VALUES (?, 'wk-a', 'wm-other', 0, 'image', 'media', 1)
-    `).run(messageKey),
-  /FOREIGN KEY/u);
-  assert.throws(() =>
-    store.database.prepare(`
-      INSERT INTO send_attempts (
-        attempt_key, source_message_key, open_kfid, external_userid,
-        send_index, source, sent_type, fingerprint, client_message_id,
-        status, created_at, updated_at
-      ) VALUES (
-        'bad-attempt', ?, 'wk-a', 'wm-other', 0, 'test', 'text',
-        'hash', 'client-id', 'pending', 1, 1
-      )
-    `).run(messageKey),
-  /FOREIGN KEY/u);
+  withTestDatabase(filePath, (database) => {
+    assert.throws(() =>
+      database.prepare(`
+        INSERT INTO inbound_media (
+          message_key, open_kfid, external_userid, position, kind,
+          media_id, remembered_at
+        ) VALUES (?, 'wk-a', 'wm-other', 0, 'image', 'media', 1)
+      `).run(messageKey),
+    /FOREIGN KEY/u);
+    assert.throws(() =>
+      database.prepare(`
+        INSERT INTO send_attempts (
+          attempt_key, source_message_key, open_kfid, external_userid,
+          send_index, source, sent_type, fingerprint, client_message_id,
+          status, created_at, updated_at
+        ) VALUES (
+          'bad-attempt', ?, 'wk-a', 'wm-other', 0, 'test', 'text',
+          'hash', 'client-id', 'pending', 1, 1
+        )
+      `).run(messageKey),
+    /FOREIGN KEY/u);
+  });
 });

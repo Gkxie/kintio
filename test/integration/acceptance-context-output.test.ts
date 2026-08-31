@@ -23,7 +23,7 @@ import type {
 } from '../../src/services/codex-app-server.ts';
 import { withStagedImages } from '../../src/services/image-stager.ts';
 import { WecomMediaGateway } from '../../src/services/media-gateway.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 
 const base = {
   open_kfid: 'wk-acceptance',
@@ -239,8 +239,8 @@ test('unverifiable mini-program fields reject while text fallback remains valid'
 test("SQLite state remains private without a host image spool", async (t) => {
   const directory = await tempDirectory(t, "private-state-");
   const databaseFile = path.join(directory, "private", "wecom.sqlite");
-  const store = new SqliteStore({ filePath: databaseFile });
-  t.onTestFinished(() => store.close());
+  const persistence = new StatePersistence({ filePath: databaseFile });
+  t.onTestFinished(() => persistence.close());
   if (process.platform === 'win32') {
     assert.equal((await fs.stat(databaseFile)).isFile(), true);
   } else {

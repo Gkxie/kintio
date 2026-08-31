@@ -12,12 +12,10 @@ import {
   IlinkMessageType,
 } from '../../src/ilink/protocol/types.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
-import { IlinkSqliteStore } from '../../src/ilink/sqlite-store.ts';
 import {
   ILINK_REPLY_WINDOW_LIFETIME_MS,
   createIlinkAccountKey,
 } from '../../src/ilink/store-types.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 const botId = 'executor-bot@im.bot';
@@ -31,8 +29,9 @@ async function fixture(
 ) {
   const temp = await createTempSqlite(t, { prefix: 'ilink-executor-' });
   let now = 1_800_000_000_000;
-  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock: () => now }));
-  const ilinkStore = new IlinkSqliteStore({ store, clock: () => now });
+  const persistence = temp.openPersistence({ clock: () => now });
+  const store = persistence.core;
+  const ilinkStore = persistence.createIlinkStore({ clock: () => now });
   const box = new IlinkSecretBox(key);
   ilinkStore.registerAccount({
     providerAccountId: botId,

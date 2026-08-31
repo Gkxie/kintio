@@ -1,7 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
 
 import { acquireSingleInstanceLock } from './runtime/single-instance-lock.ts';
@@ -19,20 +18,20 @@ import { McpIpcHost } from './mcp/ipc-host.ts';
 import { IlinkSendExecutor } from './ilink/executor.ts';
 import { IlinkListenerManager } from './ilink/listener.ts';
 import { IlinkLoginManager } from './ilink/login-manager.ts';
-import { IlinkLoginStore } from './ilink/login-store.ts';
+import type { IlinkLoginStore } from './ilink/login-store.ts';
 import { IlinkMediaGateway } from './ilink/media-gateway.ts';
 import { DEFAULT_ILINK_MEDIA_TIMEOUT_MS } from './ilink/media.ts';
 import { DEFAULT_ILINK_IMAGE_TIMEOUT_MS } from './ilink/inbound-image.ts';
 import { IlinkClient } from './ilink/protocol/client.ts';
 import { IlinkSecretBox } from './ilink/secret-box.ts';
-import { IlinkSqliteStore } from './ilink/sqlite-store.ts';
 import {
   ConversationMemoryExecutor,
   createConversationMemoryMcpServer,
 } from './mcp/conversation-memory-server.ts';
 import {
-  SqliteStore,
-} from './state/sqlite-store.ts';
+  StatePersistence,
+  StatePersistenceUnclosedError,
+} from './state/persistence.ts';
 import type { AppConfig } from './config.ts';
 import type { ChatChannel, Logger } from './types.ts';
 
@@ -78,27 +77,6 @@ function readOrCreatePrivateKey(filePath: string, label: string): string {
   }
 }
 
-function databaseHasActiveWriter(filePath: string): boolean {
-  if (!fs.existsSync(filePath)) return false;
-  let database: DatabaseSync | undefined;
-  try {
-    database = new DatabaseSync(filePath);
-    database.exec('PRAGMA busy_timeout = 0');
-    database.exec('BEGIN IMMEDIATE');
-    database.exec('ROLLBACK');
-    return false;
-  } catch (error: unknown) {
-    return (
-      error instanceof Error &&
-      'code' in error &&
-      String(error.code) === 'ERR_SQLITE_ERROR' &&
-      /busy|locked/iu.test(error.message)
-    );
-  } finally {
-    database?.close();
-  }
-}
-
 export async function createRuntime({
   config,
   logger = console,
@@ -125,15 +103,17 @@ export async function createRuntime({
   const instanceLock = acquireSingleInstanceLock({
     filePath: config.state.lockFile,
     hasActiveDatabaseOwner: () =>
-      databaseHasActiveWriter(config.state.databaseFile),
+      StatePersistence.hasActiveWriter(config.state.databaseFile),
   });
-  let store: SqliteStore | undefined;
+  let persistence: StatePersistence | undefined;
   let cleanupTimer: NodeJS.Timeout | undefined;
   let ilinkOffers: IlinkLoginStore | undefined;
   let mcpHost: McpIpcHost | undefined;
 
   try {
-    store = new SqliteStore({ filePath: config.state.databaseFile });
+    persistence = new StatePersistence({ filePath: config.state.databaseFile });
+    const activePersistence = persistence;
+    const store = activePersistence.core;
     const activeStore = store;
     store.cleanup();
     cleanupStagedImageOrphans(config.codex.imageTempDirectory);
@@ -191,7 +171,7 @@ export async function createRuntime({
         )
       : undefined;
     const ilinkStore = config.ilink.enabled
-      ? new IlinkSqliteStore({ store })
+      ? activePersistence.createIlinkStore()
       : undefined;
     const recoveredIlinkReservations = ilinkStore?.recoverPendingAttempts() || 0;
     if (recoveredIlinkReservations) {
@@ -214,7 +194,9 @@ export async function createRuntime({
         })
       : undefined;
     if (ilinkStore && ilinkSecretBox) {
-      ilinkOffers = new IlinkLoginStore({ store, secretBox: ilinkSecretBox });
+      ilinkOffers = activePersistence.createIlinkLoginStore({
+        secretBox: ilinkSecretBox,
+      });
       ilinkOffers.cleanup();
       ilinkLogin = new IlinkLoginManager({
         offers: ilinkOffers,
@@ -522,9 +504,9 @@ export async function createRuntime({
                 activeStore.checkpoint('TRUNCATE');
               } finally {
                 try {
-                  activeStore.close();
+                  activePersistence.close();
                 } finally {
-                  instanceLock.release();
+                  if (activePersistence.closed) instanceLock.release();
                 }
               }
             }
@@ -547,8 +529,11 @@ export async function createRuntime({
   } catch (error: unknown) {
     if (cleanupTimer) clearInterval(cleanupTimer);
     await mcpHost?.close(true).catch(() => undefined);
+    let persistenceClosed = persistence === undefined &&
+      !(error instanceof StatePersistenceUnclosedError);
     try {
-      store?.close();
+      persistence?.close();
+      persistenceClosed = true;
     } catch (cleanupError: unknown) {
       logger.error(
         `[runtime] startup cleanup failed: ${
@@ -556,7 +541,7 @@ export async function createRuntime({
         }`,
       );
     } finally {
-      instanceLock.release();
+      if (persistence?.closed || persistenceClosed) instanceLock.release();
     }
     throw error;
   }

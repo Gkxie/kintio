@@ -6,7 +6,6 @@ import {
   stableMessageKey,
   type AttemptRecord,
   type JsonObject,
-  type SqliteStore,
 } from '../state/sqlite-store.ts';
 import type { NormalizedMessage } from '../types.ts';
 import type { IlinkInboundCandidate } from './message.ts';
@@ -516,18 +515,21 @@ function compareCandidates(
   return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
 }
 
-export class IlinkSqliteStore {
+/** @internal Construct through StatePersistence outside persistence tests. */
+interface IlinkSqliteStoreInternalOptions {
   readonly database: DatabaseSync;
+  readonly clock?: () => number;
+}
+
+export class IlinkSqliteStore {
+  readonly #database: DatabaseSync;
   readonly #clock: () => number;
 
   constructor({
-    store,
+    database,
     clock = Date.now,
-  }: {
-    store: Pick<SqliteStore, 'database'>;
-    clock?: () => number;
-  }) {
-    this.database = store.database;
+  }: IlinkSqliteStoreInternalOptions) {
+    this.#database = database;
     this.#clock = clock;
   }
 
@@ -536,28 +538,28 @@ export class IlinkSqliteStore {
   }
 
   #transaction<T>(operation: () => T): T {
-    if (this.database.isTransaction) return operation();
-    this.database.exec('BEGIN IMMEDIATE');
+    if (this.#database.isTransaction) return operation();
+    this.#database.exec('BEGIN IMMEDIATE');
     try {
       const result = operation();
-      this.database.exec('COMMIT');
+      this.#database.exec('COMMIT');
       return result;
     } catch (error) {
-      this.database.exec('ROLLBACK');
+      this.#database.exec('ROLLBACK');
       throw error;
     }
   }
 
   #accountRow(accountKey: IlinkAccountKey): AccountRow | undefined {
     assertIlinkAccountKey(accountKey);
-    return rowAs<AccountRow>(this.database.prepare(`
+    return rowAs<AccountRow>(this.#database.prepare(`
       SELECT * FROM ilink_accounts WHERE account_key = ?
     `).get(accountKey));
   }
 
   #accountSecretRow(accountKey: IlinkAccountKey): AccountSecretRow | undefined {
     assertIlinkAccountKey(accountKey);
-    return rowAs<AccountSecretRow>(this.database.prepare(`
+    return rowAs<AccountSecretRow>(this.#database.prepare(`
       SELECT account.*, secret.account_generation,
              secret.nonce, secret.ciphertext, secret.auth_tag,
              secret.updated_at AS secret_updated_at
@@ -572,7 +574,7 @@ export class IlinkSqliteStore {
       const groups = rowsAs<{
         reply_window_id: number | null;
         pending_count: number;
-      }>(this.database.prepare(`
+      }>(this.#database.prepare(`
         SELECT reply_window_id, COUNT(*) AS pending_count
         FROM send_attempts
         WHERE channel = 'weixin_ilink' AND status = 'pending'
@@ -584,14 +586,14 @@ export class IlinkSqliteStore {
         const replyWindowId = Number(group.reply_window_id || 0);
         const count = Number(group.pending_count || 0);
         const window = replyWindowId
-          ? rowAs<ReplyWindowRow>(this.database.prepare(`
+          ? rowAs<ReplyWindowRow>(this.#database.prepare(`
               SELECT * FROM ilink_reply_windows WHERE reply_window_id = ?
             `).get(replyWindowId))
           : undefined;
         if (!window || count <= 0 || window.reserved_send_count < count) {
           fail('attempt_conflict', 'Pending iLink recovery counters are inconsistent');
         }
-        const attempts = this.database.prepare(`
+        const attempts = this.#database.prepare(`
           UPDATE send_attempts
           SET status = 'failed', error_code = 'abandoned_before_transmit',
               error_message = 'iLink send stopped before network transmission',
@@ -602,7 +604,7 @@ export class IlinkSqliteStore {
         if (attempts.changes !== count) {
           fail('attempt_conflict', 'Pending iLink recovery changed unexpectedly');
         }
-        const updated = this.database.prepare(`
+        const updated = this.#database.prepare(`
           UPDATE ilink_reply_windows
           SET reserved_send_count = reserved_send_count - ?, updated_at = ?
           WHERE reply_window_id = ? AND reserved_send_count >= ?
@@ -622,13 +624,13 @@ export class IlinkSqliteStore {
       'cancelled_before_transmit',
   ): boolean {
     return this.#transaction(() => {
-      const attempt = rowAs<AttemptRow>(this.database.prepare(`
+      const attempt = rowAs<AttemptRow>(this.#database.prepare(`
         SELECT * FROM send_attempts
         WHERE attempt_key = ? AND channel = 'weixin_ilink' AND status = 'pending'
       `).get(attemptId));
       if (!attempt) return false;
       const now = this.#now();
-      const released = this.database.prepare(`
+      const released = this.#database.prepare(`
         UPDATE ilink_reply_windows
         SET reserved_send_count = reserved_send_count - 1, updated_at = ?
         WHERE reply_window_id = ? AND reserved_send_count > 0
@@ -636,7 +638,7 @@ export class IlinkSqliteStore {
       if (released.changes !== 1) {
         fail('attempt_conflict', 'Pending iLink reservation cannot be released');
       }
-      this.database.prepare(`
+      this.#database.prepare(`
         UPDATE send_attempts
         SET status = 'failed', error_code = ?, error_message = ?,
             updated_at = ?
@@ -663,13 +665,13 @@ export class IlinkSqliteStore {
       if (this.#accountRow(accountKey)) {
         fail('account_exists', 'iLink account is already registered');
       }
-      const owner = this.database.prepare(`
+      const owner = this.#database.prepare(`
         SELECT 1 FROM ilink_accounts
         WHERE owner_peer_id = ? AND status IN ('active', 'paused')
         LIMIT 1
       `).get(ownerPeerId);
       if (owner) fail('owner_conflict', 'iLink owner already has an active account');
-      this.database.prepare(`
+      this.#database.prepare(`
         INSERT INTO ilink_accounts (
           account_key, provider_account_id, owner_peer_id, base_url,
           generation, status, pause_until, cursor, cursor_updated_at,
@@ -683,7 +685,7 @@ export class IlinkSqliteStore {
         now,
         now,
       );
-      this.database.prepare(`
+      this.#database.prepare(`
         INSERT INTO ilink_account_secrets (
           account_key, account_generation, nonce, ciphertext, auth_tag,
           updated_at
@@ -724,7 +726,7 @@ export class IlinkSqliteStore {
       const nextGeneration = current.generation + 1;
       positiveInteger(nextGeneration, 'nextGeneration');
       this.#cancelOpenWindows(input.accountKey, now, 'account_generation_changed');
-      const updated = this.database.prepare(`
+      const updated = this.#database.prepare(`
         UPDATE ilink_accounts
         SET base_url = ?, generation = ?, status = 'active', pause_until = 0,
             updated_at = ?
@@ -739,7 +741,7 @@ export class IlinkSqliteStore {
       if (updated.changes !== 1) {
         fail('generation_conflict', 'iLink account generation changed');
       }
-      this.database.prepare(`
+      this.#database.prepare(`
         INSERT INTO ilink_account_secrets (
           account_key, account_generation, nonce, ciphertext, auth_tag, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?)
@@ -774,7 +776,7 @@ export class IlinkSqliteStore {
         source_open_kfid: string;
         source_external_userid: string;
         created_at: number;
-      }>(this.database.prepare(`
+      }>(this.#database.prepare(`
         SELECT source_message_key, source_open_kfid,
                source_external_userid, created_at
         FROM ilink_login_offers
@@ -785,7 +787,7 @@ export class IlinkSqliteStore {
       const accountKey = createIlinkAccountKey(input.providerAccountId);
       const existing = this.#accountRow(accountKey);
       if (!existing || existing.status !== 'active') {
-        const active = rowAs<{ count: number }>(this.database.prepare(`
+        const active = rowAs<{ count: number }>(this.#database.prepare(`
           SELECT COUNT(*) AS count FROM ilink_accounts WHERE status = 'active'
         `).get());
         if (Number(active?.count || 0) >= input.maxAccounts) {
@@ -806,7 +808,7 @@ export class IlinkSqliteStore {
             now: input.now,
           })
         : this.registerAccount(input);
-      this.database.prepare(`
+      this.#database.prepare(`
         INSERT INTO ilink_enrollment_audit (
           offer_id, source_message_key, source_open_kfid,
           source_external_userid, account_key, result, offered_at, completed_at
@@ -820,7 +822,7 @@ export class IlinkSqliteStore {
         offer.created_at,
         this.#now(input.now),
       );
-      const removed = this.database.prepare(`
+      const removed = this.#database.prepare(`
         DELETE FROM ilink_login_offers
         WHERE offer_id = ? AND status IN ('waiting', 'scanned')
       `).run(offerId);
@@ -830,7 +832,7 @@ export class IlinkSqliteStore {
   }
 
   #cancelOpenWindows(accountKey: IlinkAccountKey, now: number, reason: string): void {
-    const windowIds = rowsAs<{ reply_window_id: number }>(this.database.prepare(`
+    const windowIds = rowsAs<{ reply_window_id: number }>(this.#database.prepare(`
       SELECT reply_window_id FROM ilink_reply_windows
       WHERE account_key = ? AND state = 'open'
     `).all(accountKey));
@@ -861,7 +863,7 @@ export class IlinkSqliteStore {
   }
 
   listActiveAccounts(): readonly IlinkAccountRecord[] {
-    return rowsAs<AccountRow>(this.database.prepare(`
+    return rowsAs<AccountRow>(this.#database.prepare(`
       SELECT * FROM ilink_accounts
       WHERE status = 'active'
       ORDER BY created_at, account_key
@@ -869,7 +871,7 @@ export class IlinkSqliteStore {
   }
 
   listActiveAccountsWithSecrets(): readonly IlinkAccountWithSecret[] {
-    return rowsAs<AccountSecretRow>(this.database.prepare(`
+    return rowsAs<AccountSecretRow>(this.#database.prepare(`
       SELECT account.*, secret.account_generation,
              secret.nonce, secret.ciphertext, secret.auth_tag,
              secret.updated_at AS secret_updated_at
@@ -901,7 +903,7 @@ export class IlinkSqliteStore {
     const next = boundedCursor(input.nextCursor, 'nextCursor');
     const now = this.#now(input.now);
     return this.#transaction(() => {
-      const updated = this.database.prepare(`
+      const updated = this.#database.prepare(`
         UPDATE ilink_accounts
         SET cursor = ?, cursor_updated_at = ?
         WHERE account_key = ? AND generation = ? AND status = 'active'
@@ -964,7 +966,7 @@ export class IlinkSqliteStore {
           candidate.providerMessageId,
         );
         const payload = normalizedPayload(candidate, messageKey);
-        const inserted = this.database.prepare(`
+        const inserted = this.#database.prepare(`
           INSERT INTO inbound_messages (
             message_key, open_kfid, msgid, external_userid, channel,
             origin, msg_type, sent_at, status, deferred, payload_json,
@@ -992,17 +994,17 @@ export class IlinkSqliteStore {
           continue;
         }
         insertedEntries.push({ messageKey, candidate, payload });
-        this.database.prepare(`
+        this.#database.prepare(`
           INSERT INTO conversations (open_kfid, external_userid, updated_at)
           VALUES (?, ?, ?)
           ON CONFLICT(open_kfid, external_userid) DO NOTHING
         `).run(input.accountKey, candidate.peerId, now);
-        const inbound = rowAs<{ inbox_seq: number }>(this.database.prepare(`
+        const inbound = rowAs<{ inbox_seq: number }>(this.#database.prepare(`
           SELECT inbox_seq FROM inbound_messages WHERE message_key = ?
         `).get(messageKey));
         if (!inbound) fail('dedupe_invariant', 'Inserted iLink inbox row is missing');
         for (const image of entry.sealedImages || []) {
-          this.database.prepare(`
+          this.#database.prepare(`
             INSERT INTO ilink_inbound_images (
               message_key, position, account_key, peer_id, secret_generation,
               nonce, ciphertext, auth_tag, created_at
@@ -1031,7 +1033,7 @@ export class IlinkSqliteStore {
         pageWindowSources.add(messageKey);
       }
 
-      const cursorUpdate = this.database.prepare(`
+      const cursorUpdate = this.#database.prepare(`
         UPDATE ilink_accounts
         SET cursor = ?, cursor_updated_at = ?
         WHERE account_key = ? AND generation = ? AND status = 'active'
@@ -1054,13 +1056,13 @@ export class IlinkSqliteStore {
         ({ messageKey }) => messageKey === openMessageKey,
       );
       const deliverableDeferred = deliverable
-        ? Number(rowAs<{ deferred: number }>(this.database.prepare(`
+        ? Number(rowAs<{ deferred: number }>(this.#database.prepare(`
             SELECT deferred FROM inbound_messages WHERE message_key = ?
           `).get(deliverable.messageKey))?.deferred || 0) === 1
         : false;
       for (const entry of insertedEntries) {
         if (entry.messageKey === openMessageKey) continue;
-        this.database.prepare(`
+        this.#database.prepare(`
           UPDATE inbound_messages
           SET status = 'absorbed', deferred = 0, payload_json = NULL, updated_at = ?
           WHERE message_key = ? AND status = 'received'
@@ -1071,7 +1073,7 @@ export class IlinkSqliteStore {
         .map(({ candidate }) => candidate.summary);
       const backlog = deliverable
         ? rowsAs<{ message_key: string; payload_json: string | null }>(
-            this.database.prepare(`
+            this.#database.prepare(`
               SELECT message_key, payload_json FROM inbound_messages
               WHERE open_kfid = ? AND external_userid = ?
                 AND status = 'received' AND message_key <> ?
@@ -1089,7 +1091,7 @@ export class IlinkSqliteStore {
         : [];
       if (backlog.length) {
         const placeholders = backlog.map(() => '?').join(',');
-        this.database.prepare(`
+        this.#database.prepare(`
           UPDATE inbound_messages
           SET status = 'absorbed', deferred = 0, payload_json = NULL, updated_at = ?
           WHERE message_key IN (${placeholders}) AND status = 'received'
@@ -1106,7 +1108,7 @@ export class IlinkSqliteStore {
           ])]
         : [];
       const mergedImageCount = mergeKeys.length
-        ? Number(rowAs<{ count: number }>(this.database.prepare(`
+        ? Number(rowAs<{ count: number }>(this.#database.prepare(`
             SELECT COUNT(*) AS count FROM ilink_inbound_images
             WHERE message_key IN (${mergeKeys.map(() => '?').join(',')})
           `).get(...mergeKeys))?.count || 0)
@@ -1117,7 +1119,7 @@ export class IlinkSqliteStore {
             ciphertext: string;
             auth_tag: string;
             secret_generation: number;
-          }>(this.database.prepare(`
+          }>(this.#database.prepare(`
             SELECT image.nonce, image.ciphertext, image.auth_tag,
                    image.secret_generation
             FROM ilink_inbound_images AS image
@@ -1129,19 +1131,19 @@ export class IlinkSqliteStore {
           `).all(...mergeKeys, deliverable!.messageKey))
         : [];
       if (mergeKeys.length) {
-        this.database.prepare(`
+        this.#database.prepare(`
           DELETE FROM ilink_inbound_images
           WHERE message_key IN (${mergeKeys.map(() => '?').join(',')})
         `).run(...mergeKeys);
       } else if (insertedEntries.length) {
-        this.database.prepare(`
+        this.#database.prepare(`
           DELETE FROM ilink_inbound_images
           WHERE message_key IN (${insertedEntries.map(() => '?').join(',')})
         `).run(...insertedEntries.map(({ messageKey }) => messageKey));
       }
       if (deliverable) {
         for (const [position, image] of mergedImages.entries()) {
-          this.database.prepare(`
+          this.#database.prepare(`
             INSERT INTO ilink_inbound_images (
               message_key, position, account_key, peer_id, secret_generation,
               nonce, ciphertext, auth_tag, created_at
@@ -1179,7 +1181,7 @@ export class IlinkSqliteStore {
             status: 'unresolved' as const,
           })),
         };
-        this.database.prepare(`
+        this.#database.prepare(`
           UPDATE inbound_messages SET payload_json = ?, updated_at = ?
           WHERE message_key = ? AND status = 'received'
         `).run(encodeJson(mergedPayload), now, deliverable.messageKey);
@@ -1251,7 +1253,7 @@ export class IlinkSqliteStore {
       msgid: string;
       external_userid: string;
       channel: string;
-    }>(this.database.prepare(`
+    }>(this.#database.prepare(`
       SELECT message_key, open_kfid, msgid, external_userid, channel
       FROM inbound_messages
       WHERE open_kfid = ? AND msgid = ?
@@ -1266,7 +1268,7 @@ export class IlinkSqliteStore {
     ) {
       fail('dedupe_invariant', 'iLink message dedupe identity conflicts');
     }
-    const window = this.database.prepare(`
+    const window = this.#database.prepare(`
       SELECT 1 FROM ilink_reply_windows WHERE source_message_key = ?
     `).get(messageKey);
     if (!window) {
@@ -1275,7 +1277,7 @@ export class IlinkSqliteStore {
   }
 
   #openWindow(accountKey: string, peerId: string): ReplyWindowRow | undefined {
-    return rowAs<ReplyWindowRow>(this.database.prepare(`
+    return rowAs<ReplyWindowRow>(this.#database.prepare(`
       SELECT window.*, inbound.msgid AS provider_message_id
       FROM ilink_reply_windows AS window
       JOIN inbound_messages AS inbound
@@ -1316,7 +1318,7 @@ export class IlinkSqliteStore {
     if (!Number.isSafeInteger(expiresAt) || expiresAt <= candidate.createTime) {
       fail('invalid_input', 'iLink reply window expiry is invalid');
     }
-    const inserted = this.database.prepare(`
+    const inserted = this.#database.prepare(`
       INSERT INTO ilink_reply_windows (
         account_key, peer_id, account_generation,
         source_message_key, source_inbox_seq, provider_seq,
@@ -1342,7 +1344,7 @@ export class IlinkSqliteStore {
     const replyWindowId = Number(inserted.lastInsertRowid);
     positiveInteger(replyWindowId, 'replyWindowId');
     if (becomesOpen) {
-      this.database.prepare(`
+      this.#database.prepare(`
         INSERT INTO ilink_reply_window_secrets (
           reply_window_id, nonce, ciphertext, auth_tag, updated_at
         ) VALUES (?, ?, ?, ?, ?)
@@ -1363,31 +1365,31 @@ export class IlinkSqliteStore {
     now: number,
     reason: string,
   ): void {
-    this.database.prepare(`
+    this.#database.prepare(`
       UPDATE send_attempts
       SET status = 'failed', error_code = ?, error_message = ?, updated_at = ?
       WHERE reply_window_id = ? AND channel = 'weixin_ilink'
         AND status = 'pending'
     `).run(reason, 'iLink reply window is no longer active', now, replyWindowId);
-    this.database.prepare(`
+    this.#database.prepare(`
       UPDATE agent_sessions
       SET closed_at = ?, updated_at = ?
       WHERE reply_window_id = ? AND channel = 'weixin_ilink'
         AND closed_at = 0
     `).run(now, now, replyWindowId);
-    this.database.prepare(`
+    this.#database.prepare(`
       UPDATE ilink_reply_windows
       SET state = ?, reserved_send_count = 0, updated_at = ?
       WHERE reply_window_id = ? AND state = 'open'
     `).run(state, now, replyWindowId);
-    this.database.prepare(`
+    this.#database.prepare(`
       DELETE FROM ilink_reply_window_secrets WHERE reply_window_id = ?
     `).run(replyWindowId);
   }
 
   getReplyWindow(replyWindowId: number): IlinkReplyWindowRecord | undefined {
     positiveInteger(replyWindowId, 'replyWindowId');
-    const row = rowAs<ReplyWindowRow>(this.database.prepare(`
+    const row = rowAs<ReplyWindowRow>(this.#database.prepare(`
       SELECT * FROM ilink_reply_windows WHERE reply_window_id = ?
     `).get(replyWindowId));
     return row ? mapReplyWindow(row) : undefined;
@@ -1397,7 +1399,7 @@ export class IlinkSqliteStore {
     replyWindowId: number,
   ): IlinkReplyWindowSecret | undefined {
     positiveInteger(replyWindowId, 'replyWindowId');
-    const row = rowAs<ReplyWindowSecretRow>(this.database.prepare(`
+    const row = rowAs<ReplyWindowSecretRow>(this.#database.prepare(`
       SELECT window.*, secret.nonce, secret.ciphertext, secret.auth_tag,
              secret.updated_at AS secret_updated_at
       FROM ilink_reply_windows AS window
@@ -1424,7 +1426,7 @@ export class IlinkSqliteStore {
   getReplyWindowSecretBySource(
     messageKey: string,
   ): IlinkReplyWindowSecret | undefined {
-    const row = rowAs<{ reply_window_id: number }>(this.database.prepare(`
+    const row = rowAs<{ reply_window_id: number }>(this.#database.prepare(`
       SELECT reply_window_id FROM ilink_reply_windows
       WHERE source_message_key = ?
     `).get(String(messageKey || '')));
@@ -1444,7 +1446,7 @@ export class IlinkSqliteStore {
       nonce: string;
       ciphertext: string;
       auth_tag: string;
-    }>(this.database.prepare(`
+    }>(this.#database.prepare(`
       SELECT * FROM ilink_inbound_images
       WHERE message_key = ? AND position = ?
     `).get(String(messageKey || ''), position));
@@ -1468,7 +1470,7 @@ export class IlinkSqliteStore {
     const now = this.#now(input.now);
     const payloadJson = encodeJson(input.payload);
     return this.#transaction(() => {
-      const window = rowAs<ReplyWindowRow>(this.database.prepare(`
+      const window = rowAs<ReplyWindowRow>(this.#database.prepare(`
         SELECT * FROM ilink_reply_windows
         WHERE source_message_key = ?
       `).get(input.messageKey));
@@ -1489,13 +1491,13 @@ export class IlinkSqliteStore {
       ) {
         fail('reply_quota_exhausted', 'iLink reply window quota is exhausted');
       }
-      const sending = this.database.prepare(`
+      const sending = this.#database.prepare(`
         SELECT 1 FROM send_attempts
         WHERE channel = 'weixin_ilink' AND status = 'sending'
           AND open_kfid = ? AND external_userid = ? LIMIT 1
       `).get(window.account_key, window.peer_id);
       if (sending) fail('send_in_progress', 'Another iLink send is in progress');
-      const physical = Number(rowAs<{ next_index: number }>(this.database.prepare(`
+      const physical = Number(rowAs<{ next_index: number }>(this.#database.prepare(`
         SELECT COALESCE(MAX(send_index) + 1, 0) AS next_index
         FROM send_attempts WHERE source_message_key = ?
       `).get(input.messageKey))?.next_index || 0);
@@ -1509,7 +1511,7 @@ export class IlinkSqliteStore {
         direction: window.source_inbox_seq,
         replyWindowSendIndex: window.next_send_index,
       });
-      const updated = this.database.prepare(`
+      const updated = this.#database.prepare(`
         UPDATE ilink_reply_windows
         SET next_send_index = next_send_index + 1,
             transmitted_send_count = transmitted_send_count + 1, updated_at = ?
@@ -1517,7 +1519,7 @@ export class IlinkSqliteStore {
           AND reserved_send_count + transmitted_send_count < max_sends
       `).run(now, window.reply_window_id);
       if (updated.changes !== 1) fail('attempt_conflict', 'iLink system send lost quota');
-      this.database.prepare(`
+      this.#database.prepare(`
         INSERT INTO send_attempts (
           attempt_key, source_message_key, open_kfid, external_userid,
           channel, reply_window_id, send_index, source, sent_type,
@@ -1542,7 +1544,7 @@ export class IlinkSqliteStore {
         now,
         now,
       );
-      return mapAttempt(rowAs<AttemptRow>(this.database.prepare(`
+      return mapAttempt(rowAs<AttemptRow>(this.#database.prepare(`
         SELECT * FROM send_attempts WHERE attempt_key = ?
       `).get(attemptKey))!);
     });
@@ -1550,7 +1552,7 @@ export class IlinkSqliteStore {
 
   #sessionWindow(sessionToken: string): AgentSessionWindowRow | undefined {
     if (!sessionToken) fail('invalid_agent_session', 'Agent session is required');
-    return rowAs<AgentSessionWindowRow>(this.database.prepare(`
+    return rowAs<AgentSessionWindowRow>(this.#database.prepare(`
       SELECT
         window.*,
         session.source_message_key AS session_source_message_key,
@@ -1636,7 +1638,7 @@ export class IlinkSqliteStore {
       rejection = 'reply_quota_exhausted';
     }
     const windowSendIndex = Number(window.next_send_index);
-    const physicalIndexRow = rowAs<{ next_index: number }>(this.database.prepare(`
+    const physicalIndexRow = rowAs<{ next_index: number }>(this.#database.prepare(`
         SELECT COALESCE(MAX(send_index) + 1, 0) AS next_index
         FROM send_attempts WHERE source_message_key = ?
       `).get(window.session_source_message_key));
@@ -1655,7 +1657,7 @@ export class IlinkSqliteStore {
       replyWindowSendIndex: windowSendIndex,
     });
     if (!rejection) {
-      const windowUpdate = this.database.prepare(`
+      const windowUpdate = this.#database.prepare(`
         UPDATE ilink_reply_windows
         SET next_send_index = next_send_index + 1,
             reserved_send_count = reserved_send_count + 1,
@@ -1674,7 +1676,7 @@ export class IlinkSqliteStore {
         fail('attempt_conflict', 'iLink reply reservation lost its race');
       }
     }
-    this.database.prepare(`
+    this.#database.prepare(`
         INSERT INTO send_attempts (
           attempt_key, source_message_key, open_kfid, external_userid,
           channel, reply_window_id, send_index, source, sent_type,
@@ -1705,7 +1707,7 @@ export class IlinkSqliteStore {
         now,
         now,
       );
-    const attempt = mapAttempt(rowAs<AttemptRow>(this.database.prepare(`
+    const attempt = mapAttempt(rowAs<AttemptRow>(this.#database.prepare(`
         SELECT * FROM send_attempts WHERE attempt_key = ?
       `).get(attemptKey))!);
     return rejection
@@ -1728,7 +1730,7 @@ export class IlinkSqliteStore {
       this.#sessionWindow(input.sessionToken),
       now,
     );
-    const attempt = rowAs<AttemptRow>(this.database.prepare(`
+    const attempt = rowAs<AttemptRow>(this.#database.prepare(`
       SELECT * FROM send_attempts
       WHERE attempt_key = ? AND channel = 'weixin_ilink'
     `).get(input.attemptId));
@@ -1752,7 +1754,7 @@ export class IlinkSqliteStore {
     const now = this.#now(input.now);
     return this.#transaction(() => {
       const { window, attempt } = this.#pendingReplyAttempt(input, now);
-      const sending = this.database.prepare(`
+      const sending = this.#database.prepare(`
         SELECT 1 FROM send_attempts
         WHERE channel = 'weixin_ilink' AND status = 'sending'
           AND open_kfid = ? AND external_userid = ?
@@ -1761,11 +1763,11 @@ export class IlinkSqliteStore {
       if (sending) {
         fail('send_in_progress', 'Another iLink send is already in progress');
       }
-      const attemptUpdate = this.database.prepare(`
+      const attemptUpdate = this.#database.prepare(`
         UPDATE send_attempts SET status = 'sending', updated_at = ?
         WHERE attempt_key = ? AND status = 'pending'
       `).run(now, attempt.attempt_key);
-      const windowUpdate = this.database.prepare(`
+      const windowUpdate = this.#database.prepare(`
         UPDATE ilink_reply_windows
         SET reserved_send_count = reserved_send_count - 1,
             transmitted_send_count = transmitted_send_count + 1,
@@ -1777,7 +1779,7 @@ export class IlinkSqliteStore {
       if (attemptUpdate.changes !== 1 || windowUpdate.changes !== 1) {
         fail('attempt_conflict', 'iLink reply attempt start lost its race');
       }
-      return mapAttempt(rowAs<AttemptRow>(this.database.prepare(`
+      return mapAttempt(rowAs<AttemptRow>(this.#database.prepare(`
         SELECT * FROM send_attempts WHERE attempt_key = ?
       `).get(attempt.attempt_key))!);
     });

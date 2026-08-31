@@ -22,8 +22,8 @@ import {
   type IlinkAccountKey,
 } from '../../src/ilink/store-types.ts';
 import {
-  SqliteStore,
   stableMessageKey,
+  type CoreState,
 } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
@@ -38,7 +38,7 @@ interface AccountFixture {
 }
 
 interface StoreFixture {
-  readonly store: SqliteStore;
+  readonly store: CoreState;
   readonly ilink: IlinkSqliteStore;
   readonly box: IlinkSecretBox;
   now(): number;
@@ -51,10 +51,10 @@ async function fixture(t: TestContext): Promise<StoreFixture> {
   });
   let currentTime = 1_900_000_000_000;
   const clock = () => currentTime;
-  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock }));
-  const ilink = new IlinkSqliteStore({ store, clock });
+  const persistence = temp.openPersistence({ clock });
+  const store = persistence.core;
+  const ilink = persistence.createIlinkStore({ clock });
   const box = new IlinkSecretBox(configuredSecretKey);
-  t.onTestFinished(() => store.close());
   return {
     store,
     ilink,

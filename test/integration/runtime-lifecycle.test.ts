@@ -11,7 +11,8 @@ import { createApp } from '../../src/app.ts';
 import { createConfig, type AppConfig } from '../../src/config.ts';
 import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { createRuntime } from '../../src/runtime.ts';
-import { SqliteStore, stableMessageKey } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
+import { stableMessageKey } from '../../src/state/sqlite-store.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 async function workspace(t: TestContext): Promise<string> {
@@ -52,7 +53,8 @@ test('disabled runtime exposes complete no-op lifecycle', async () => {
 test('iLink-only runtime remains active without WeChat callback or KF API', async (t) => {
   const directory = await workspace(t);
   const databaseFile = path.join(directory, 'ilink-only.sqlite');
-  const previous = new SqliteStore({ filePath: databaseFile });
+  const previousPersistence = new StatePersistence({ filePath: databaseFile });
+  const previous = previousPersistence.core;
   previous.ingestSyncPage({
     openKfId: 'wk-disabled-channel',
     nextCursor: 'legacy-live',
@@ -71,7 +73,7 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
       externalUserId: 'wm-disabled-channel', text: 'must remain deferred',
     })],
   });
-  previous.close();
+  previousPersistence.close();
   const config = createConfig({
     ILINK_ENABLED: 'true',
     HARNESS_DB_FILE: databaseFile,
@@ -93,8 +95,9 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
   }
   await runtime.close();
 
-  const preserved = new SqliteStore({ filePath: databaseFile });
-  t.onTestFinished(() => preserved.close());
+  const preservedPersistence = new StatePersistence({ filePath: databaseFile });
+  const preserved = preservedPersistence.core;
+  t.onTestFinished(() => preservedPersistence.close());
   assert.deepEqual({
     live: preserved.getInbound(
       stableMessageKey('wk-disabled-channel', 'legacy-live'),
@@ -143,13 +146,14 @@ test('MCP IPC startup failure rolls back SQLite and the instance lock', async (t
 test('runtime readiness does not wait for a blocked startup catch-up backlog', async (t) => {
   const directory = await workspace(t);
   const databaseFile = path.join(directory, 'catch-up.sqlite');
-  const seeded = new SqliteStore({ filePath: databaseFile });
+  const seededPersistence = new StatePersistence({ filePath: databaseFile });
+  const seeded = seededPersistence.core;
   seeded.ingestSyncPage({
     openKfId: 'wk-catch-up',
     nextCursor: 'cursor-before-start',
     messages: [],
   });
-  seeded.close();
+  seededPersistence.close();
 
   let releaseSync!: () => void;
   const blockedSync = new Promise<void>((resolve) => { releaseSync = resolve; });

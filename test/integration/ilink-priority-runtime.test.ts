@@ -24,7 +24,7 @@ import {
 } from '../../src/ilink/store-types.ts';
 import { WechatKfToolExecutor } from '../../src/mcp/wechat-kf-executor.ts';
 import { ConversationProcessor } from '../../src/services/conversation-processor.ts';
-import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import type { CoreState } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 const NOW = 1_800_000_000_000;
@@ -183,7 +183,7 @@ interface IlinkAccountFixture {
 }
 
 interface PriorityHarness {
-  readonly store: SqliteStore;
+  readonly store: CoreState;
   readonly ilinkStore: IlinkSqliteStore;
   readonly agent: ControlledAgent;
   readonly processor: ConversationProcessor;
@@ -206,10 +206,9 @@ async function createHarness(
   const temporary = await createTempSqlite(t, {
     prefix: 'ilink-priority-runtime-',
   });
-  const store = temporary.trackSqlite(
-    new SqliteStore({ filePath: temporary.filePath, clock: () => NOW }),
-  );
-  const ilinkStore = new IlinkSqliteStore({ store, clock: () => NOW });
+  const persistence = temporary.openPersistence({ clock: () => NOW });
+  const store = persistence.core;
+  const ilinkStore = persistence.createIlinkStore({ clock: () => NOW });
   const secretBox = new IlinkSecretBox(Buffer.alloc(32, 37).toString('base64url'));
   let wecomSendSequence = 0;
   const wecom = new WechatKfToolExecutor({
@@ -375,7 +374,7 @@ async function createHarness(
     await processor.waitForIdle();
     await ilink.waitForIdle();
     await wecom.close();
-    store.close();
+    persistence.close();
   });
 
   return {

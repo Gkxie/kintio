@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { test } from 'vitest';
 
 import {
-  IlinkSqliteStore,
   IlinkSqliteStoreError,
   type IlinkPollPageEntry,
 } from '../../src/ilink/sqlite-store.ts';
@@ -19,7 +18,6 @@ import {
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import {
-  SqliteStore,
   stableClientMessageId,
   stableMessageKey,
 } from '../../src/state/sqlite-store.ts';
@@ -110,14 +108,22 @@ async function fixture(testContext: Parameters<typeof createTempSqlite>[0]) {
   });
   let now = 1_800_000_000_000;
   const clock = () => now;
-  const store = temp.trackSqlite(new SqliteStore({ filePath: temp.filePath, clock }));
-  const ilink = new IlinkSqliteStore({ store, clock });
+  const persistence = temp.openInjectedPersistenceForTest({ clock });
+  const store = persistence.core;
+  const ilink = persistence.createIlinkStore({ clock });
   const box = new IlinkSecretBox(configuredSecretKey);
   const advance = (milliseconds = 1) => {
     now += milliseconds;
     return now;
   };
-  return { store, ilink, box, advance, now: () => now };
+  return {
+    store,
+    ilink,
+    database: persistence.database,
+    box,
+    advance,
+    now: () => now,
+  };
 }
 
 test('registers one-to-one encrypted accounts and fences cursor generations', async (t) => {
@@ -233,7 +239,7 @@ test('registers one-to-one encrypted accounts and fences cursor generations', as
 });
 
 test('commits cursor, inbox, encrypted windows, and out-of-order ordering atomically', async (t) => {
-  const { store, ilink, box, now } = await fixture(t);
+  const { store, ilink, database, box, now } = await fixture(t);
   ilink.registerAccount({
     providerAccountId: botId,
     ownerPeerId,
@@ -326,7 +332,7 @@ test('commits cursor, inbox, encrypted windows, and out-of-order ordering atomic
   assert.equal(committed.replyWindowIds.length, 2);
   assert.equal(committed.cursor, 'cursor-1');
 
-  const inbox = store.database.prepare(`
+  const inbox = database.prepare(`
     SELECT message_key, open_kfid, external_userid, channel, status, payload_json
     FROM inbound_messages ORDER BY inbox_seq
   `).all() as Array<{
@@ -358,7 +364,7 @@ test('commits cursor, inbox, encrypted windows, and out-of-order ordering atomic
   }));
   assert.match(newestLocator.downloadUrl, /newest/u);
 
-  const windows = store.database.prepare(`
+  const windows = database.prepare(`
     SELECT reply_window_id, source_message_key, provider_seq, state
     FROM ilink_reply_windows ORDER BY provider_seq DESC
   `).all() as Array<{
@@ -374,7 +380,7 @@ test('commits cursor, inbox, encrypted windows, and out-of-order ordering atomic
   assert.equal(ilink.getReplyWindowSecret(windows[1]!.reply_window_id), undefined);
   const open = windows[0];
   assert.ok(open);
-  const openWindowId = Number((store.database.prepare(`
+  const openWindowId = Number((database.prepare(`
     SELECT reply_window_id FROM ilink_reply_windows
     WHERE source_message_key = ?
   `).get(open.source_message_key) as { reply_window_id: number }).reply_window_id);
@@ -438,14 +444,14 @@ test('commits cursor, inbox, encrypted windows, and out-of-order ordering atomic
   });
   assert.deepEqual(late.insertedMessageKeys, []);
   assert.equal(store.getAgentSession(newestSession.token).replyWindowId, openWindowId);
-  assert.equal(Number((store.database.prepare(`
+  assert.equal(Number((database.prepare(`
     SELECT COUNT(*) AS count FROM ilink_reply_windows
   `).get() as { count: number }).count), 3);
   assert.deepEqual(store.foreignKeyCheck(), []);
 });
 
 test('pair or generation failures roll back cursor, inbox, and reply windows', async (t) => {
-  const { store, ilink, box, now } = await fixture(t);
+  const { store, ilink, database, box, now } = await fixture(t);
   ilink.registerAccount({
     providerAccountId: botId,
     ownerPeerId,
@@ -478,10 +484,10 @@ test('pair or generation failures roll back cursor, inbox, and reply windows', a
     (error: unknown) => errorCode(error, 'pair_mismatch'),
   );
   assert.equal(ilink.getCursor(accountKey)?.cursor, 'cursor-0');
-  assert.equal(Number((store.database.prepare(`
+  assert.equal(Number((database.prepare(`
     SELECT COUNT(*) AS count FROM inbound_messages
   `).get() as { count: number }).count), 0);
-  assert.equal(Number((store.database.prepare(`
+  assert.equal(Number((database.prepare(`
     SELECT COUNT(*) AS count FROM ilink_reply_windows
   `).get() as { count: number }).count), 0);
 
@@ -517,7 +523,7 @@ test('pair or generation failures roll back cursor, inbox, and reply windows', a
 });
 
 test('same-millisecond client IDs use delivery order when upstream seq is absent', async (t) => {
-  const { store, ilink, box, now } = await fixture(t);
+  const { ilink, database, box, now } = await fixture(t);
   ilink.registerAccount({
     providerAccountId: botId, ownerPeerId, baseUrl,
     encryptedBotToken: botToken(box), now: now(),
@@ -540,7 +546,7 @@ test('same-millisecond client IDs use delivery order when upstream seq is absent
       { ...pageEntry(box, second, 2), candidate: { ...second, sync: { cursor: '', index: 1 } } },
     ],
   });
-  const open = store.database.prepare(`
+  const open = database.prepare(`
     SELECT inbound.msgid FROM ilink_reply_windows AS window
     JOIN inbound_messages AS inbound ON inbound.message_key = window.source_message_key
     WHERE window.state = 'open'
@@ -555,7 +561,7 @@ test('same-millisecond client IDs use delivery order when upstream seq is absent
     nextCursor: 'same-ms-late',
     messages: [pageEntry(box, late, 3)],
   });
-  const stillOpen = store.database.prepare(`
+  const stillOpen = database.prepare(`
     SELECT inbound.msgid FROM ilink_reply_windows AS window
     JOIN inbound_messages AS inbound ON inbound.message_key = window.source_message_key
     WHERE window.state = 'open'
@@ -576,7 +582,7 @@ test('same-millisecond client IDs use delivery order when upstream seq is absent
     nextCursor: 'same-ms-incomparable',
     messages: [pageEntry(box, incomparable, 4)],
   });
-  const finalOpen = store.database.prepare(`
+  const finalOpen = database.prepare(`
     SELECT inbound.msgid FROM ilink_reply_windows AS window
     JOIN inbound_messages AS inbound ON inbound.message_key = window.source_message_key
     WHERE window.state = 'open'
@@ -585,7 +591,7 @@ test('same-millisecond client IDs use delivery order when upstream seq is absent
 });
 
 test('startup backlog stays deferred and is absorbed into the next live direction', async (t) => {
-  const { store, ilink, box, now } = await fixture(t);
+  const { store, ilink, database, box, now } = await fixture(t);
   ilink.registerAccount({
     providerAccountId: botId,
     ownerPeerId,
@@ -613,7 +619,7 @@ test('startup backlog stays deferred and is absorbed into the next live directio
   });
   assert.deepEqual(backlog.insertedMessageKeys, []);
   assert.equal(backlog.deferredMessageCount, 1);
-  assert.equal(Number((store.database.prepare(`
+  assert.equal(Number((database.prepare(`
     SELECT deferred FROM inbound_messages WHERE msgid = 'message:30'
   `).get() as { deferred: number }).deferred), 1);
 
@@ -652,7 +658,7 @@ test('startup backlog stays deferred and is absorbed into the next live directio
     messages: [pageEntry(box, live, 32)],
   });
   assert.equal(promoted.insertedMessageKeys.length, 1);
-  const rows = store.database.prepare(`
+  const rows = database.prepare(`
     SELECT msgid, status, deferred, payload_json
     FROM inbound_messages ORDER BY inbox_seq
   `).all() as Array<{
@@ -670,7 +676,7 @@ test('startup backlog stays deferred and is absorbed into the next live directio
 });
 
 test('iLink image locators are encrypted and retained while their inbox is actionable', async (t) => {
-  const { store, ilink, box, now, advance } = await fixture(t);
+  const { store, ilink, database, box, now, advance } = await fixture(t);
   ilink.registerAccount({
     providerAccountId: botId,
     ownerPeerId,
@@ -716,7 +722,7 @@ test('iLink image locators are encrypted and retained while their inbox is actio
     }],
   });
   const messageKey = committed.insertedMessageKeys[0]!;
-  const payload = String((store.database.prepare(`
+  const payload = String((database.prepare(`
     SELECT payload_json FROM inbound_messages WHERE message_key = ?
   `).get(messageKey) as { payload_json: string }).payload_json);
   for (const secret of [
@@ -765,7 +771,7 @@ test('iLink image locators are encrypted and retained while their inbox is actio
 });
 
 test('reply reservations atomically enforce quota and one in-flight send', async (t) => {
-  const { store, ilink, box, now } = await fixture(t);
+  const { store, ilink, database, box, now } = await fixture(t);
   ilink.registerAccount({
     providerAccountId: botId,
     ownerPeerId,
@@ -793,7 +799,7 @@ test('reply reservations atomically enforce quota and one in-flight send', async
     nextCursor: 'cursor-1',
     messages: [pageEntry(box, inbound, 7)],
   });
-  const source = store.database.prepare(`
+  const source = database.prepare(`
     SELECT message_key FROM inbound_messages LIMIT 1
   `).get() as { message_key: string };
   store.claimInbound({ messageKey: source.message_key });
@@ -873,7 +879,7 @@ test('reply reservations atomically enforce quota and one in-flight send', async
 });
 
 test('one primary can finalize attempts from separate ten-send token generations', async (t) => {
-  const { store, ilink, box, now } = await fixture(t);
+  const { store, ilink, database, box, now } = await fixture(t);
   ilink.registerAccount({
     providerAccountId: botId,
     ownerPeerId,
@@ -908,7 +914,7 @@ test('one primary can finalize attempts from separate ten-send token generations
     clientInputId: followup,
   });
   store.confirmInboundSteered(followup, { codexTurnId: 'turn-51' });
-  const windows = store.database.prepare(`
+  const windows = database.prepare(`
     SELECT reply_window_id FROM ilink_reply_windows ORDER BY source_inbox_seq
   `).all() as Array<{ reply_window_id: number }>;
   assert.equal(windows.length, 2);
@@ -916,7 +922,7 @@ test('one primary can finalize attempts from separate ten-send token generations
   for (let index = 0; index < 11; index += 1) {
     const attemptId = `sa_cross_window_${index}`;
     attemptIds.push(attemptId);
-    store.database.prepare(`
+    database.prepare(`
       INSERT INTO send_attempts (
         attempt_key, source_message_key, open_kfid, external_userid,
         channel, reply_window_id, send_index, source, sent_type,

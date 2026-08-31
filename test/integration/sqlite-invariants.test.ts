@@ -6,12 +6,13 @@ import { test, type TestContext } from 'vitest';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  SqliteStore,
   type InboundStatus,
+  type CoreState,
 } from '../../src/state/sqlite-store.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
 import type { ImageAttachment, NormalizedMessage } from '../../src/types.ts';
-import { inspectAttempt } from '../support/sqlite-inspect.ts';
 import { seedPendingAttempts } from '../support/pending-attempt.ts';
+import { withTestDatabase } from '../support/temp-sqlite.ts';
 import { testWecomMessage } from '../support/wecom-message.ts';
 
 function message(id: string, externalUserId = 'wm-one'): NormalizedMessage {
@@ -22,18 +23,36 @@ function message(id: string, externalUserId = 'wm-one'): NormalizedMessage {
   });
 }
 
-function harness(t: TestContext): { store: SqliteStore; filePath: string } {
+function harness(t: TestContext): {
+  persistence: StatePersistence;
+  store: CoreState;
+  filePath: string;
+} {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlite-invariant-'));
   const filePath = path.join(directory, 'state.sqlite');
-  const store = new SqliteStore({ filePath });
+  const persistence = new StatePersistence({ filePath });
+  const store = persistence.core;
   t.onTestFinished(() => {
-    store.close();
+    persistence.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  return { store, filePath };
+  return { persistence, store, filePath };
 }
 
-function ingest(store: SqliteStore, values: readonly NormalizedMessage[]): string[] {
+function reopen(t: TestContext, filePath: string): CoreState {
+  const persistence = new StatePersistence({ filePath });
+  t.onTestFinished(() => persistence.close());
+  return persistence.core;
+}
+
+function schemaVersion(filePath: string): number {
+  return withTestDatabase(filePath, (database) => Number(
+    (database.prepare('PRAGMA user_version').get() as { user_version: number })
+      .user_version,
+  ));
+}
+
+function ingest(store: CoreState, values: readonly NormalizedMessage[]): string[] {
   return store.ingestSyncPage({
     openKfId: 'wk-one',
     expectedCursor: store.getCursor('wk-one'),
@@ -42,7 +61,7 @@ function ingest(store: SqliteStore, values: readonly NormalizedMessage[]): strin
   }).insertedMessageKeys;
 }
 
-function reserveText(store: SqliteStore, id: string): string {
+function reserveText(store: CoreState, id: string): string {
   const [messageKey] = ingest(store, [message(id)]);
   assert.ok(messageKey);
   store.claimInbound({ messageKey });
@@ -58,7 +77,7 @@ test('invalid journal mode and newer schema fail before runtime use', (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlite-schema-'));
   t.onTestFinished(() => fs.rmSync(directory, { recursive: true, force: true }));
   assert.throws(
-    () => new SqliteStore({
+    () => new StatePersistence({
       filePath: path.join(directory, 'bad-mode.sqlite'),
       journalMode: 'MEMORY' as unknown as 'WAL',
     }),
@@ -69,7 +88,7 @@ test('invalid journal mode and newer schema fail before runtime use', (t) => {
   future.exec('PRAGMA user_version = 999');
   future.close();
   assert.throws(
-    () => new SqliteStore({ filePath: futurePath }),
+    () => new StatePersistence({ filePath: futurePath }),
     /newer than supported/u,
   );
   const retiredPath = path.join(directory, 'retired.sqlite');
@@ -77,13 +96,13 @@ test('invalid journal mode and newer schema fail before runtime use', (t) => {
   retired.exec('PRAGMA user_version = 10');
   retired.close();
   assert.throws(
-    () => new SqliteStore({ filePath: retiredPath }),
+    () => new StatePersistence({ filePath: retiredPath }),
     /no longer supported/u,
   );
 });
 
 test('schema v11 removes retired state without losing durable facts', (t) => {
-  const { store, filePath } = harness(t);
+  const { persistence, store, filePath } = harness(t);
   const messageKey = reserveText(store, 'v11-preserved');
   const attempt = store.beginNextSend();
   assert.ok(attempt);
@@ -100,10 +119,12 @@ test('schema v11 removes retired state without losing durable facts', (t) => {
   assert.ok(staleAttempt);
   const [absorbedMessageKey] = ingest(store, [message('v11-absorbed-context')]);
   assert.ok(absorbedMessageKey);
-  store.database.prepare(`
-    UPDATE inbound_messages SET status = 'absorbed' WHERE message_key = ?
-  `).run(absorbedMessageKey);
-  store.close();
+  withTestDatabase(filePath, (database) => {
+    database.prepare(`
+      UPDATE inbound_messages SET status = 'absorbed' WHERE message_key = ?
+    `).run(absorbedMessageKey);
+  });
+  persistence.close();
 
   const v11 = new DatabaseSync(filePath);
   v11.exec(`
@@ -145,17 +166,19 @@ test('schema v11 removes retired state without losing durable facts', (t) => {
   `);
   v11.close();
 
-  const upgraded = new SqliteStore({ filePath });
-  t.onTestFinished(() => upgraded.close());
+  const upgradedPersistence = new StatePersistence({ filePath });
+  const upgraded = upgradedPersistence.core;
+  t.onTestFinished(() => upgradedPersistence.close());
   assert.equal(
-    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
-      .user_version,
+    withTestDatabase(filePath, (database) =>
+      (database.prepare('PRAGMA user_version').get() as { user_version: number })
+        .user_version),
     21,
   );
   assert.throws(() => upgraded.getAgentSession(session.token), /closed/u);
-  const inboundSql = String((upgraded.database.prepare(`
-    SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inbound_messages'
-  `).get() as { sql: string }).sql);
+  const inboundSql = withTestDatabase(filePath, (database) => String((database.prepare(`
+      SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'inbound_messages'
+    `).get() as { sql: string }).sql));
   assert.equal(inboundSql.includes("'held'"), false);
   assert.equal(upgraded.getInbound(absorbedMessageKey)?.payload, undefined);
   assert.equal(upgraded.getInbound(activeMessageKey)?.status, 'suppressed');
@@ -172,10 +195,10 @@ test('schema v11 removes retired state without losing durable facts', (t) => {
 });
 
 test('schema v12 adds durable deferred priority without losing inbox rows', (t) => {
-  const { store, filePath } = harness(t);
+  const { persistence, store, filePath } = harness(t);
   const [messageKey] = ingest(store, [message('v12-priority')]);
   assert.ok(messageKey);
-  store.close();
+  persistence.close();
   const v12 = new DatabaseSync(filePath);
   v12.exec(`
     DROP TRIGGER ilink_session_window_insert_guard;
@@ -202,19 +225,14 @@ test('schema v12 adds durable deferred priority without losing inbox rows', (t) 
   `);
   v12.close();
 
-  const upgraded = new SqliteStore({ filePath });
-  t.onTestFinished(() => upgraded.close());
-  assert.equal(
-    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
-      .user_version,
-    21,
-  );
+  const upgraded = reopen(t, filePath);
+  assert.equal(schemaVersion(filePath), 21);
   assert.equal(upgraded.getInbound(messageKey)?.deferred, false);
   assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
 });
 
 test('schema v13 adds durable archived-memory bindings', (t) => {
-  const { store, filePath } = harness(t);
+  const { persistence, store, filePath } = harness(t);
   const [messageKey] = ingest(store, [message('v13-memory')]);
   assert.ok(messageKey);
   store.setConversationThread({
@@ -222,7 +240,7 @@ test('schema v13 adds durable archived-memory bindings', (t) => {
     externalUserId: 'wm-one',
     threadId: '01900000-0000-7000-8000-000000000002',
   });
-  store.close();
+  persistence.close();
   const v13 = new DatabaseSync(filePath);
   v13.exec(`
     DROP TRIGGER ilink_session_window_insert_guard;
@@ -247,13 +265,8 @@ test('schema v13 adds durable archived-memory bindings', (t) => {
   `);
   v13.close();
 
-  const upgraded = new SqliteStore({ filePath });
-  t.onTestFinished(() => upgraded.close());
-  assert.equal(
-    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
-      .user_version,
-    21,
-  );
+  const upgraded = reopen(t, filePath);
+  assert.equal(schemaVersion(filePath), 21);
   assert.equal(upgraded.getConversation('wk-one', 'wm-one')?.memoryThreadId, '');
   assert.ok(upgraded.getInbound(messageKey));
   assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
@@ -261,10 +274,10 @@ test('schema v13 adds durable archived-memory bindings', (t) => {
 });
 
 test('schema v17 adds iLink invariant triggers and enrollment audit without rewriting facts', (t) => {
-  const { store, filePath } = harness(t);
+  const { persistence, store, filePath } = harness(t);
   const [messageKey] = ingest(store, [message('v17-ilink-invariants')]);
   assert.ok(messageKey);
-  store.close();
+  persistence.close();
   const v17 = new DatabaseSync(filePath);
   v17.exec(`
     DROP TRIGGER ilink_session_window_insert_guard;
@@ -280,34 +293,31 @@ test('schema v17 adds iLink invariant triggers and enrollment audit without rewr
   `);
   v17.close();
 
-  const upgraded = new SqliteStore({ filePath });
-  t.onTestFinished(() => upgraded.close());
-  assert.equal(
-    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
-      .user_version,
-    21,
-  );
+  const upgraded = reopen(t, filePath);
+  assert.equal(schemaVersion(filePath), 21);
   assert.ok(upgraded.getInbound(messageKey));
-  assert.equal(Number((upgraded.database.prepare(`
-    SELECT COUNT(*) AS count FROM sqlite_master
-    WHERE type = 'trigger' AND name LIKE 'ilink_%_guard'
-  `).get() as { count: number }).count), 7);
-  assert.throws(() => upgraded.database.prepare(`
-    INSERT INTO agent_sessions (
-      token_hash, source_message_key, open_kfid, external_userid,
-      channel, reply_window_id, boundary_inbox_seq, memory_thread_id,
-      media_json, expires_at, closed_at, created_at, updated_at
-    )
-    SELECT 'bad-ilink-session', message_key, open_kfid, external_userid,
-           'weixin_ilink', NULL, inbox_seq, '', '[]', 9999999999999, 0, 1, 1
-    FROM inbound_messages WHERE message_key = ?
-  `).run(messageKey), /channel\/window mismatch/u);
+  withTestDatabase(filePath, (database) => {
+    assert.equal(Number((database.prepare(`
+      SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type = 'trigger' AND name LIKE 'ilink_%_guard'
+    `).get() as { count: number }).count), 7);
+    assert.throws(() => database.prepare(`
+      INSERT INTO agent_sessions (
+        token_hash, source_message_key, open_kfid, external_userid,
+        channel, reply_window_id, boundary_inbox_seq, memory_thread_id,
+        media_json, expires_at, closed_at, created_at, updated_at
+      )
+      SELECT 'bad-ilink-session', message_key, open_kfid, external_userid,
+             'weixin_ilink', NULL, inbox_seq, '', '[]', 9999999999999, 0, 1, 1
+      FROM inbound_messages WHERE message_key = ?
+    `).run(messageKey), /channel\/window mismatch/u);
+  });
   assert.deepEqual(upgraded.foreignKeyCheck(), []);
 });
 
 test('schema v19 adds cleanup indexes without rewriting iLink tables', (t) => {
-  const { store, filePath } = harness(t);
-  store.close();
+  const { persistence, filePath } = harness(t);
+  persistence.close();
   const v19 = new DatabaseSync(filePath);
   v19.exec(`
     DROP INDEX ilink_reply_windows_expiry_idx;
@@ -315,24 +325,19 @@ test('schema v19 adds cleanup indexes without rewriting iLink tables', (t) => {
     PRAGMA user_version = 19;
   `);
   v19.close();
-  const upgraded = new SqliteStore({ filePath });
-  t.onTestFinished(() => upgraded.close());
-  assert.equal(
-    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
-      .user_version,
-    21,
-  );
-  assert.equal(Number((upgraded.database.prepare(`
-    SELECT COUNT(*) AS count FROM sqlite_master
-    WHERE type = 'index' AND name IN (
-      'ilink_reply_windows_expiry_idx', 'ilink_reply_windows_updated_idx'
-    )
-  `).get() as { count: number }).count), 2);
+  const upgraded = reopen(t, filePath);
+  assert.equal(schemaVersion(filePath), 21);
+  assert.equal(withTestDatabase(filePath, (database) => Number((database.prepare(`
+      SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type = 'index' AND name IN (
+        'ilink_reply_windows_expiry_idx', 'ilink_reply_windows_updated_idx'
+      )
+    `).get() as { count: number }).count)), 2);
   assert.deepEqual(upgraded.foreignKeyCheck(), []);
 });
 
 test('schema v21 drops retired binding without rewriting historical sends', (t) => {
-  const { store, filePath } = harness(t);
+  const { persistence, store, filePath } = harness(t);
   const [messageKey] = ingest(store, [message('v20-maintainer-removal')]);
   assert.ok(messageKey);
   seedPendingAttempts(store, messageKey, [
@@ -359,12 +364,14 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
   const sending = store.beginNextSend();
   assert.equal(sending?.attemptId, retiredAttempt.attemptId);
   store.completeSend(retiredAttempt.attemptId, { wecomMsgId: 'retired-accepted' });
-  store.database.prepare(`
-    INSERT INTO delivery_failures (
-      wecom_msgid, fail_type, observed_at, matched_attempt_key, matched_at
-    ) VALUES ('retired-notification-failure', 13, 1, ?, 1)
-  `).run(retiredAttempt.attemptId);
-  store.close();
+  withTestDatabase(filePath, (database) => {
+    database.prepare(`
+      INSERT INTO delivery_failures (
+        wecom_msgid, fail_type, observed_at, matched_attempt_key, matched_at
+      ) VALUES ('retired-notification-failure', 13, 1, ?, 1)
+    `).run(retiredAttempt.attemptId);
+  });
+  persistence.close();
 
   const v20 = new DatabaseSync(filePath);
   v20.exec(`
@@ -386,17 +393,12 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
   v20.exec('PRAGMA user_version = 20');
   v20.close();
 
-  const upgraded = new SqliteStore({ filePath });
-  t.onTestFinished(() => upgraded.close());
-  assert.equal(
-    (upgraded.database.prepare('PRAGMA user_version').get() as { user_version: number })
-      .user_version,
-    21,
-  );
-  assert.equal(Number((upgraded.database.prepare(`
-    SELECT COUNT(*) AS count FROM sqlite_master
-    WHERE type = 'table' AND name = 'maintainer_binding'
-  `).get() as { count: number }).count), 0);
+  const upgraded = reopen(t, filePath);
+  assert.equal(schemaVersion(filePath), 21);
+  assert.equal(withTestDatabase(filePath, (database) => Number((database.prepare(`
+      SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type = 'table' AND name = 'maintainer_binding'
+    `).get() as { count: number }).count)), 0);
   assert.deepEqual(upgraded.listMessageAttempts(messageKey).map((attempt) => ({
     source: attempt.source,
     status: attempt.status,
@@ -406,10 +408,11 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
     { source: 'maintainer_notify', status: 'failed', errorCode: 'feature_removed' },
     { source: 'test_fixture', status: 'pending', errorCode: '' },
   ]);
-  assert.deepEqual({ ...(upgraded.database.prepare(`
-    SELECT matched_attempt_key, matched_at FROM delivery_failures
-    WHERE wecom_msgid = 'retired-notification-failure'
-  `).get() as { matched_attempt_key: string; matched_at: number }) }, {
+  const failure = withTestDatabase(filePath, (database) => database.prepare(`
+      SELECT matched_attempt_key, matched_at FROM delivery_failures
+      WHERE wecom_msgid = 'retired-notification-failure'
+    `).get() as { matched_attempt_key: string; matched_at: number });
+  assert.deepEqual({ ...failure }, {
     matched_attempt_key: retiredAttempt.attemptId, matched_at: 1,
   });
   assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
@@ -417,15 +420,17 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
 });
 
 test('status CHECK rejects invalid rows and filters remain parameterized', (t) => {
-  const { store } = harness(t);
-  assert.throws(() =>
-    store.database.prepare(`
-      INSERT INTO inbound_messages (
-        message_key, open_kfid, msgid, origin, msg_type, status,
-        created_at, updated_at
-      ) VALUES ('bad', 'wk-one', 'bad', 'customer', 'text', 'bogus', 1, 1)
-    `).run(),
-  /CHECK constraint/u);
+  const { store, filePath } = harness(t);
+  withTestDatabase(filePath, (database) => {
+    assert.throws(() =>
+      database.prepare(`
+        INSERT INTO inbound_messages (
+          message_key, open_kfid, msgid, origin, msg_type, status,
+          created_at, updated_at
+        ) VALUES ('bad', 'wk-one', 'bad', 'customer', 'text', 'bogus', 1, 1)
+      `).run(),
+    /CHECK constraint/u);
+  });
   const malicious = "received') OR 1=1 --" as unknown as InboundStatus;
   assert.deepEqual(store.listPendingInbound({ statuses: [malicious] }), []);
   assert.throws(
@@ -453,7 +458,7 @@ test('steering rejects cross-conversation and non-steerable primaries', (t) => {
 });
 
 test('every later actionable customer state invalidates an older session', (t) => {
-  const { store } = harness(t);
+  const { store, filePath } = harness(t);
   const [primary, later] = ingest(store, [message('primary'), message('later')]);
   assert.ok(primary && later);
   store.claimInbound({ messageKey: primary });
@@ -462,9 +467,11 @@ test('every later actionable customer state invalidates an older session', (t) =
     'completed', 'steering', 'steered', 'absorbed', 'suppressed',
   ];
   for (const status of statuses) {
-    store.database.prepare(`
-      UPDATE inbound_messages SET status = ? WHERE message_key = ?
-    `).run(status, later);
+    withTestDatabase(filePath, (database) => {
+      database.prepare(`
+        UPDATE inbound_messages SET status = ? WHERE message_key = ?
+      `).run(status, later);
+    });
     const session = store.createAgentSession({ messageKey: primary });
     assert.throws(() => store.reserveAgentSend({
       sessionToken: session.token,
@@ -556,7 +563,7 @@ test('send terminal states cannot reverse and unknown attempts reject', (t) => {
   assert.throws(() => store.completeSend('missing', { wecomMsgId: 'wx' }), /Unknown/u);
   assert.throws(() => store.failSend('missing', new Error('x')), /Unknown/u);
   assert.throws(() => store.markSendUncertain('missing', new Error('x')), /Unknown/u);
-  assert.equal(inspectAttempt(store.database, 'missing'), undefined);
+  assert.equal(store.getAttempt('missing'), undefined);
 
   const messageKey = reserveText(store, 'terminal');
   const attempt = store.beginNextSend();

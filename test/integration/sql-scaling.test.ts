@@ -3,7 +3,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, test } from 'vitest';
 
 import {
-  SqliteStore,
   stableMessageKey,
 } from '../../src/state/sqlite-store.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
@@ -97,11 +96,10 @@ describe.each(historySizes)('%i history rows', (size) => {
         prefix: `wechat-sql-scale-${size}-`,
         filename: 'wecom.sqlite',
       });
-      const store = temporary.trackSqlite(
-        new SqliteStore({ filePath: temporary.filePath }),
-      );
-      t.onTestFinished(() => store.close());
-      seedHistory(store.database, size);
+      const persistence = temporary.openInjectedPersistenceForTest();
+      const store = persistence.core;
+      const { database } = persistence;
+      seedHistory(database, size);
 
       const openKfId = `wk-target-${size}`;
       const externalUserId = `wm-target-${size}`;
@@ -110,7 +108,7 @@ describe.each(historySizes)('%i history rows', (size) => {
       let attemptId = '';
 
       const profile: ChangeProfile = {
-        ingest: changeDelta(store.database, () => {
+        ingest: changeDelta(database, () => {
           store.ingestSyncPage({
             openKfId,
             nextCursor: `cursor-${size}`,
@@ -123,30 +121,30 @@ describe.each(historySizes)('%i history rows', (size) => {
             })],
           });
         }),
-        thread: changeDelta(store.database, () => {
+        thread: changeDelta(database, () => {
           store.setConversationThread({
             openKfId,
             externalUserId,
             threadId: `thread-${size}`,
           });
         }),
-        claim: changeDelta(store.database, () => {
+        claim: changeDelta(database, () => {
           store.claimInbound({ messageKey });
         }),
-        finalize: changeDelta(store.database, () => {
+        finalize: changeDelta(database, () => {
           const finalized = seedPendingAttempts(store, messageKey, [{
               sendIndex: 0,
               source: 'codex_tool',
               sentType: 'text',
               payload: { msgtype: 'text', text: { content: 'constant send' } },
-            }]);
+            }], { database });
           attemptId = finalized[0]?.attemptId || '';
           assert.ok(attemptId);
         }),
-        beginSend: changeDelta(store.database, () => {
+        beginSend: changeDelta(database, () => {
           assert.equal(store.beginNextSend()?.attemptId, attemptId);
         }),
-        completeSend: changeDelta(store.database, () => {
+        completeSend: changeDelta(database, () => {
           store.completeSend(attemptId, { wecomMsgId: `wecom-target-${size}` });
         }),
       };
@@ -159,10 +157,10 @@ describe.each(historySizes)('%i history rows', (size) => {
         completeSend: 2,
       });
 
-      store.database.exec('ANALYZE');
+      database.exec('ANALYZE');
       assertUsesIndex(
         planDetails(
-          store.database,
+          database,
           'SELECT * FROM inbound_messages WHERE message_key = ?',
           [messageKey],
         ),
@@ -170,7 +168,7 @@ describe.each(historySizes)('%i history rows', (size) => {
       );
       assertUsesIndex(
         planDetails(
-          store.database,
+          database,
           `SELECT * FROM inbound_messages
            WHERE status IN (?) AND open_kfid = ? AND external_userid = ?
            ORDER BY inbox_seq LIMIT ?`,
@@ -180,7 +178,7 @@ describe.each(historySizes)('%i history rows', (size) => {
       );
       assertUsesIndex(
         planDetails(
-          store.database,
+          database,
           `SELECT * FROM send_attempts
            WHERE status = 'pending'
            ORDER BY created_at, send_index LIMIT 100`,
@@ -190,7 +188,7 @@ describe.each(historySizes)('%i history rows', (size) => {
       );
       assertUsesIndex(
         planDetails(
-          store.database,
+          database,
           `SELECT * FROM send_attempts
            WHERE open_kfid = ? AND external_userid = ?
              AND status IN ('accepted', 'failed', 'uncertain')
