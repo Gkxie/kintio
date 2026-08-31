@@ -220,31 +220,55 @@ the release, so the Environment does not repeat that approval. The publish job
 receives a short-lived OIDC credential and no reusable npm token. GitHub
 releases remain source-only and carry no uploaded assets.
 
+Release preparation uses the repository-only `kintio-release` GitHub App. Its
+installation grants only Contents write, Pull requests write, and implicit
+Metadata read access. `prepare-release.yml` exchanges the App client ID and
+private key for one short-lived installation token only after a read-only plan
+finds a non-empty `Unreleased` section. The App may update `release/next` and
+its pull request. The preparation workflow never creates Tags or Releases,
+dispatches the release workflow, requests OIDC, publishes packages, manages
+Environments, or merges `master`; the later authorization workflow also rejects
+any merge not performed by the repository owner. Store the client ID as the
+`KINTIO_RELEASE_APP_CLIENT_ID` repository variable and the private key as the
+`KINTIO_RELEASE_APP_PRIVATE_KEY` Actions secret. Do not replace them with a
+personal access token. GitHub's Contents write permission is repository-wide,
+not branch-scoped: keep direct `master` writes blocked and keep `v*` tag updates
+and deletion forbidden. GitHub does not permit the repository's built-in
+Actions integration to bypass a tag-creation rule, so Kintio instead makes Tag
+pushes inert: publication requires an explicit dispatch that independently
+proves an owner-merged Release PR. Expose the private key only to the trusted
+`prepare-release.yml` job on `master`.
+
 ## Publish a release
 
-1. Create a PR from the latest `master`.
-2. Update the version in `package.json`; `src/version.ts` must match it.
-3. Move the relevant entries under `## Unreleased` in `CHANGELOG.md` into
-   `## X.Y.Z - YYYY-MM-DD`. Include only user-observable changes, and reference
-   public issues or PRs where useful.
-4. Run `pnpm test` and inspect `npm pack --dry-run`. Before merging, wait for
-   every required PR check, including CI, CodeQL, and Gitleaks.
-5. Merge the Release PR. The owner-only `Release PR` workflow verifies the
-   branch, title, changed-file allowlist, package and runtime versions,
-   Changelog, merge commit, and version monotonicity. It then creates an
-   annotated tag at the squash commit and dispatches `release.yml` at that tag.
+1. Keep user-visible changes under `CHANGELOG.md` → `Unreleased` in ordinary
+   pull requests. Their enforced Conventional titles determine Patch versus
+   Minor while Kintio remains on `0.x`; `1.0.0` is never selected automatically.
+2. The Release App creates or updates the single `release/next` pull request.
+   It copies `Unreleased` verbatim into `## X.Y.Z` and updates only
+   `package.json`, `src/version.ts`, and `CHANGELOG.md`. If reconciliation needs
+   recovery, run `Prepare Release` from the Actions page with no inputs.
+3. Review the candidate version and Changelog, then wait for every required
+   check, including `Release plan`, CI, CodeQL, Dependency Review, CLA, and
+   Gitleaks. Do not edit the bot-owned branch; correct source notes through an
+   ordinary pull request instead.
+4. Squash Merge the Release PR. That owner merge is the sole human release
+   authorization. The `Release PR` workflow independently verifies the bot
+   identity, fixed branch, title, changed-file allowlist, package and runtime
+   versions, Changelog, merge commit, and version monotonicity. It then creates
+   an annotated tag at the squash commit and dispatches `release.yml` at that tag.
    A Tag push alone does not trigger a release; `release.yml` independently
-   verifies the same owner-created and owner-merged Release PR before publishing.
+   verifies the same bot-created and owner-merged Release PR before publishing.
    A release tag must never be deleted, moved, or reused, even if the release
    workflow fails.
-6. The read-only release verification job rechecks version monotonicity, the
+5. The read-only release verification job rechecks version monotonicity, the
    Changelog, source commit, tests, build, and dependencies, then uploads one
    npm tarball with its SHA-512 integrity.
-7. The OIDC job publishes that exact tarball and waits for npm's publish-time
+6. The OIDC job publishes that exact tarball and waits for npm's publish-time
    scan to make it installable. A tokenless job then installs the public
    Registry version before a separately permissioned job creates the GitHub
    Release.
-8. Verify npm provenance, Registry integrity, `kintio --version`, and the
+7. Verify npm provenance, Registry integrity, `kintio --version`, and the
    GitHub Release. Confirm that [SECURITY.md](SECURITY.md) lists the supported
    release line. Close linked issues only after all four checks succeed.
 
@@ -271,17 +295,22 @@ verify that:
   or deleted;
 - required checks are `PR title`, `Quality`,
   `Unit, integration, recovery, security`, `gitleaks`, `CLA`,
-  `JavaScript and TypeScript` (CodeQL), and `review` (Dependency Review);
+  `JavaScript and TypeScript` (CodeQL), `review` (Dependency Review), and
+  `Release plan`;
 - required checks use strict branch freshness so a CLA change forces open pull
   requests to synchronize and evaluate the current agreement version;
 - fork workflows require approval for all external contributors, and users
   without write access can have at most one open non-draft PR;
 - the Actions allowlist permits only GitHub-owned actions,
-  `pnpm/action-setup`, and the frozen CLA Assistant Action; actions use full
-  commit SHAs, the Gitleaks container uses an OCI digest, default tokens are
-  read-only, and Actions cannot approve pull requests;
+  `pnpm/action-setup`, the frozen CLA Assistant Action, and the exact pinned
+  `peter-evans/create-pull-request` transport; actions use full commit SHAs, the
+  Gitleaks container uses an OCI digest, default tokens are read-only, and
+  Actions cannot approve pull requests;
 - `master` rejects deletion and non-fast-forward updates, and `v*` tags reject
   updates and deletion;
+- `kintio-release` is installed only on this repository with Contents write and
+  Pull requests write, has no webhook, and its private key is stored only as the
+  `KINTIO_RELEASE_APP_PRIVATE_KEY` Actions secret;
 - `cla-signatures` rejects deletion and non-fast-forward writes, and `cla-v*`
   tags reject updates and deletion;
 - Private Vulnerability Reporting, CodeQL, Secret Scanning, and Push Protection

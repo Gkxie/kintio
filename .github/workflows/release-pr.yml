@@ -8,7 +8,7 @@ on:
 permissions: {}
 
 concurrency:
-  group: release-pr-${{ github.event.pull_request.number }}
+  group: authorize-release
   cancel-in-progress: false
 
 jobs:
@@ -16,10 +16,18 @@ jobs:
     name: Tag and dispatch release
     if: >-
       github.event.pull_request.merged == true &&
-      github.event.pull_request.user.login == github.repository_owner &&
       github.event.pull_request.merged_by.login == github.repository_owner &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      startsWith(github.event.pull_request.head.ref, 'release/v')
+      (
+        (
+          github.event.pull_request.user.login == github.repository_owner &&
+          startsWith(github.event.pull_request.head.ref, 'release/v')
+        ) ||
+        (
+          github.event.pull_request.user.login == 'kintio-release[bot]' &&
+          github.event.pull_request.head.ref == 'release/next'
+        )
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
@@ -37,6 +45,7 @@ jobs:
           MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
+          RELEASE_BOT_LOGIN: kintio-release[bot]
           REPOSITORY: ${{ github.repository }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
@@ -70,9 +79,9 @@ jobs:
             }
             return response.status === 204 ? undefined : response.json();
           };
-          const readFile = async (file) => {
+          const readFile = async (file, ref = mergeSha) => {
             const result = await api(
-              '/contents/' + file + '?ref=' + encodeURIComponent(mergeSha),
+              '/contents/' + file + '?ref=' + encodeURIComponent(ref),
             );
             if (result.type !== 'file' || typeof result.content !== 'string') {
               throw new Error('cannot read ' + file + ' from the merge commit');
@@ -81,17 +90,18 @@ jobs:
               .toString('utf8');
           };
 
-          const branch = /^release\/v(\d+\.\d+\.\d+)$/u.exec(
-            process.env.HEAD_REF || '',
+          const title = /^chore\(release\): prepare v(\d+\.\d+\.\d+)$/u.exec(
+            process.env.PR_TITLE || '',
           );
-          if (!branch) throw new Error('release branch must be release/vX.Y.Z');
-          const version = branch[1];
+          if (!title) throw new Error('Release PR title must identify vX.Y.Z');
+          const version = title[1];
           const tag = 'v' + version;
-          if (process.env.PR_TITLE !== 'chore(release): prepare ' + tag) {
-            throw new Error('Release PR title does not match ' + tag);
-          }
 
           const pull = await api('/pulls/' + pullNumber);
+          const ownerCandidate = pull.user?.login === process.env.REPOSITORY_OWNER
+            && pull.head?.ref === 'release/' + tag;
+          const botCandidate = pull.user?.login === process.env.RELEASE_BOT_LOGIN
+            && pull.head?.ref === 'release/next';
           if (
             !pull.merged
             || pull.base?.ref !== 'master'
@@ -99,6 +109,7 @@ jobs:
             || pull.merge_commit_sha !== mergeSha
             || pull.head?.ref !== process.env.HEAD_REF
             || pull.head?.repo?.full_name !== repository
+            || (!ownerCandidate && !botCandidate)
           ) {
             throw new Error('pull request identity differs from the merged event');
           }
@@ -110,6 +121,9 @@ jobs:
             );
             files.push(...items);
             if (items.length < 100) break;
+          }
+          if (files.length !== pull.changed_files) {
+            throw new Error('Release PR file enumeration is incomplete');
           }
           const required = ['CHANGELOG.md', 'package.json', 'src/version.ts'];
           const allowed = new Set([...required, 'SECURITY.md']);
@@ -127,18 +141,34 @@ jobs:
             }
           }
 
-          const [packageSource, runtimeSource, changelog] = await Promise.all([
+          const [packageSource, runtimeSource, changelog, basePackageSource, baseRuntime] = await Promise.all([
             readFile('package.json'),
             readFile('src/version.ts'),
             readFile('CHANGELOG.md'),
+            readFile('package.json', pull.base.sha),
+            readFile('src/version.ts', pull.base.sha),
           ]);
           const packageJson = JSON.parse(packageSource);
+          const basePackage = JSON.parse(basePackageSource);
           if (packageJson.name !== '@kin-tio/cli' || packageJson.version !== version) {
             throw new Error('package identity does not match the Release PR');
           }
+          const releasePackage = { ...packageJson };
+          const previousPackage = { ...basePackage };
+          delete releasePackage.version;
+          delete previousPackage.version;
+          if (JSON.stringify(releasePackage) !== JSON.stringify(previousPackage)) {
+            throw new Error('Release PR changed package.json beyond its version');
+          }
           const runtimeVersion = /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u
             .exec(runtimeSource)?.[1];
-          if (runtimeVersion !== version) {
+          const baseRuntimeVersion = /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u
+            .exec(baseRuntime)?.[1];
+          if (
+            runtimeVersion !== version
+            || baseRuntimeVersion !== basePackage.version
+            || runtimeSource !== `export const KINTIO_VERSION = '${version}';\n`
+          ) {
             throw new Error('runtime version does not match the Release PR');
           }
           const lines = changelog.split(/\r?\n/u);
@@ -148,11 +178,15 @@ jobs:
               : matches,
             [],
           );
-          const prefix = '## ' + version + ' - ';
           const releaseSections = lines.reduce(
             (matches, line, index) =>
-              line.startsWith(prefix) && /^\d{4}-\d{2}-\d{2}$/u.test(
-                line.slice(prefix.length),
+              (
+                line === '## ' + version
+                || new RegExp(
+                  '^## ' + version.replaceAll('.', '\\.')
+                    + ' - \\d{4}-\\d{2}-\\d{2}$',
+                  'u',
+                ).test(line)
               )
                 ? [...matches, index]
                 : matches,
@@ -187,7 +221,14 @@ jobs:
             }
             return 0;
           };
-          const refs = await api('/git/matching-refs/tags/v');
+          const refs = [];
+          for (let page = 1; page <= 100; page += 1) {
+            const items = await api(
+              '/git/matching-refs/tags/v?per_page=100&page=' + page,
+            );
+            refs.push(...items);
+            if (items.length < 100) break;
+          }
           const versions = refs
             .map((item) => String(item.ref || '').replace(/^refs\/tags\//u, ''))
             .filter((item) => /^v\d+\.\d+\.\d+$/u.test(item))

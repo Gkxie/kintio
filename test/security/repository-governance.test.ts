@@ -147,8 +147,10 @@ test('repository workflows preserve executable security boundaries', async () =>
     '.github/workflows/cla.yml',
     '.github/workflows/codeql.yml',
     '.github/workflows/dependency-review.yml',
+    '.github/workflows/prepare-release.yml',
     '.github/workflows/pr-title.yml',
     '.github/workflows/real-codex.yml',
+    '.github/workflows/release-plan.yml',
     '.github/workflows/release-pr.yml',
     '.github/workflows/release.yml',
     '.github/workflows/secret-scan.yml',
@@ -200,6 +202,17 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(cla, /allowlist: dependabot\[bot\]/u);
   assert.match(cla, /The pull request opener must be a primary commit author/u);
   assert.doesNotMatch(cla, /renovate|actions\/checkout/u);
+  const approvedBotSource = /else if \(!\[([\s\S]*?)\]\.includes\(pullRequest\.author\?\.login\)\)/u
+    .exec(cla)?.[1] || '';
+  const approvedGraphqlBots = new Set(
+    [...approvedBotSource.matchAll(/"([^"]+)"/gu)].map((match) => match[1]),
+  );
+  assert.deepEqual(approvedGraphqlBots, new Set([
+    'dependabot[bot]',
+    'dependabot',
+    'kintio-release[bot]',
+    'kintio-release',
+  ]));
 
   const realCodex = workflows.get('.github/workflows/real-codex.yml') || '';
   assert.match(realCodex, /^  workflow_dispatch:$/mu);
@@ -225,12 +238,42 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.doesNotMatch(realCodex, /REAL_CODEX_CONCURRENCY|upload-artifact|download-artifact/u);
   assert.match(realCodex, /name: Remove isolated Codex state\n\s+if: always\(\)/u);
 
+  const prepareRelease = workflows.get('.github/workflows/prepare-release.yml') || '';
+  assert.match(prepareRelease, /^  push:\n    branches: \[master\]$/mu);
+  assert.match(prepareRelease, /^  workflow_dispatch:$/mu);
+  assert.match(prepareRelease, /group: prepare-release\n  cancel-in-progress: true/u);
+  assert.match(prepareRelease, /vars\.KINTIO_RELEASE_APP_CLIENT_ID != ''/u);
+  assert.match(prepareRelease, /actions\/create-github-app-token@[0-9a-f]{40}/u);
+  assert.match(prepareRelease, /permission-contents: write/u);
+  assert.match(prepareRelease, /permission-pull-requests: write/u);
+  assert.match(
+    prepareRelease,
+    /APP_SLUG: \$\{\{ steps\.app-token\.outputs\.app-slug \}\}/u,
+  );
+  assert.match(prepareRelease, /test "\$APP_SLUG" = kintio-release/u);
+  assert.match(prepareRelease, /peter-evans\/create-pull-request@[0-9a-f]{40}/u);
+  assert.match(prepareRelease, /branch: release\/next/u);
+  assert.match(prepareRelease, /sign-commits: true/u);
+  assert.doesNotMatch(
+    prepareRelease,
+    /id-token: write|actions: write|packages: write|NPM_TOKEN|NODE_AUTH_TOKEN/u,
+  );
+
+  const releasePlan = workflows.get('.github/workflows/release-plan.yml') || '';
+  assert.match(releasePlan, /name: Release plan/u);
+  assert.match(releasePlan, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u);
+  assert.match(releasePlan, /path: trusted/u);
+  assert.match(releasePlan, /\.\.\/trusted\/\.github\/scripts\/reconcile-release\.ts/u);
+  assert.doesNotMatch(releasePlan, /pull_request_target|contents: write|secrets\./u);
+
   const release = workflows.get('.github/workflows/release.yml') || '';
   assert.match(release, /^  workflow_dispatch:$/mu);
   assert.doesNotMatch(release, /^  push:/mu);
   assert.match(release, /git merge-base --is-ancestor/u);
   assert.match(release, /associatedPulls\.find/u);
   assert.match(release, /pull\.user\?\.login === process\.env\.REPOSITORY_OWNER/u);
+  assert.match(release, /pull\.user\?\.login === process\.env\.RELEASE_BOT_LOGIN/u);
+  assert.match(release, /pull\.head\?\.ref === 'release\/next'/u);
   assert.match(release, /releasePull\.merged_by\?\.login !== process\.env\.REPOSITORY_OWNER/u);
   assert.match(release, /tag commit is not an authorized merged Release PR/u);
   assert.match(release, /allowedReleaseFiles/u);
@@ -251,6 +294,8 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(release, /--include-attestations/u);
   assert.match(release, /attestationBundles/u);
   assert.match(release, /gh release create/u);
+  assert.match(release, /name: Reconcile the next Release PR after publication/u);
+  assert.match(release, /gh workflow run prepare-release\.yml --ref master/u);
   assert.doesNotMatch(
     release,
     /pnpm audit|gh release edit|NPM_TOKEN|NODE_AUTH_TOKEN|secrets\./u,
@@ -267,7 +312,10 @@ test('repository workflows preserve executable security boundaries', async () =>
 
   const releasePr = workflows.get('.github/workflows/release-pr.yml') || '';
   assert.match(releasePr, /types: \[closed\]/u);
+  assert.match(releasePr, /group: authorize-release/u);
   assert.match(releasePr, /pull_request\.user\.login == github\.repository_owner/u);
+  assert.match(releasePr, /pull_request\.user\.login == 'kintio-release\[bot\]'/u);
+  assert.match(releasePr, /pull_request\.head\.ref == 'release\/next'/u);
   assert.match(releasePr, /pull_request\.merged_by\.login == github\.repository_owner/u);
   assert.match(releasePr, /pull_request\.head\.repo\.full_name == github\.repository/u);
   assert.match(releasePr, /startsWith\(github\.event\.pull_request\.head\.ref, 'release\/v'\)/u);
@@ -279,6 +327,8 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(releasePr, /'\/git\/refs'/u);
   assert.match(releasePr, /'\/actions\/workflows\/release\.yml\/dispatches'/u);
   assert.match(releasePr, /workflow_runs\?\.some/u);
+  assert.match(releasePr, /Release PR changed package\.json beyond its version/u);
+  assert.match(releasePr, /Release PR file enumeration is incomplete/u);
   assert.doesNotMatch(releasePr, /actions\/checkout|secrets\.|NPM_TOKEN|NODE_AUTH_TOKEN/u);
 });
 

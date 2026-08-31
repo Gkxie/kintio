@@ -75,8 +75,13 @@ jobs:
               if (!pullRequest.author.databaseId || !authorIds.has(pullRequest.author.databaseId)) {
                 throw new Error("The pull request opener must be a primary commit author for CLA verification");
               }
-            } else if (!["dependabot[bot]", "dependabot"].includes(pullRequest.author?.login)) {
-              throw new Error("Only approved dependency bots may open a CLA-exempt pull request");
+            } else if (![
+              "dependabot[bot]",
+              "dependabot",
+              "kintio-release[bot]",
+              "kintio-release",
+            ].includes(pullRequest.author?.login)) {
+              throw new Error("Only explicitly approved bots may open a CLA-exempt pull request");
             }
             if (commits.nodes.some((entry) => /^Co-authored-by:/imu.test(entry.commit.message))) {
               throw new Error("Co-authored-by trailers are not supported by the CLA check; split authors into separate pull requests");
@@ -102,6 +107,6 @@ jobs:
           path-to-document: https://github.com/Gkxie/kintio/blob/cla-v1.1/CLA.md
           path-to-signatures: signatures/v1.1/cla.json
           branch: cla-signatures
-          allowlist: dependabot[bot]
+          allowlist: dependabot[bot],kintio-release[bot]
           custom-pr-sign-comment: I have read the Kintio CLA v1.1 and I hereby sign it
           lock-pullrequest-aftermerge: true

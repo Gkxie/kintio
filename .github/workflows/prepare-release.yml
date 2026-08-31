@@ -1,0 +1,76 @@
+name: Prepare Release
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: prepare-release
+  cancel-in-progress: true
+
+jobs:
+  reconcile:
+    if: >-
+      github.repository == 'Gkxie/kintio' &&
+      github.ref == 'refs/heads/master' &&
+      vars.KINTIO_RELEASE_APP_CLIENT_ID != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Build the deterministic release plan
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          node --experimental-strip-types
+          .github/scripts/reconcile-release.ts
+          prepare "$RUNNER_TEMP/release-pr.md"
+      - name: Refuse a stale master plan
+        if: steps.plan.outputs.status == 'candidate'
+        run: |
+          git fetch origin master --quiet
+          test "$(git rev-parse HEAD)" = "$(git rev-parse origin/master)"
+      - name: Mint the repository-scoped Release App token
+        id: app-token
+        if: steps.plan.outputs.status == 'candidate'
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.KINTIO_RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.KINTIO_RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+      - name: Verify the Release App identity
+        if: steps.plan.outputs.status == 'candidate'
+        env:
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: test "$APP_SLUG" = kintio-release
+      - name: Reconcile the bot branch and Release PR
+        if: steps.plan.outputs.status == 'candidate'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch-token: ${{ steps.app-token.outputs.token }}
+          add-paths: |
+            CHANGELOG.md
+            package.json
+            src/version.ts
+          commit-message: ${{ steps.plan.outputs.title }}
+          branch: release/next
+          delete-branch: true
+          base: master
+          sign-commits: true
+          title: ${{ steps.plan.outputs.title }}
+          body-path: ${{ runner.temp }}/release-pr.md
+          draft: false
+          maintainer-can-modify: false

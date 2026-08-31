@@ -6,6 +6,7 @@
   "include": [
     "cli.ts",
     "daemon.ts",
+    ".github/scripts/**/*.ts",
     "index.ts",
     "src/**/*.ts",
     "scripts/**/*.ts",
