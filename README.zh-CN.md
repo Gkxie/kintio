@@ -36,16 +36,11 @@
 
 ## 最小启动步骤
 
-需要 Node.js 24+、`package.json` 固定版本的 pnpm 10、已安装并登录的 Codex CLI，以及至少一个
+需要 Node.js 24+、已安装并登录的 Codex CLI，以及至少一个
 受支持适配器的凭据。
 
 ```bash
-git clone https://github.com/Gkxie/kintio.git
-cd kintio
-corepack enable pnpm
-pnpm install --frozen-lockfile
-pnpm run build
-npm install --global .
+npm install --global kintio
 kintio setup
 codex login status
 ```
@@ -65,6 +60,8 @@ kintio logs --lines 100
 启动后应确认 `kintio logs` 包含 `Hono server is listening on port 8888`；投入使用前仍需按
 部署指南完成回调或绑定验证。需要前台进程时使用 `kintio run`；现有源码目录部署可以在完成
 部署指南中的一次性进程管理器迁移后，继续使用原数据库和配置。
+源码构建与贡献者开发环境见英文
+[贡献指南](https://github.com/Gkxie/kintio/blob/master/CONTRIBUTING.md)。
 
 ## 英文文档
 

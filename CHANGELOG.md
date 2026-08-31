@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.6.0 - 2026-08-31
+
+- Published the global `kintio` command through the public npm Registry and
+  added exact tarball and clean Registry-install verification
+  ([#37](https://github.com/Gkxie/kintio/issues/37)).
 - Disabled persisted Codex Goals and multi-agent tools inside untrusted channel
   sessions so conversation work cannot outlive its bounded turn or expand into
   background Agent execution

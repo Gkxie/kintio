@@ -1,10 +1,14 @@
 {
   "name": "kintio",
-  "version": "0.5.0",
-  "private": true,
+  "version": "0.6.0",
   "license": "Apache-2.0",
+  "author": "XIE YU",
   "packageManager": "pnpm@10.34.5",
   "type": "module",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
   "description": "Connect chat channels to an Agent you control",
   "bin": {
     "kintio": "bin/kintio.js"

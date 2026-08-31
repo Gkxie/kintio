@@ -8,25 +8,19 @@ Requirements:
 
 - macOS, Linux, or Windows;
 - Node.js 24 or later;
-- pnpm 10;
 - [Codex CLI](https://developers.openai.com/codex/cli), with the same operating-system user that starts Kintio already signed in;
 - an HTTPS domain reverse-proxied to `127.0.0.1:8888` when using the WeChat KF callback adapter.
 
 ```bash
-git clone https://github.com/Gkxie/kintio.git
-cd kintio
-corepack enable pnpm
-pnpm install --frozen-lockfile
-pnpm run build
-npm install --global .
+npm install --global kintio
 kintio setup
 codex login status
 ```
 
 Kintio uses the local Codex CLI session directly. It does not copy API keys or modify user-level Codex configuration.
 
-The global command is installed from the checked-out source during the `0.x`
-phase. Like Codex's user-level [`CODEX_HOME`](https://learn.chatgpt.com/docs/config-file/environment-variables),
+The global command is installed from the public npm Registry. Like Codex's
+user-level [`CODEX_HOME`](https://learn.chatgpt.com/docs/config-file/environment-variables),
 which defaults to `~/.codex`, Kintio keeps mutable user state outside its
 installation. `kintio setup` creates
 the default instance at `~/.kintio`, installs the bundled Agent skill in the
@@ -182,6 +176,8 @@ kintio run
 For development inside the source checkout, use:
 
 ```bash
+corepack enable pnpm
+pnpm install --frozen-lockfile
 pnpm run dev
 ```
 
@@ -218,6 +214,20 @@ not modify Nginx, provider consoles, shell profiles, or operating-system boot
 configuration. Configure launchd, systemd, Task Scheduler, a container runtime,
 or another boot mechanism separately with `kintio run` if the machine must start
 Kintio automatically after reboot.
+
+Stop the daemon before replacing or removing the global package so a running
+process never refers to files being changed in place:
+
+```bash
+kintio stop
+npm install --global kintio@latest
+kintio --version
+kintio start
+```
+
+To remove the command, run `kintio stop` and then `npm uninstall --global
+kintio`. The instance under `~/.kintio` is retained by default so uninstalling
+the package does not silently delete configuration, conversations, or media.
 
 Each instance keeps its daemon identity, private control capability, and rotated
 logs under `<home>/data`; its random Unix socket or Windows named pipe exists

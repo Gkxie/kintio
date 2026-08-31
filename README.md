@@ -4,12 +4,12 @@
 
 **Connect chat channels to an Agent you control.**
 
-English | [简体中文](README.zh-CN.md)
+English | [简体中文](https://github.com/Gkxie/kintio/blob/master/README.zh-CN.md)
 
 [![CI](https://github.com/Gkxie/kintio/actions/workflows/ci.yml/badge.svg)](https://github.com/Gkxie/kintio/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/Gkxie/kintio/actions/workflows/codeql.yml/badge.svg)](https://github.com/Gkxie/kintio/actions/workflows/codeql.yml)
 [![Latest release](https://img.shields.io/github/v/release/Gkxie/kintio?display_name=tag)](https://github.com/Gkxie/kintio/releases/latest)
-[![License](https://img.shields.io/github/license/Gkxie/kintio)](LICENSE)
+[![License](https://img.shields.io/github/license/Gkxie/kintio)](https://github.com/Gkxie/kintio/blob/master/LICENSE)
 
 </div>
 
@@ -60,17 +60,11 @@ conversation.
 Prerequisites:
 
 - Node.js 24 or later;
-- pnpm 10 (pinned in `package.json`);
 - an installed and authenticated Codex CLI;
 - credentials for at least one supported adapter.
 
 ```bash
-git clone https://github.com/Gkxie/kintio.git
-cd kintio
-corepack enable pnpm
-pnpm install --frozen-lockfile
-pnpm run build
-npm install --global .
+npm install --global kintio
 kintio setup
 codex login status
 ```
@@ -101,6 +95,9 @@ Use `kintio run` when a foreground process is preferable to the native daemon.
 Existing source-based deployments can keep their current state after the one-time
 process-manager migration described in the setup guide.
 
+Source builds and contributor setup are documented in
+[CONTRIBUTING.md](https://github.com/Gkxie/kintio/blob/master/CONTRIBUTING.md).
+
 ## Security boundaries
 
 - `.env`, SQLite databases, downloaded media, and local key files are ignored by Git and
@@ -127,7 +124,7 @@ vulnerability-reporting process.
 - [Contributing guide](https://github.com/Gkxie/kintio/blob/master/CONTRIBUTING.md) — where to start and how to validate changes.
 - [Maintainer guide](https://github.com/Gkxie/kintio/blob/master/MAINTAINING.md) — issue, pull request, and release operations.
 - [Code of Conduct](https://github.com/Gkxie/kintio/blob/master/CODE_OF_CONDUCT.md), [Changelog](CHANGELOG.md), and
-  [Apache License 2.0](LICENSE).
+  [Apache License 2.0](https://github.com/Gkxie/kintio/blob/master/LICENSE).
 
 The default verification entry point is:
 
@@ -146,7 +143,7 @@ channel, identity, recovery, and Agent-runtime contracts are stabilized for futu
 adapters.
 
 The Weixin iLink protocol implementation incorporates work described in
-[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
+[THIRD_PARTY_NOTICES](https://github.com/Gkxie/kintio/blob/master/THIRD_PARTY_NOTICES).
 
 Kintio is an independent open-source project. It is not affiliated with, authorized by,
 endorsed by, or an official product of Tencent, WeChat, Weixin, or any other channel

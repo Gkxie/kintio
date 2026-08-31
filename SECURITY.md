@@ -38,8 +38,9 @@ before disclosure.
 
 | Version | Security fixes |
 | --- | --- |
-| Latest `0.5.x` Patch | Supported |
+| Latest `0.6.x` Patch | Supported |
 | `master` | In development; security fixes accepted |
+| `0.5.x` | Unsupported |
 | `0.4.x` | Unsupported |
 | `< 0.4.0` | Unsupported |
 
