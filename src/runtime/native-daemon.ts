@@ -176,6 +176,7 @@ export async function runNativeDaemon({
           ...environment,
           KINTIO_HOME: instanceHome,
           KINTIO_CONFIG_FILE: instanceConfig,
+          KINTIO_MANAGED_WORKER: '1',
           NODE_ENV: 'production',
         },
         stdio: ['ignore', 'pipe', 'pipe', 'ipc'],

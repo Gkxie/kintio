@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'vitest';
 
 import { createApp } from '../../src/app.ts';
@@ -10,7 +12,7 @@ const testConfig = createConfig({
   WECOM_CALLBACK_TOKEN: 'TestToken123',
   WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
   WECOM_RECEIVE_ID: 'ww-test-receive-id',
-});
+}, path.join(os.tmpdir(), 'kintio-callback-config'));
 
 const silentLogger = {
   error() {},

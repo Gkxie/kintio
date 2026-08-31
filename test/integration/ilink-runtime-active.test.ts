@@ -99,7 +99,7 @@ async function fixture(t: TestContext) {
     ILINK_API_TIMEOUT_MS: '5000',
     ILINK_LONG_POLL_TIMEOUT_MS: '120000',
     ILINK_MAX_ACCOUNTS: '2',
-  });
+  }, temp.directory);
   const accounts = [account('one'), account('two')];
   const persistence = temp.openPersistence();
   const ilink = persistence.createIlinkStore();

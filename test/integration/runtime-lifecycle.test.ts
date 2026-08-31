@@ -32,16 +32,17 @@ function activeConfig(directory: string): AppConfig {
     WECOM_DB_FILE: path.join(directory, 'wecom.sqlite'),
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
-  });
+  }, directory);
 }
 
 const logger = { info() {}, warn() {}, error() {} };
 
-test('disabled runtime exposes complete no-op lifecycle', async () => {
+test('disabled runtime exposes complete no-op lifecycle', async (t) => {
+  const directory = await workspace(t);
   const config = createConfig({
     WECOM_CALLBACK_TOKEN: 'RuntimeToken123',
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
-  });
+  }, directory);
   const runtime = await createRuntime({ config, logger });
   assert.equal(runtime.messageProcessor, null);
   await runtime.start();
@@ -79,7 +80,7 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
     HARNESS_DB_FILE: databaseFile,
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
-  });
+  }, directory);
   const runtime = await createRuntime({ config, logger });
   t.onTestFinished(() => runtime.close());
 
@@ -199,7 +200,7 @@ test('runtime readiness does not wait for a blocked startup catch-up backlog', a
     KINTIO_DB_FILE: databaseFile,
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
-  });
+  }, directory);
   const runtime = await createRuntime({ config, logger });
   t.onTestFinished(() => runtime.close());
 

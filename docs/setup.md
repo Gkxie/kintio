@@ -26,13 +26,18 @@ codex login status
 Kintio uses the local Codex CLI session directly. It does not copy API keys or modify user-level Codex configuration.
 
 The global command is installed from the checked-out source during the `0.x`
-phase. `kintio setup` creates `~/.kintio` with private directories, installs the
-bundled Agent skill in the effective `CODEX_WORKING_DIRECTORY`, and writes
-`~/.kintio/.env`. On macOS and Linux the file is
-created with mode `0600`; on Windows the instance and config must stay inside
-the current user's profile and use its ACL boundary. Kintio refuses to overwrite
-an existing config. Use `--home` or `--config` for an explicit instance location;
-runtime state never defaults to the global package directory.
+phase. Like Codex's user-level [`CODEX_HOME`](https://learn.chatgpt.com/docs/config-file/environment-variables),
+which defaults to `~/.codex`, Kintio keeps mutable user state outside its
+installation. `kintio setup` creates
+the default instance at `~/.kintio`, installs the bundled Agent skill in the
+effective `CODEX_WORKING_DIRECTORY`, and writes `~/.kintio/.env`. On macOS and
+Linux the file is created with mode `0600`. On Windows, the CLI requires the
+instance and config to stay inside the current user's profile and trusts that
+profile's ACL boundary; it does not claim to audit arbitrary Windows DACLs.
+Kintio refuses to overwrite an existing config. Use `--home` or `--config` for
+an explicit instance location. Windows keeps Kintio-owned database, lock, iLink
+key file, and image staging paths inside that instance. Runtime state never
+defaults to the global package directory.
 The installed `wechat-kf-reply-sop` file is a Kintio-managed asset and is
 atomically refreshed by `setup` and again before every process launch. Changing
 `CODEX_WORKING_DIRECTORY` therefore moves the active managed Skill boundary to
@@ -41,8 +46,10 @@ customizations outside the managed Skill path.
 
 The instance path is a security boundary. For custom locations, every mutable
 parent must be trusted: use owner-controlled directories (or a sticky shared
-directory such as `/tmp`) on POSIX, and retain an owner-only DACL on Windows.
-The default directory under the current user profile is the recommended choice.
+directory such as `/tmp`) on POSIX. On Windows, keep the instance and config
+inside the current user profile without granting untrusted accounts write
+access; paths outside the profile are rejected by the CLI. The default
+`~/.kintio` directory is the recommended choice.
 
 ## 2. Configure shared settings
 

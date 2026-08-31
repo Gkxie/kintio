@@ -11,6 +11,7 @@ import {
   loadConfig,
   parseStartTimeout,
   resolveProjectRoot,
+  WORKER_GRACEFUL_TIMEOUT_MS,
 } from './config.ts';
 import { isPathInside, samePath } from './lib/path-identity.ts';
 import {
@@ -91,10 +92,42 @@ function defaultExecute(request: ProcessRequest): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = crossSpawn(request.file, [...request.args], {
       env: request.env,
-      stdio: 'inherit',
+      stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
     });
-    child.once('error', reject);
+    let forceTimer: NodeJS.Timeout | undefined;
+    let stopping = false;
+
+    const cleanup = (): void => {
+      process.off('SIGINT', stop);
+      process.off('SIGTERM', stop);
+      process.off('disconnect', stop);
+      if (forceTimer) clearTimeout(forceTimer);
+    };
+    const stop = (): void => {
+      if (stopping) return;
+      stopping = true;
+      forceTimer = setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill('SIGKILL');
+        }
+      }, WORKER_GRACEFUL_TIMEOUT_MS);
+      forceTimer.unref?.();
+      try {
+        if (child.connected) child.send('shutdown');
+      } catch {
+        // Closing the IPC channel also enters the Worker's parent-disconnect path.
+      }
+    };
+
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+    process.once('disconnect', stop);
+    child.once('error', (error) => {
+      cleanup();
+      reject(error);
+    });
     child.once('exit', (code, signal) => {
+      cleanup();
       resolve(code ?? (signal ? 1 : 0));
     });
   });
@@ -270,7 +303,6 @@ function refreshManagedSkill(
   return installManagedSkill({
     packageRoot: runtime.packageRoot,
     workingDirectory,
-    userHome: runtime.homeDirectory,
   });
 }
 
@@ -664,7 +696,7 @@ export async function runCli(
       return await runtime.execute({
         file: process.execPath,
         args: [path.join(runtime.packageRoot, 'dist/index.js')],
-        env: environment,
+        env: { ...environment, KINTIO_MANAGED_WORKER: '1' },
       });
     }
     if (command === 'stop') return await stop(runtime, location);

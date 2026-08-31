@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
+import os from 'node:os';
+import path from 'node:path';
 import { test } from 'vitest';
 
 import { createApp } from '../../src/app.ts';
@@ -10,7 +12,7 @@ const config = createConfig({
   WECOM_CALLBACK_TOKEN: 'NegativeToken123',
   WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
   WECOM_RECEIVE_ID: 'ww-expected',
-});
+}, path.join(os.tmpdir(), 'kintio-callback-negative-config'));
 const aesKey = Buffer.from(`${config.wecom.encodingAesKey}=`, 'base64');
 
 function encryptPlaintext(plaintext: Buffer, validPadding = true): string {

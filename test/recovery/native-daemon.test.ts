@@ -40,6 +40,7 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, 'PORT=18889\nSHUTDOWN_TIMEOUT_MS=1000\n');
   await fs.writeFile(workerFile, [
+    "if (process.env.KINTIO_MANAGED_WORKER !== '1') process.exit(3);",
     "process.stdout.write('fake worker ready\\n');",
     "process.send?.({ type: 'ready', pid: process.pid });",
     "process.on('message', (message) => { if (message === 'shutdown') process.exit(0); });",

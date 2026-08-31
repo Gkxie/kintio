@@ -1,7 +1,10 @@
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseEnv } from 'node:util';
+
+import { isPathInside } from './lib/path-identity.ts';
 
 export function resolveProjectRoot(moduleUrl: string): string {
   const moduleDirectory = path.dirname(fileURLToPath(moduleUrl));
@@ -31,7 +34,7 @@ export function parseStartTimeout(value: string | undefined): number {
 
 function resolveInstanceRoot(
   environment: NodeJS.ProcessEnv = process.env,
-  fallback = KINTIO_PACKAGE_ROOT,
+  fallback = path.join(os.homedir(), '.kintio'),
 ): string {
   return path.resolve(environment.KINTIO_HOME || fallback);
 }
@@ -232,6 +235,7 @@ function parseBoundedText(
 export function createConfig(
   environment: NodeJS.ProcessEnv = process.env,
   root?: string,
+  platform: NodeJS.Platform = process.platform,
 ): AppConfig {
   environment = copyEnvironment(environment);
   const instanceRoot = path.resolve(root || resolveInstanceRoot(environment));
@@ -279,6 +283,28 @@ export function createConfig(
     environment.CODEX_WORKING_DIRECTORY ||
       'codex-workspace',
   );
+  const ilinkStorageKeyFile = path.resolve(
+    instanceRoot,
+    environment.ILINK_STORAGE_KEY_FILE ||
+      path.join(path.dirname(databaseFile), 'ilink-storage.key'),
+  );
+  const codexImageTempDirectory = path.resolve(
+    instanceRoot,
+    environment.CODEX_IMAGE_TMP_DIR ||
+      'data/codex-input',
+  );
+  if (platform === 'win32') {
+    for (const [name, filePath] of [
+      ['KINTIO_DB_FILE', databaseFile],
+      ['Kintio state lock', lockFile],
+      ['ILINK_STORAGE_KEY_FILE', ilinkStorageKeyFile],
+      ['CODEX_IMAGE_TMP_DIR', codexImageTempDirectory],
+    ] as const) {
+      if (!isPathInside(instanceRoot, filePath)) {
+        throw new Error(`${name} must stay inside KINTIO_HOME on Windows`);
+      }
+    }
+  }
   const apiTimeoutMs = parsePositiveInteger(
     environment.WECOM_API_TIMEOUT_MS,
     10_000,
@@ -338,11 +364,7 @@ export function createConfig(
     ilink: Object.freeze({
       enabled: ilinkEnabled,
       storageKey: ilinkStorageKey,
-      storageKeyFile: path.resolve(
-        instanceRoot,
-        environment.ILINK_STORAGE_KEY_FILE ||
-          path.join(path.dirname(databaseFile), 'ilink-storage.key'),
-      ),
+      storageKeyFile: ilinkStorageKeyFile,
       baseUrl: environment.ILINK_BASE_URL || 'https://ilinkai.weixin.qq.com/',
       apiTimeoutMs: parsePositiveInteger(
         environment.ILINK_API_TIMEOUT_MS,
@@ -370,11 +392,7 @@ export function createConfig(
     }),
     codex: Object.freeze({
       enabled: codexEnabled,
-      imageTempDirectory: path.resolve(
-        instanceRoot,
-        environment.CODEX_IMAGE_TMP_DIR ||
-          'data/codex-input',
-      ),
+      imageTempDirectory: codexImageTempDirectory,
       workingDirectory: codexWorkingDirectory,
       generatedImageDirectory: path.join(codexWorkingDirectory, 'generated_images'),
     }),
@@ -385,17 +403,22 @@ export function loadConfig(
   options: {
     envFile?: string;
     environment?: NodeJS.ProcessEnv;
+    homeDirectory?: string;
     root?: string;
   } = {},
 ): AppConfig {
   const environment = copyEnvironment(options.environment || process.env);
   const configuredEnvFile = options.envFile || environment.KINTIO_CONFIG_FILE;
+  const defaultRoot = path.join(
+    path.resolve(options.homeDirectory || os.homedir()),
+    '.kintio',
+  );
   const initialRoot = path.resolve(
     options.root ||
       environment.KINTIO_HOME ||
       (configuredEnvFile
         ? path.dirname(path.resolve(configuredEnvFile))
-        : KINTIO_PACKAGE_ROOT),
+        : defaultRoot),
   );
   const envFile = path.resolve(
     configuredEnvFile || path.join(initialRoot, '.env'),

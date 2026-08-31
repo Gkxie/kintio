@@ -1,6 +1,5 @@
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -8,7 +7,7 @@ import {
   ensureContainedDirectory,
   ensurePrivateDirectory,
 } from '../lib/private-directory.ts';
-import { isPathInside, samePath } from '../lib/path-identity.ts';
+import { samePath } from '../lib/path-identity.ts';
 
 const SKILL_PATH = '.agents/skills/wechat-kf-reply-sop/SKILL.md';
 
@@ -20,11 +19,9 @@ export interface ManagedSkillResult {
 export function installManagedSkill({
   packageRoot,
   workingDirectory,
-  userHome = os.homedir(),
 }: {
   readonly packageRoot: string;
   readonly workingDirectory: string;
-  readonly userHome?: string;
 }): ManagedSkillResult {
   const workspace = path.resolve(workingDirectory);
   const file = path.join(workspace, SKILL_PATH);
@@ -34,11 +31,6 @@ export function installManagedSkill({
       throw new Error(`Bundled managed Skill is missing: ${bundled}`);
     }
     return { file, state: 'current' };
-  }
-  if (process.platform === 'win32' && !isPathInside(userHome, workspace)) {
-    throw new Error(
-      'The Agent working directory must stay inside the current Windows user profile',
-    );
   }
   assertTrustedDirectory(
     ensurePrivateDirectory(workspace),
