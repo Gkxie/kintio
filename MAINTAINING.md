@@ -213,10 +213,12 @@ Kintio is published as the public `@kin-tio/cli` package on the official npm
 Registry. The manifest's explicit file allowlist excludes tests, repository
 automation, source-only files, and runtime state. npm publication uses Trusted
 Publishing from `Gkxie/kintio`, `release.yml`, and the `npm-release`
-Environment. The Environment accepts only release tags, requires Maintainer
-approval, and cannot be bypassed by administrators. The publish job receives a
-short-lived OIDC credential and no reusable npm token. GitHub releases remain
-source-only and carry no uploaded assets.
+Environment. The Environment accepts only release tags and cannot be bypassed
+by administrators. Merging a same-repository Release PR is the human release
+authorization; an owner-only workflow creates the annotated tag and dispatches
+the release, so the Environment does not repeat that approval. The publish job
+receives a short-lived OIDC credential and no reusable npm token. GitHub
+releases remain source-only and carry no uploaded assets.
 
 ## Publish a release
 
@@ -226,22 +228,16 @@ source-only and carry no uploaded assets.
    `## X.Y.Z - YYYY-MM-DD`. Include only user-observable changes, and reference
    public issues or PRs where useful.
 4. Run `pnpm test` and inspect `npm pack --dry-run`. Before merging, wait for
-   every required PR check, including CI and Gitleaks. After merging, confirm
-   that `master` points to the reviewed squash commit and wait for CodeQL.
-5. Create and push an annotated tag from the latest `master`:
-
-   ```bash
-   git tag -a vX.Y.Z -m "vX.Y.Z"
-   git push origin vX.Y.Z
-   ```
-
-   Once pushed, a release tag must never be deleted, moved, or reused, even if
-   the release workflow fails.
-
-6. The read-only verification job rechecks version monotonicity, the Changelog,
-   source commit, tests, build, and dependencies, then uploads one npm tarball
-   with its SHA-512 integrity. Review the pending `npm-release` deployment and
-   approve it only when the tag and release notes are correct.
+   every required PR check, including CI, CodeQL, and Gitleaks.
+5. Merge the Release PR. The owner-only `Release PR` workflow verifies the
+   branch, title, changed-file allowlist, package and runtime versions,
+   Changelog, merge commit, and version monotonicity. It then creates an
+   annotated tag at the squash commit and dispatches `release.yml` at that tag.
+   Release-tag creation is restricted to the GitHub Actions App. A release tag
+   must never be deleted, moved, or reused, even if the release workflow fails.
+6. The read-only release verification job rechecks version monotonicity, the
+   Changelog, source commit, tests, build, and dependencies, then uploads one
+   npm tarball with its SHA-512 integrity.
 7. The OIDC job publishes that exact tarball and waits for npm's publish-time
    scan to make it installable. A tokenless job then installs the public
    Registry version before a separately permissioned job creates the GitHub
@@ -250,9 +246,9 @@ source-only and carry no uploaded assets.
    GitHub Release. Confirm that [SECURITY.md](SECURITY.md) lists the supported
    release line. Close linked issues only after all four checks succeed.
 
-Rerun the original workflow after a transient failure only when no GitHub
-Release was created. If npm already contains the version, the workflow continues
-only when its integrity exactly matches the verified tarball. A different
+Rerun the dispatched release workflow after a transient failure only when no
+GitHub Release was created. If npm already contains the version, the workflow
+continues only when its integrity exactly matches the verified tarball. A different
 integrity or a pre-existing GitHub Release fails closed. If code must change,
 keep the failed tag, increment to a new Patch version, and carry forward every
 Changelog entry that has never been published. Never rewrite a public package

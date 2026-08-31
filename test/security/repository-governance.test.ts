@@ -149,6 +149,7 @@ test('repository workflows preserve executable security boundaries', async () =>
     '.github/workflows/dependency-review.yml',
     '.github/workflows/pr-title.yml',
     '.github/workflows/real-codex.yml',
+    '.github/workflows/release-pr.yml',
     '.github/workflows/release.yml',
     '.github/workflows/secret-scan.yml',
   ];
@@ -226,6 +227,7 @@ test('repository workflows preserve executable security boundaries', async () =>
 
   const release = workflows.get('.github/workflows/release.yml') || '';
   assert.match(release, /tags: \['v\*\.\*\.\*'\]/u);
+  assert.match(release, /^  workflow_dispatch:$/mu);
   assert.match(release, /git merge-base --is-ancestor/u);
   assert.match(release, /Release tags must be annotated tags/u);
   assert.match(release, /contents: read[\s\S]+contents: write/u);
@@ -257,24 +259,49 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(publishJob, /id-token: write/u);
   assert.doesNotMatch(publishJob, /actions\/checkout|pnpm install/u);
   assert.doesNotMatch(smokeJob, /id-token: write/u);
+
+  const releasePr = workflows.get('.github/workflows/release-pr.yml') || '';
+  assert.match(releasePr, /types: \[closed\]/u);
+  assert.match(releasePr, /pull_request\.user\.login == github\.repository_owner/u);
+  assert.match(releasePr, /pull_request\.merged_by\.login == github\.repository_owner/u);
+  assert.match(releasePr, /pull_request\.head\.repo\.full_name == github\.repository/u);
+  assert.match(releasePr, /startsWith\(github\.event\.pull_request\.head\.ref, 'release\/v'\)/u);
+  assert.match(releasePr, /actions: write[\s\S]+contents: write[\s\S]+pull-requests: read/u);
+  assert.match(releasePr, /const required = \['CHANGELOG\.md', 'package\.json', 'src\/version\.ts'\]/u);
+  assert.match(releasePr, /new Set\(\[\.\.\.required, 'SECURITY\.md'\]\)/u);
+  assert.match(releasePr, /file\.status === 'renamed'/u);
+  assert.match(releasePr, /'\/git\/tags'/u);
+  assert.match(releasePr, /'\/git\/refs'/u);
+  assert.match(releasePr, /'\/actions\/workflows\/release\.yml\/dispatches'/u);
+  assert.match(releasePr, /workflow_runs\?\.some/u);
+  assert.doesNotMatch(releasePr, /actions\/checkout|secrets\.|NPM_TOKEN|NODE_AUTH_TOKEN/u);
 });
 
 test('release workflow inline modules remain syntactically executable', async () => {
-  const release = await read('.github/workflows/release.yml');
-  const modules = [...release.matchAll(
-    /node --input-type=module <<'NODE'\n([\s\S]*?)\n\s+NODE/gmu,
-  )].map((match) => (match[1] || '')
-    .split('\n')
-    .map((line) => line.replace(/^ {10}/u, ''))
-    .join('\n'));
-  assert.equal(modules.length, 4);
-  for (const [index, source] of modules.entries()) {
-    const checked = spawnSync(
-      process.execPath,
-      ['--input-type=module', '--check'],
-      { input: source, encoding: 'utf8' },
-    );
-    assert.equal(checked.status, 0, `inline module ${index + 1}: ${checked.stderr}`);
+  for (const [file, expected] of [
+    ['.github/workflows/release.yml', 4],
+    ['.github/workflows/release-pr.yml', 1],
+  ] as const) {
+    const workflow = await read(file);
+    const modules = [...workflow.matchAll(
+      /node --input-type=module <<'NODE'\n([\s\S]*?)\n\s+NODE/gmu,
+    )].map((match) => (match[1] || '')
+      .split('\n')
+      .map((line) => line.replace(/^ {10}/u, ''))
+      .join('\n'));
+    assert.equal(modules.length, expected, file);
+    for (const [index, source] of modules.entries()) {
+      const checked = spawnSync(
+        process.execPath,
+        ['--input-type=module', '--check'],
+        { input: source, encoding: 'utf8' },
+      );
+      assert.equal(
+        checked.status,
+        0,
+        `${file} inline module ${index + 1}: ${checked.stderr}`,
+      );
+    }
   }
 });
 
