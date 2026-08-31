@@ -84,6 +84,13 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
     filename: 'wecom.sqlite',
   });
   const lockFile = path.join(temporary.directory, 'wecom.lock');
+  const workingDirectory = path.join(temporary.directory, 'agent-workspace');
+  const managedSkill = path.join(
+    workingDirectory,
+    '.agents/skills/wechat-kf-reply-sop/SKILL.md',
+  );
+  await fs.mkdir(path.dirname(managedSkill), { recursive: true, mode: 0o700 });
+  await fs.writeFile(managedSkill, 'stale worker Skill\n');
   const child = startTestChild(t, indexFile, {
     timeoutMs: 8_000,
     env: {
@@ -95,6 +102,7 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
       WECOM_ALLOWED_USER_IDS: '',
       WECOM_DB_FILE: temporary.filePath,
       CODEX_ENABLED: 'false',
+      CODEX_WORKING_DIRECTORY: workingDirectory,
       SHUTDOWN_TIMEOUT_MS: '2000',
     },
   });
@@ -102,6 +110,13 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
   const root = await waitForResponse(servicePort, '/');
   assert.equal(root.status, 200);
   assert.equal(await root.text(), 'hello world');
+  assert.equal(
+    await fs.readFile(managedSkill, 'utf8'),
+    await fs.readFile(
+      path.resolve('codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md'),
+      'utf8',
+    ),
+  );
   await assert.rejects(fs.access(lockFile), { code: 'ENOENT' });
 
   const exit = await child.stop('SIGTERM');
@@ -152,6 +167,13 @@ test('production script builds and runs dist/index.js', async (t) => {
     prefix: 'wechat-pnpm-start-',
     filename: 'wecom.sqlite',
   });
+  const workingDirectory = path.join(temporary.directory, 'dist-agent-workspace');
+  const managedSkill = path.join(
+    workingDirectory,
+    '.agents/skills/wechat-kf-reply-sop/SKILL.md',
+  );
+  await fs.mkdir(path.dirname(managedSkill), { recursive: true, mode: 0o700 });
+  await fs.writeFile(managedSkill, 'stale dist Worker Skill\n');
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
     PORT: String(servicePort),
@@ -162,6 +184,7 @@ test('production script builds and runs dist/index.js', async (t) => {
     WECOM_ALLOWED_USER_IDS: '',
     WECOM_DB_FILE: temporary.filePath,
     CODEX_ENABLED: 'false',
+    CODEX_WORKING_DIRECTORY: workingDirectory,
     SHUTDOWN_TIMEOUT_MS: '2000',
   };
   const build = crossSpawn('pnpm', ['run', 'build'], {
@@ -186,6 +209,13 @@ test('production script builds and runs dist/index.js', async (t) => {
   });
 
   assert.equal((await waitForResponse(servicePort, '/')).status, 200);
+  assert.equal(
+    await fs.readFile(managedSkill, 'utf8'),
+    await fs.readFile(
+      path.resolve('codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md'),
+      'utf8',
+    ),
+  );
   assert.equal(child.child.send?.('shutdown'), true);
   assert.deepEqual(await child.waitForExit(), { code: 0, signal: null });
   await waitForPortReleased(servicePort);

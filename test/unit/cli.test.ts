@@ -91,6 +91,43 @@ test('setup creates one private config and refreshes the managed Agent skill', a
   }
 });
 
+test('managed Skill follows and refreshes the configured Agent workspace', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const configFile = path.join(home, '.env');
+  const runtime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
+  await fs.appendFile(
+    configFile,
+    '\nCODEX_WORKING_DIRECTORY=./custom-agent-workspace\n',
+  );
+  runtime.stdout.length = 0;
+
+  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
+  const customSkill = path.join(
+    home,
+    'custom-agent-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
+  );
+  const bundledSkill = await fs.readFile(
+    'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
+    'utf8',
+  );
+  assert.equal(await fs.readFile(customSkill, 'utf8'), bundledSkill);
+  assert.equal(runtime.stdout.join('').includes(customSkill), true);
+
+  await fs.writeFile(customSkill, 'stale managed Skill\n');
+  const executed: string[] = [];
+  const runRuntime = cliRuntime(root, {
+    execute: async ({ file }) => {
+      executed.push(file);
+      return 0;
+    },
+  });
+  assert.equal(await runCli(['run', '--home', home], runRuntime.overrides), 0);
+  assert.equal(executed.length, 1);
+  assert.equal(await fs.readFile(customSkill, 'utf8'), bundledSkill);
+});
+
 test('run keeps the worker in the foreground with explicit instance selectors', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
@@ -154,9 +191,15 @@ test('source CLI starts, probes, logs, and stops one native daemon', async (t) =
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'fake-package');
   const workerFile = path.join(packageRoot, 'dist/index.js');
+  const bundledSkillFile = path.join(
+    packageRoot,
+    'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
+  );
   const setupRuntime = cliRuntime(root);
   assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
+  await fs.mkdir(path.dirname(bundledSkillFile), { recursive: true });
+  await fs.writeFile(bundledSkillFile, 'test managed Skill\n');
   await fs.writeFile(workerFile, [
     "process.stdout.write('unit worker ready\\n');",
     "process.send?.({ type: 'ready', pid: process.pid });",
@@ -384,6 +427,30 @@ test('configuration privacy follows POSIX modes and Windows profile ACLs', async
   assert.equal(result, process.platform === 'win32' ? 0 : 1);
   if (process.platform !== 'win32') {
     assert.match(runtime.stderr.join(''), /must not be accessible by group or other users/u);
+  }
+});
+
+test('managed Skill rejects a pre-existing non-private leaf directory on POSIX', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const initial = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], initial.overrides), 0);
+  await fs.appendFile(
+    path.join(home, '.env'),
+    '\nCODEX_WORKING_DIRECTORY=./custom-workspace\n',
+  );
+  const leaf = path.join(
+    home,
+    'custom-workspace/.agents/skills/wechat-kf-reply-sop',
+  );
+  await fs.mkdir(leaf, { recursive: true });
+  await fs.chmod(leaf, 0o755);
+
+  const runtime = cliRuntime(root);
+  const result = await runCli(['setup', '--home', home], runtime.overrides);
+  assert.equal(result, process.platform === 'win32' ? 0 : 1);
+  if (process.platform !== 'win32') {
+    assert.match(runtime.stderr.join(''), /unsafe permissions/u);
   }
 });
 
