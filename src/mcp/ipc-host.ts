@@ -52,6 +52,7 @@ export class McpIpcHost {
   readonly #wechatKf: Factory | undefined;
   readonly #memory: Factory;
   readonly #ilink: Factory | undefined;
+  readonly #operator: Factory | undefined;
   readonly #logger: { error(message: string): void };
   readonly #connections = new Set<Connection>();
   #server: Server | undefined;
@@ -69,6 +70,7 @@ export class McpIpcHost {
     wechatKf,
     memory,
     ilink,
+    operator,
     logger = console,
   }: {
     readonly instanceKey: string;
@@ -77,6 +79,7 @@ export class McpIpcHost {
     readonly wechatKf?: Factory;
     readonly memory: Factory;
     readonly ilink?: Factory;
+    readonly operator?: Factory;
     readonly logger?: { error(message: string): void };
   }) {
     this.#instanceKey = path.resolve(instanceKey);
@@ -89,6 +92,7 @@ export class McpIpcHost {
     this.#wechatKf = wechatKf;
     this.#memory = memory;
     this.#ilink = ilink;
+    this.#operator = operator;
     this.#logger = logger;
   }
 
@@ -166,6 +170,7 @@ export class McpIpcHost {
       case 'wechat_kf': return this.#wechatKf;
       case 'weixin_ilink': return this.#ilink;
       case 'conversation_memory': return this.#memory;
+      case 'operator': return this.#operator;
     }
   }
 

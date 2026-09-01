@@ -1,17 +1,26 @@
 import type { Logger } from '../types.ts';
-import { IlinkLoginStore, type IlinkLoginRuntimeOffer } from './login-store.ts';
+import {
+  IlinkLoginStore,
+  type IlinkLoginRuntimeOffer,
+  type IlinkLoginSource,
+  type IlinkLoginStatus,
+} from './login-store.ts';
 import {
   IlinkClient,
   IlinkProtocolError,
   normalizeIlinkBaseUrl,
 } from './protocol/client.ts';
 import type { IlinkQrStatusResponse } from './protocol/types.ts';
-import { renderIlinkQrPng } from './qr.ts';
+import { assertIlinkQrContent } from './qr.ts';
 import { IlinkSecretBox } from './secret-box.ts';
 import { IlinkSqliteStore } from './sqlite-store.ts';
-import { createIlinkAccountKey } from './store-types.ts';
+import {
+  createIlinkAccountKey,
+  type IlinkAccountKey,
+} from './store-types.ts';
 
 const POLL_INTERVAL_MS = 1_000;
+const MAX_EXPIRY_TIMER_MS = 10 * 60 * 1_000;
 
 interface LoginClient {
   createQr(request?: {
@@ -94,23 +103,34 @@ export class IlinkLoginManager {
 
   async start(): Promise<void> {
     if (this.#closed) throw new Error('iLink login manager is closed');
-    for (const offer of this.#offers.listActive()) this.#startPolling(offer);
+    for (const offer of this.#offers.listActive()) {
+      if (offer.initiatorKind === 'local_operator') {
+        this.#offers.finish(offer.offerId, 'cancelled');
+      }
+      else this.#startPolling(offer);
+    }
   }
 
-  async offer(sessionToken: string): Promise<{ offerId: string; png: Buffer }> {
+  async offer(source: IlinkLoginSource): Promise<{
+    offerId: string;
+    qrContent: string;
+    expiresAt: number;
+  }> {
     if (this.#closed) throw new Error('iLink login manager is closed');
-    if (this.#offers.findForSession(sessionToken)) {
+    if (this.#offers.find(source)) {
       throw new Error('An iLink login offer is already pending');
     }
     if (
+      source.kind !== 'terminal' &&
       this.#accounts.listActiveAccounts().length +
         this.#offers.listActive().length >= this.#maxAccounts
     ) {
       throw new Error('iLink account limit reached');
     }
-    const localTokens = this.#accounts.listActiveAccountsWithSecrets()
-      .slice(-10)
-      .reverse()
+    const localAccounts = this.#accounts.listActiveAccountsWithSecrets()
+      .slice(source.kind === 'terminal' ? -1 : -10)
+      .reverse();
+    const localTokens = localAccounts
       .map(({ account, secret }) => this.#secrets.open(secret.sealedBotToken, {
         secretKind: 'bot_token',
         accountId: account.accountKey,
@@ -118,37 +138,61 @@ export class IlinkLoginManager {
         generation: secret.accountGeneration,
       }));
     const created = await this.#client.createQr({ local_token_list: localTokens });
+    assertIlinkQrContent(created.qrcode_img_content);
     if (
+      source.kind !== 'terminal' &&
       this.#accounts.listActiveAccounts().length +
         this.#offers.listActive().length >= this.#maxAccounts
     ) {
       throw new Error('iLink account limit reached');
     }
     const offer = this.#offers.create({
-      sessionToken,
+      source,
       qrCode: created.qrcode,
       apiBaseUrl: normalizeIlinkBaseUrl('https://ilinkai.weixin.qq.com/'),
+      candidateAccountKeys: source.kind === 'terminal'
+        ? localAccounts.map(({ account }) => account.accountKey)
+        : [],
     });
-    let png: Buffer;
-    try {
-      png = await renderIlinkQrPng(created.qrcode_img_content);
-    } catch (error) {
-      this.#offers.finish(offer.offerId, 'failed');
-      throw error;
-    }
     this.#startPolling(offer);
-    return { offerId: offer.offerId, png };
+    return {
+      offerId: offer.offerId,
+      qrContent: created.qrcode_img_content,
+      expiresAt: offer.expiresAt,
+    };
   }
 
-  cancel(offerId: string): void {
+  status(offerId: string): { readonly status: IlinkLoginStatus } {
+    const status = this.#offers.status(offerId);
+    if (status.status !== 'waiting' && status.status !== 'scanned') {
+      this.#running.get(offerId)?.controller.abort();
+    }
+    return status;
+  }
+
+  cancel(offerId: string): boolean {
     this.#running.get(offerId)?.controller.abort();
-    this.#offers.finish(offerId, 'cancelled');
+    return this.#offers.finish(offerId, 'cancelled');
   }
 
   #startPolling(offer: IlinkLoginRuntimeOffer): void {
     if (this.#running.has(offer.offerId) || this.#closed) return;
     const controller = new AbortController();
+    const expiryTimer = setTimeout(() => {
+      try {
+        this.#offers.finish(offer.offerId, 'expired');
+      } catch {
+        this.#logger.warn?.('[ilink-login] expired offer cleanup failed');
+      } finally {
+        controller.abort(new Error('iLink login offer expired'));
+      }
+    }, Math.max(
+      0,
+      Math.min(MAX_EXPIRY_TIMER_MS, offer.expiresAt - Number(this.#clock())),
+    ));
+    expiryTimer.unref();
     const task = this.#poll(offer, controller.signal).finally(() => {
+      clearTimeout(expiryTimer);
       if (this.#running.get(offer.offerId)?.controller === controller) {
         this.#running.delete(offer.offerId);
       }
@@ -175,7 +219,36 @@ export class IlinkLoginManager {
           return;
         }
         if (result.status === 'binded_redirect') {
-          this.#offers.finish(offer.offerId, 'cancelled');
+          if (offer.initiatorKind === 'local_operator') {
+            const candidates = offer.candidateAccountKeys;
+            let reported: IlinkAccountKey | undefined;
+            try {
+              if (result.ilink_bot_id) {
+                reported = createIlinkAccountKey(String(result.ilink_bot_id));
+              }
+            } catch {
+              reported = undefined;
+            }
+            const accountKey = reported && candidates.includes(reported)
+              ? reported
+              : candidates.length === 1
+                ? candidates[0]
+                : undefined;
+            if (!accountKey) {
+              this.#offers.finish(offer.offerId, 'failed');
+              this.#logger.warn?.(
+                '[ilink-login] already-connected account could not be identified',
+              );
+              return;
+            }
+            this.#accounts.confirmExistingEnrollment({
+              offerId: offer.offerId,
+              accountKey,
+              now: Number(this.#clock()),
+            });
+          } else {
+            this.#offers.finish(offer.offerId, 'already_connected');
+          }
           this.#logger.info?.('[ilink-login] account is already connected');
           return;
         }
@@ -186,6 +259,12 @@ export class IlinkLoginManager {
           });
         } else if (result.status === 'scaned') {
           offer = this.#offers.update(offer.offerId, { status: 'scanned' });
+        } else if (
+          result.status === 'need_verifycode' ||
+          result.status === 'verify_code_blocked'
+        ) {
+          this.#offers.finish(offer.offerId, 'verification_required');
+          return;
         } else if (result.status !== 'wait') {
           this.#offers.finish(
             offer.offerId,
@@ -246,5 +325,10 @@ export class IlinkLoginManager {
     for (const running of this.#running.values()) running.controller.abort();
     await Promise.allSettled([...this.#running.values()].map(({ task }) => task));
     this.#running.clear();
+    for (const offer of this.#offers.listActive()) {
+      if (offer.initiatorKind === 'local_operator') {
+        this.#offers.finish(offer.offerId, 'cancelled');
+      }
+    }
   }
 }

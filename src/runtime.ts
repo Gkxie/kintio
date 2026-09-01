@@ -3,6 +3,8 @@ import path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+
 import { acquireSingleInstanceLock } from './runtime/single-instance-lock.ts';
 import { ensurePrivateDirectory } from './lib/private-directory.ts';
 import { CodexAgent, createCodexAppServer } from './services/codex-agent.ts';
@@ -14,16 +16,20 @@ import { WecomSync } from './services/wecom-sync.ts';
 import { WechatKfToolExecutor } from './mcp/wechat-kf-executor.ts';
 import { createWechatKfMcpServer } from './mcp/wechat-kf-server.ts';
 import { createIlinkMcpServer } from './mcp/ilink-server.ts';
+import { createIlinkLoginMcpServer } from './mcp/ilink-login-server.ts';
 import { McpIpcHost } from './mcp/ipc-host.ts';
+import { operatorMcpInstanceKey } from './mcp/ipc-protocol.ts';
 import { IlinkSendExecutor } from './ilink/executor.ts';
 import { IlinkListenerManager } from './ilink/listener.ts';
 import { IlinkLoginManager } from './ilink/login-manager.ts';
 import type { IlinkLoginStore } from './ilink/login-store.ts';
 import { IlinkMediaGateway } from './ilink/media-gateway.ts';
+import { renderIlinkQrPng } from './ilink/qr.ts';
 import { DEFAULT_ILINK_MEDIA_TIMEOUT_MS } from './ilink/media.ts';
 import { DEFAULT_ILINK_IMAGE_TIMEOUT_MS } from './ilink/inbound-image.ts';
 import { IlinkClient } from './ilink/protocol/client.ts';
 import { IlinkSecretBox } from './ilink/secret-box.ts';
+import { assertIlinkAccountKey } from './ilink/store-types.ts';
 import {
   ConversationMemoryExecutor,
   createConversationMemoryMcpServer,
@@ -34,6 +40,7 @@ import {
 } from './state/persistence.ts';
 import type { AppConfig } from './config.ts';
 import type { ChatChannel, Logger } from './types.ts';
+import { KINTIO_VERSION } from './version.ts';
 
 export interface Runtime {
   readonly messageProcessor: WecomSync | null;
@@ -84,7 +91,10 @@ export async function createRuntime({
   config: AppConfig;
   logger?: Logger;
 }): Promise<Runtime> {
-  if ((!config.wecom.api.enabled && !config.ilink.enabled) || !config.codex.enabled) {
+  if (
+    (!config.wecom.api.enabled && !config.ilink.enabled) ||
+    (!config.codex.enabled && !config.ilink.enabled)
+  ) {
     logger.info('[runtime] message processing is disabled');
     return {
       messageProcessor: null,
@@ -109,6 +119,7 @@ export async function createRuntime({
   let cleanupTimer: NodeJS.Timeout | undefined;
   let ilinkOffers: IlinkLoginStore | undefined;
   let mcpHost: McpIpcHost | undefined;
+  let operatorMcpHost: McpIpcHost | undefined;
 
   try {
     persistence = new StatePersistence({ filePath: config.state.databaseFile });
@@ -151,9 +162,21 @@ export async function createRuntime({
           logger,
           ...(config.ilink.enabled ? {
             ilinkOffers: {
-              offer(sessionToken: string) {
+              async offer(sessionToken: string) {
                 if (!ilinkLogin) throw new Error('iLink login manager is unavailable');
-                return ilinkLogin.offer(sessionToken);
+                const offered = await ilinkLogin.offer({
+                  kind: 'wechat_kf',
+                  sessionToken,
+                });
+                try {
+                  return {
+                    offerId: offered.offerId,
+                    png: await renderIlinkQrPng(offered.qrContent),
+                  };
+                } catch (error) {
+                  ilinkLogin.cancel(offered.offerId);
+                  throw error;
+                }
               },
               cancel(offerId: string) {
                 ilinkLogin?.cancel(offerId);
@@ -212,6 +235,80 @@ export async function createRuntime({
         onAccountsChanged: () => ilinkListener?.refresh(),
       });
     }
+    const runtimeFile = fileURLToPath(import.meta.url);
+    const relayFile = path.resolve(
+      path.dirname(runtimeFile),
+      '..',
+      `mcp-relay${path.extname(runtimeFile)}`,
+    );
+    if (ilinkLogin) {
+      const activeOperatorHost = new McpIpcHost({
+        instanceKey: operatorMcpInstanceKey(config.state.lockFile),
+        stateDirectory: path.dirname(config.state.lockFile),
+        relayFile,
+        memory: () => new McpServer({
+          name: 'kintio-operator-isolation',
+          version: KINTIO_VERSION,
+        }),
+        operator: () => createIlinkLoginMcpServer({
+          begin: () => {
+            if (toolsUnavailable) throw new Error('service unavailable');
+            return ilinkLogin.offer({ kind: 'terminal' });
+          },
+          status: (offerId) => {
+            if (toolsUnavailable) throw new Error('service unavailable');
+            return ilinkLogin.status(offerId);
+          },
+          cancel: (offerId) => ilinkLogin.cancel(offerId),
+        }),
+        logger,
+      });
+      operatorMcpHost = activeOperatorHost;
+      await activeOperatorHost.start();
+    }
+    if (!config.codex.enabled) {
+      logger.info('[runtime] Agent processing is disabled; iLink enrollment remains available');
+      let started: Promise<void> | undefined;
+      let closing: Promise<void> | undefined;
+      let accepting = true;
+      const close = (force = false): Promise<void> => {
+        closing ||= (async () => {
+          accepting = false;
+          toolsUnavailable = true;
+          await Promise.allSettled([
+            ilinkLogin?.close(),
+            operatorMcpHost?.close(force),
+          ]);
+          if (cleanupTimer) clearInterval(cleanupTimer);
+          try {
+            activeStore.cleanup();
+            ilinkOffers?.cleanup();
+            activeStore.checkpoint('TRUNCATE');
+          } finally {
+            try {
+              activePersistence.close();
+            } finally {
+              if (activePersistence.closed) instanceLock.release();
+            }
+          }
+        })();
+        return closing;
+      };
+      return {
+        messageProcessor: null,
+        start() {
+          if (!accepting) return Promise.reject(new Error('Kintio runtime is stopping'));
+          started ||= ilinkLogin?.start() || Promise.resolve();
+          return started;
+        },
+        stopAccepting() {
+          accepting = false;
+          toolsUnavailable = true;
+        },
+        close: () => close(),
+        abort: () => close(true),
+      };
+    }
     const channelDispatcher = {
       async kick(channel?: 'wechat_kf' | 'weixin_ilink'): Promise<void> {
         if (channel === 'wechat_kf') return wechatTools?.kick();
@@ -225,15 +322,10 @@ export async function createRuntime({
       },
     };
     let conversationMemory: ConversationMemoryExecutor | undefined;
-    const runtimeFile = fileURLToPath(import.meta.url);
     const activeMcpHost = new McpIpcHost({
       instanceKey: config.state.lockFile,
       stateDirectory: path.dirname(config.state.lockFile),
-      relayFile: path.resolve(
-        path.dirname(runtimeFile),
-        '..',
-        `mcp-relay${path.extname(runtimeFile)}`,
-      ),
+      relayFile,
       ...(wechatTools ? {
         wechatKf: () => createWechatKfMcpServer({
           execute(name, input) {
@@ -262,23 +354,33 @@ export async function createRuntime({
     });
     mcpHost = activeMcpHost;
     const mcpLaunches = await activeMcpHost.start();
+    const mcpToolTimeoutSec = Math.ceil((
+      config.wecom.api.timeoutMs * 4 +
+      config.wecom.api.observeMs +
+      5_000
+    ) / 1_000);
+    const ilinkMcpToolTimeoutSec = Math.ceil((
+      DEFAULT_ILINK_IMAGE_TIMEOUT_MS +
+      DEFAULT_ILINK_MEDIA_TIMEOUT_MS +
+      config.ilink.apiTimeoutMs +
+      5_000
+    ) / 1_000);
     const codex = createCodexAppServer({
       logger,
       mcpLaunches,
-      mcpToolTimeoutSec: Math.ceil((
-        config.wecom.api.timeoutMs * 4 +
-        config.wecom.api.observeMs +
-        5_000
-      ) / 1_000),
-      ilinkMcpToolTimeoutSec: Math.ceil((
-        DEFAULT_ILINK_IMAGE_TIMEOUT_MS +
-        DEFAULT_ILINK_MEDIA_TIMEOUT_MS +
-        config.ilink.apiTimeoutMs +
-        5_000
-      ) / 1_000),
+      mcpToolTimeoutSec,
+      ilinkMcpToolTimeoutSec,
+    });
+    const trustedCodex = createCodexAppServer({
+      logger,
+      mcpLaunches,
+      mcpToolTimeoutSec,
+      ilinkMcpToolTimeoutSec,
+      agentAccess: 'host',
     });
     const codexAgent = new CodexAgent({
       codex,
+      trustedCodex,
       config: config.codex,
     });
     conversationMemory = new ConversationMemoryExecutor({
@@ -295,6 +397,17 @@ export async function createRuntime({
           }
           return mediaGateway?.resolveForCodex(message) || Promise.resolve([]);
         },
+      },
+      agentAccess(identity) {
+        if (identity.channel !== 'weixin_ilink') return 'restricted';
+        try {
+          assertIlinkAccountKey(identity.accountKey);
+          return ilinkStore?.getAccount(identity.accountKey)?.agentAccess === 'host'
+            ? 'host'
+            : 'restricted';
+        } catch {
+          return 'restricted';
+        }
       },
       channel: channelDispatcher,
       allowedUserIds: config.wecom.allowedUserIds,
@@ -499,7 +612,10 @@ export async function createRuntime({
               wechatTools?.close(),
             ]);
             try {
-              await activeMcpHost.close();
+              await Promise.all([
+                activeMcpHost.close(),
+                operatorMcpHost?.close(),
+              ]);
             } finally {
               if (cleanupTimer) clearInterval(cleanupTimer);
               try {
@@ -526,13 +642,17 @@ export async function createRuntime({
           processor.abort(),
           ilinkClosing,
           activeMcpHost.close(true),
+          operatorMcpHost?.close(true),
         ]);
       },
     };
     return runtime;
   } catch (error: unknown) {
     if (cleanupTimer) clearInterval(cleanupTimer);
-    await mcpHost?.close(true).catch(() => undefined);
+    await Promise.allSettled([
+      mcpHost?.close(true),
+      operatorMcpHost?.close(true),
+    ]);
     let persistenceClosed = persistence === undefined &&
       !(error instanceof StatePersistenceUnclosedError);
     try {

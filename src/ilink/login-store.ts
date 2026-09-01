@@ -4,18 +4,46 @@ import type { DatabaseSync } from 'node:sqlite';
 import type { CoreState } from '../state/sqlite-store.ts';
 import { normalizeIlinkBaseUrl } from './protocol/client.ts';
 import { IlinkSecretBox } from './secret-box.ts';
+import {
+  assertIlinkAccountKey,
+  type IlinkAccountKey,
+} from './store-types.ts';
 
-const DEFAULT_TTL_MS = 5 * 60 * 1_000;
+const ILINK_LOGIN_TTL_MS = 5 * 60 * 1_000;
 const MAX_TTL_MS = 10 * 60 * 1_000;
+const TERMINAL_ACCOUNT_ID = 'local';
+const TERMINAL_PEER_ID = 'operator';
 
 type ActiveStatus = 'waiting' | 'scanned';
-type EnrollmentResult = 'confirmed' | 'expired' | 'failed' | 'cancelled';
+export type IlinkLoginResult =
+  | 'confirmed'
+  | 'expired'
+  | 'failed'
+  | 'cancelled'
+  | 'already_connected'
+  | 'verification_required';
+export type IlinkLoginStatus = ActiveStatus | IlinkLoginResult | 'unknown';
+export type IlinkLoginSource =
+  | { readonly kind: 'wechat_kf'; readonly sessionToken: string }
+  | { readonly kind: 'terminal' };
+type IlinkLoginInitiator = 'local_operator' | 'remote_adapter';
+
+interface ResolvedSource {
+  readonly initiatorKind: IlinkLoginInitiator;
+  readonly channel: IlinkLoginSource['kind'];
+  readonly messageKey: string;
+  readonly accountId: string;
+  readonly peerId: string;
+}
 
 interface OfferRow {
   offer_id: string;
+  initiator_kind: IlinkLoginInitiator;
+  source_channel: IlinkLoginSource['kind'];
   source_message_key: string;
-  source_open_kfid: string;
-  source_external_userid: string;
+  source_account_id: string;
+  source_peer_id: string;
+  candidate_account_keys_json: string;
   secret_generation: number;
   nonce: string;
   ciphertext: string;
@@ -30,9 +58,7 @@ interface OfferRow {
 
 export interface IlinkLoginOffer {
   readonly offerId: string;
-  readonly sourceMessageKey: string;
-  readonly sourceOpenKfId: string;
-  readonly sourceExternalUserId: string;
+  readonly initiatorKind: IlinkLoginInitiator;
   readonly apiBaseUrl: string;
   readonly status: ActiveStatus;
   readonly expiresAt: number;
@@ -43,6 +69,7 @@ export interface IlinkLoginOffer {
 
 export interface IlinkLoginRuntimeOffer extends IlinkLoginOffer {
   readonly qrCode: string;
+  readonly candidateAccountKeys: readonly IlinkAccountKey[];
 }
 
 function sha256(value: string): string {
@@ -60,9 +87,7 @@ function rowAs<T>(value: unknown): T | undefined {
 function mapped(row: OfferRow): IlinkLoginOffer {
   return {
     offerId: row.offer_id,
-    sourceMessageKey: row.source_message_key,
-    sourceOpenKfId: row.source_open_kfid,
-    sourceExternalUserId: row.source_external_userid,
+    initiatorKind: row.initiator_kind,
     apiBaseUrl: row.api_base_url,
     status: row.status,
     expiresAt: Number(row.expires_at),
@@ -118,18 +143,50 @@ export class IlinkLoginStore {
   }
 
   #runtime(row: OfferRow): IlinkLoginRuntimeOffer {
+    const candidates = JSON.parse(row.candidate_account_keys_json) as unknown;
+    if (!Array.isArray(candidates) || candidates.length > 10) {
+      throw new Error('Invalid iLink login candidate accounts');
+    }
+    for (const accountKey of candidates) {
+      if (typeof accountKey !== 'string') {
+        throw new Error('Invalid iLink login candidate account');
+      }
+      assertIlinkAccountKey(accountKey);
+    }
     return {
       ...mapped(row),
+      candidateAccountKeys: Object.freeze([...candidates]) as readonly IlinkAccountKey[],
       qrCode: this.#secrets.open({
         nonce: row.nonce,
         ciphertext: row.ciphertext,
         authTag: row.auth_tag,
       }, {
         secretKind: 'qr_token',
-        accountId: row.source_open_kfid,
-        peerId: row.source_external_userid,
+        accountId: row.source_account_id,
+        peerId: row.source_peer_id,
         generation: row.secret_generation,
       }),
+    };
+  }
+
+  #source(source: IlinkLoginSource): ResolvedSource {
+    if (source.kind === 'terminal') {
+      return {
+        initiatorKind: 'local_operator',
+        channel: source.kind,
+        messageKey: '',
+        accountId: TERMINAL_ACCOUNT_ID,
+        peerId: TERMINAL_PEER_ID,
+      };
+    }
+    const session = this.#store.getAgentSession(source.sessionToken);
+    if (session.channel !== 'wechat_kf') throw new Error('Wrong channel for iLink offer');
+    return {
+      initiatorKind: 'remote_adapter',
+      channel: source.kind,
+      messageKey: session.messageKey,
+      accountId: session.accountKey,
+      peerId: session.peerId,
     };
   }
 
@@ -143,21 +200,24 @@ export class IlinkLoginStore {
 
   #finishRow(
     row: OfferRow,
-    result: EnrollmentResult,
+    result: IlinkLoginResult,
     accountKey: string,
     now: number,
   ): void {
     this.#database.prepare(`
       INSERT INTO ilink_enrollment_audit (
-        offer_id, source_message_key, source_open_kfid,
-        source_external_userid, account_key, result, offered_at, completed_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        offer_id, initiator_kind, source_channel, source_message_key,
+        source_account_id, source_peer_id,
+        account_key, result, offered_at, completed_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(offer_id) DO NOTHING
     `).run(
       row.offer_id,
+      row.initiator_kind,
+      row.source_channel,
       row.source_message_key,
-      row.source_open_kfid,
-      row.source_external_userid,
+      row.source_account_id,
+      row.source_peer_id,
       accountKey,
       result,
       row.created_at,
@@ -168,43 +228,48 @@ export class IlinkLoginStore {
     `).run(row.offer_id);
   }
 
-  findForSession(sessionToken: string): IlinkLoginOffer | undefined {
-    const session = this.#store.getAgentSession(sessionToken);
-    if (session.channel !== 'wechat_kf') throw new Error('Wrong channel for iLink offer');
+  find(source: IlinkLoginSource): IlinkLoginOffer | undefined {
+    const identity = this.#source(source);
     return this.#transaction(() => {
       this.#expire();
       const row = rowAs<OfferRow>(this.#database.prepare(`
         SELECT * FROM ilink_login_offers
-        WHERE source_open_kfid = ? AND source_external_userid = ?
+        WHERE source_channel = ? AND source_account_id = ? AND source_peer_id = ?
           AND status IN ('waiting', 'scanned')
-      `).get(session.accountKey, session.peerId));
+      `).get(identity.channel, identity.accountId, identity.peerId));
       return row ? mapped(row) : undefined;
     });
   }
 
   create({
-    sessionToken,
+    source,
     qrCode,
     apiBaseUrl,
-    ttlMs = DEFAULT_TTL_MS,
+    ttlMs = ILINK_LOGIN_TTL_MS,
+    candidateAccountKeys = [],
   }: {
-    sessionToken: string;
+    source: IlinkLoginSource;
     qrCode: string;
     apiBaseUrl: string;
     ttlMs?: number;
+    candidateAccountKeys?: readonly IlinkAccountKey[];
   }): IlinkLoginRuntimeOffer {
-    const session = this.#store.getAgentSession(sessionToken);
-    if (session.channel !== 'wechat_kf') throw new Error('Wrong channel for iLink offer');
+    const identity = this.#source(source);
     if (!qrCode || Buffer.byteLength(qrCode, 'utf8') > 8_192) {
       throw new Error('Invalid iLink QR token');
     }
     const lifetime = Math.max(1_000, Math.min(Number(ttlMs) || 0, MAX_TTL_MS));
     const offerId = `qo_${randomBytes(20).toString('base64url')}`;
     const generation = secretGeneration(offerId);
+    if (candidateAccountKeys.length > 10) {
+      throw new Error('Too many iLink login candidate accounts');
+    }
+    for (const accountKey of candidateAccountKeys) assertIlinkAccountKey(accountKey);
+    const candidates = JSON.stringify([...new Set(candidateAccountKeys)]);
     const sealed = this.#secrets.seal(qrCode, {
       secretKind: 'qr_token',
-      accountId: session.accountKey,
-      peerId: session.peerId,
+      accountId: identity.accountId,
+      peerId: identity.peerId,
       generation,
     });
     const now = Number(this.#clock());
@@ -212,23 +277,27 @@ export class IlinkLoginStore {
       this.#expire(now);
       const existing = this.#database.prepare(`
         SELECT 1 FROM ilink_login_offers
-        WHERE source_open_kfid = ? AND source_external_userid = ?
+        WHERE source_channel = ? AND source_account_id = ? AND source_peer_id = ?
           AND status IN ('waiting', 'scanned')
-      `).get(session.accountKey, session.peerId);
+      `).get(identity.channel, identity.accountId, identity.peerId);
       if (existing) throw new Error('An iLink login offer is already pending');
       this.#database.prepare(`
         INSERT INTO ilink_login_offers (
-          offer_id, source_message_key, source_open_kfid,
-          source_external_userid, secret_generation,
-          nonce, ciphertext, auth_tag, api_base_url, status,
+          offer_id, initiator_kind, source_channel, source_message_key,
+          source_account_id, source_peer_id, secret_generation,
+          candidate_account_keys_json, nonce, ciphertext, auth_tag,
+          api_base_url, status,
           expires_at, last_polled_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, 0, ?, ?)
       `).run(
         offerId,
-        session.messageKey,
-        session.accountKey,
-        session.peerId,
+        identity.initiatorKind,
+        identity.channel,
+        identity.messageKey,
+        identity.accountId,
+        identity.peerId,
         generation,
+        candidates,
         sealed.nonce,
         sealed.ciphertext,
         sealed.authTag,
@@ -259,6 +328,18 @@ export class IlinkLoginStore {
     `).get(offerId, Number(this.#clock())));
   }
 
+  status(offerId: string): { readonly status: IlinkLoginStatus } {
+    return this.#transaction(() => {
+      this.#expire();
+      const active = this.#row(offerId);
+      if (active) return { status: active.status };
+      const audit = rowAs<{ result: IlinkLoginResult }>(this.#database.prepare(`
+        SELECT result FROM ilink_enrollment_audit WHERE offer_id = ?
+      `).get(offerId));
+      return { status: audit?.result || 'unknown' };
+    });
+  }
+
   update(offerId: string, input: {
     readonly status: ActiveStatus;
     readonly apiBaseUrl?: string;
@@ -287,7 +368,7 @@ export class IlinkLoginStore {
 
   finish(
     offerId: string,
-    result: EnrollmentResult = 'cancelled',
+    result: IlinkLoginResult = 'cancelled',
     accountKey = '',
   ): boolean {
     return this.#transaction(() => {

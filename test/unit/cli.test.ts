@@ -50,6 +50,7 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
   const runtime = cliRuntime(await temporaryRoot(t));
   assert.equal(await runCli([], runtime.overrides), 0);
   assert.match(runtime.stdout.join(''), /Commands:\n  setup/u);
+  assert.match(runtime.stdout.join(''), /ilink login/u);
   runtime.stdout.length = 0;
   assert.equal(await runCli(['--version'], runtime.overrides), 0);
   assert.equal(runtime.stdout.join(''), `${KINTIO_VERSION}\n`);
@@ -58,6 +59,36 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
   runtime.stderr.length = 0;
   assert.equal(await runCli(['start', '--lines', '5'], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /valid only for "kintio logs"/u);
+});
+
+test('CLI routes only the exact ilink login subcommand to an interactive adapter', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const setupRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  await fs.appendFile(path.join(home, '.env'), '\nILINK_ENABLED=true\n');
+  const signals: AbortSignal[] = [];
+  const previousListeners = [...process.listeners('SIGINT')];
+  const runtime = cliRuntime(root, {
+    stdoutIsTTY: true,
+    stdoutColumns: 120,
+    ilinkLogin: async (options) => {
+      signals.push(options.signal);
+      assert.equal(options.config.ilink.enabled, true);
+      assert.equal(options.stdoutColumns, 120);
+      return 0;
+    },
+  });
+  assert.equal(await runCli(['ilink', 'login', '--home', home], runtime.overrides), 0);
+  assert.equal(signals.length, 1);
+  assert.equal(signals[0]?.aborted, false);
+  assert.deepEqual(process.listeners('SIGINT'), previousListeners);
+
+  assert.equal(await runCli(['ilink', '--home', home], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /Usage: kintio ilink login/u);
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['ilink', 'logout', '--home', home], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /Usage: kintio ilink login/u);
 });
 
 test('setup creates one private config and refreshes the managed Agent skill', async (t) => {

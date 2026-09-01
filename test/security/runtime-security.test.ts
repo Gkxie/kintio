@@ -120,6 +120,7 @@ test('Codex Adapter uses native environment inheritance without adding Agent con
   assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.args'), true);
   assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.url'), false);
   assert.equal(serializedArguments.includes('mcp_servers.wechat_kf.env_vars'), false);
+  assert.equal(/operator|begin_login|login_status|cancel_login/u.test(serializedArguments), false);
   assert.equal(/bearer_token|model_provider|reasoning|web_search/iu.test(serializedArguments), false);
   assert.equal(captured.explicitEnvironment, false);
   for (const canary of Object.values(environmentCanaries)) {

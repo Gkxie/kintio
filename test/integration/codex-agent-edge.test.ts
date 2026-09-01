@@ -203,11 +203,21 @@ test('app-server registers channel-specific stdio MCP launches', async (t) => {
       ilink: { command: '/node', args: ['/relay', '--route', 'weixin_ilink'] },
     },
   });
+  const trusted = createCodexAppServer({
+    spawnProcess,
+    mcpLaunches: {
+      wechatKf: { command: '/node', args: ['/relay', '--route', 'wechat_kf'] },
+      memory: { command: '/node', args: ['/relay', '--route', 'conversation_memory'] },
+      ilink: { command: '/node', args: ['/relay', '--route', 'weixin_ilink'] },
+    },
+    agentAccess: 'host',
+  });
   t.onTestFinished(async () => {
-    await Promise.all([configured.close(), ilinkOnly.close()]);
+    await Promise.all([configured.close(), ilinkOnly.close(), trusted.close()]);
   });
   await configured.initialize();
   await ilinkOnly.initialize();
+  await trusted.initialize();
   assert.ok(captures[0]?.args.includes(
     'mcp_servers.wechat_kf.command="/node"',
   ));
@@ -223,6 +233,20 @@ test('app-server registers channel-specific stdio MCP launches', async (t) => {
   assert.ok(captures[1]?.args.includes(
     'mcp_servers.weixin_ilink.args=["/relay","--route","weixin_ilink"]',
   ));
+  const trustedArguments = captures[2]?.args || [];
+  assert.ok(trustedArguments.includes(
+    'mcp_servers.weixin_ilink.args=["/relay","--route","weixin_ilink"]',
+  ));
+  assert.ok(trustedArguments.includes(
+    'mcp_servers.conversation_memory.args=["/relay","--route","conversation_memory"]',
+  ));
+  assert.equal(trustedArguments.includes('mcp_servers={}'), false);
+  assert.equal(
+    trustedArguments.some((argument) =>
+      /mcp_servers\.wechat_kf|features\..*=false|allow_login_shell|shell_environment_policy|sandbox_workspace_write|tools\.view_image/u
+        .test(argument)),
+    false,
+  );
 });
 
 test('history inspection distinguishes missing, input-only, and completed without a boundary', async (t) => {

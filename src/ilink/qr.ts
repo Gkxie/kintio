@@ -17,6 +17,8 @@ const QR_DARK = Object.freeze([0x11, 0x18, 0x14, 0xff] as const);
 const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
 ]);
+const TERMINAL_INK = '\u001b[47m\u001b[30m';
+const TERMINAL_RESET = '\u001b[0m';
 
 function templatePath(): string {
   const moduleDirectory = path.dirname(fileURLToPath(import.meta.url));
@@ -59,7 +61,13 @@ export class IlinkQrRenderError extends Error {
   }
 }
 
-function validateContent(content: string): void {
+export interface IlinkTerminalQr {
+  readonly text: string;
+  readonly columns: number;
+  readonly rows: number;
+}
+
+export function assertIlinkQrContent(content: string): void {
   if (
     typeof content !== 'string' ||
     content.trim().length === 0 ||
@@ -127,7 +135,7 @@ function renderCard(content: string): Buffer {
 }
 
 export async function renderIlinkQrPng(content: string): Promise<Buffer> {
-  validateContent(content);
+  assertIlinkQrContent(content);
   let png: Buffer;
   try {
     png = renderCard(content);
@@ -144,4 +152,44 @@ export async function renderIlinkQrPng(content: string): Promise<Buffer> {
     throw new IlinkQrRenderError('qr_png_too_large', 'Rendered iLink QR image is too large');
   }
   return png;
+}
+
+export function renderIlinkQrTerminal(content: string): IlinkTerminalQr {
+  assertIlinkQrContent(content);
+  let qr: ReturnType<typeof create>;
+  try {
+    qr = create(content, { errorCorrectionLevel: 'M' });
+  } catch {
+    throw new IlinkQrRenderError(
+      'qr_render_failed',
+      'Unable to render iLink QR code',
+    );
+  }
+  const matrixSize = qr.modules.size;
+  const columns = matrixSize + QUIET_ZONE_MODULES * 2;
+  const rows = Math.ceil(columns / 2);
+  const dark = (row: number, column: number): boolean => {
+    const matrixRow = row - QUIET_ZONE_MODULES;
+    const matrixColumn = column - QUIET_ZONE_MODULES;
+    return (
+      matrixRow >= 0 && matrixRow < matrixSize &&
+      matrixColumn >= 0 && matrixColumn < matrixSize &&
+      Boolean(qr.modules.get(matrixRow, matrixColumn))
+    );
+  };
+  const lines: string[] = [];
+  for (let row = 0; row < columns; row += 2) {
+    let line = TERMINAL_INK;
+    for (let column = 0; column < columns; column += 1) {
+      const top = dark(row, column);
+      const bottom = dark(row + 1, column);
+      line += top ? (bottom ? '█' : '▀') : (bottom ? '▄' : ' ');
+    }
+    lines.push(`${line}${TERMINAL_RESET}`);
+  }
+  return Object.freeze({
+    text: `${lines.join('\n')}\n`,
+    columns,
+    rows,
+  });
 }

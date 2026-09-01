@@ -144,10 +144,12 @@ test('iLink login cleanup audits an expired offer before deleting its secret', a
   const { persistence, clock } = await createStore(t);
   persistence.database.prepare(`
     INSERT INTO ilink_login_offers (
-      offer_id, source_message_key, source_open_kfid, source_external_userid,
+      offer_id, initiator_kind, source_channel,
+      source_message_key, source_account_id, source_peer_id,
       secret_generation, nonce, ciphertext, auth_tag, api_base_url, status,
       expires_at, last_polled_at, error_code, created_at, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'waiting', ?, 0, '', ?, ?)
+    ) VALUES (?, 'remote_adapter', 'wechat_kf', ?, ?, ?, ?, ?, ?, ?, ?,
+      'waiting', ?, 0, '', ?, ?)
   `).run(
     'qo_expired_cleanup',
     'source-expired-cleanup',

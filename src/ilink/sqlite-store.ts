@@ -21,6 +21,7 @@ import {
   type IlinkAccountKey,
   type IlinkAccountRecord,
   type IlinkAccountSecretRecord,
+  type IlinkAgentAccess,
   type IlinkAccountStatus,
   type IlinkCursorRecord,
   type IlinkReplyWindowRecord,
@@ -41,6 +42,7 @@ interface AccountRow {
   base_url: string;
   generation: number;
   status: IlinkAccountStatus;
+  agent_access: IlinkAgentAccess;
   pause_until: number;
   cursor: string;
   cursor_updated_at: number;
@@ -298,6 +300,14 @@ function providerIdentity(value: string, label: string): string {
   return value;
 }
 
+function agentAccess(value: IlinkAgentAccess | undefined): IlinkAgentAccess {
+  if (value === undefined) return 'restricted';
+  if (value !== 'restricted' && value !== 'host') {
+    fail('invalid_input', 'agentAccess is invalid');
+  }
+  return value;
+}
+
 function sealedSecret(row: {
   nonce: string;
   ciphertext: string;
@@ -370,6 +380,7 @@ function mapAccount(row: AccountRow): IlinkAccountRecord {
     baseUrl: row.base_url,
     generation: Number(row.generation),
     status: row.status,
+    agentAccess: row.agent_access,
     pauseUntil: Number(row.pause_until),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -642,6 +653,7 @@ export class IlinkSqliteStore {
     const accountKey = createIlinkAccountKey(input.providerAccountId);
     const ownerPeerId = providerIdentity(input.ownerPeerId, 'ownerPeerId');
     const baseUrl = normalizeIlinkBaseUrl(input.baseUrl);
+    const requestedAccess = agentAccess(input.agentAccess);
     const now = this.#now(input.now);
     return this.#transaction(() => {
       if (this.#accountRow(accountKey)) {
@@ -656,14 +668,15 @@ export class IlinkSqliteStore {
       this.#database.prepare(`
         INSERT INTO ilink_accounts (
           account_key, provider_account_id, owner_peer_id, base_url,
-          generation, status, pause_until, cursor, cursor_updated_at,
+          generation, status, agent_access, pause_until, cursor, cursor_updated_at,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 1, 'active', 0, '', 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, 1, 'active', ?, 0, '', 0, ?, ?)
       `).run(
         accountKey,
         input.providerAccountId,
         ownerPeerId,
         baseUrl,
+        requestedAccess,
         now,
         now,
       );
@@ -692,6 +705,7 @@ export class IlinkSqliteStore {
       fail('pair_mismatch', 'iLink provider account does not match account key');
     }
     const baseUrl = normalizeIlinkBaseUrl(input.baseUrl);
+    const requestedAccess = agentAccess(input.agentAccess);
     const now = this.#now(input.now);
     return this.#transaction(() => {
       const current = this.#accountRow(input.accountKey);
@@ -706,16 +720,22 @@ export class IlinkSqliteStore {
         fail('pair_mismatch', 'iLink account binding cannot change during rotation');
       }
       const nextGeneration = current.generation + 1;
+      const agentAccess =
+        current.agent_access === 'host' || requestedAccess === 'host'
+          ? 'host'
+          : 'restricted';
       positiveInteger(nextGeneration, 'nextGeneration');
       this.#cancelOpenWindows(input.accountKey, now, 'account_generation_changed');
       const updated = this.#database.prepare(`
         UPDATE ilink_accounts
-        SET base_url = ?, generation = ?, status = 'active', pause_until = 0,
+        SET base_url = ?, generation = ?, status = 'active', agent_access = ?,
+            pause_until = 0,
             updated_at = ?
         WHERE account_key = ? AND generation = ?
       `).run(
         baseUrl,
         nextGeneration,
+        agentAccess,
         now,
         input.accountKey,
         input.expectedGeneration,
@@ -754,13 +774,15 @@ export class IlinkSqliteStore {
     positiveInteger(input.maxAccounts, 'maxAccounts');
     return this.#transaction(() => {
       const offer = rowAs<{
+        initiator_kind: string;
+        source_channel: string;
         source_message_key: string;
-        source_open_kfid: string;
-        source_external_userid: string;
+        source_account_id: string;
+        source_peer_id: string;
         created_at: number;
       }>(this.#database.prepare(`
-        SELECT source_message_key, source_open_kfid,
-               source_external_userid, created_at
+        SELECT initiator_kind, source_channel, source_message_key,
+               source_account_id, source_peer_id, created_at
         FROM ilink_login_offers
         WHERE offer_id = ? AND status IN ('waiting', 'scanned')
           AND expires_at > ?
@@ -787,19 +809,28 @@ export class IlinkSqliteStore {
             ownerPeerId: input.ownerPeerId,
             baseUrl: input.baseUrl,
             encryptedBotToken: input.encryptedBotToken,
+            agentAccess:
+              offer.initiator_kind === 'local_operator' ? 'host' : 'restricted',
             now: input.now,
           })
-        : this.registerAccount(input);
+        : this.registerAccount({
+            ...input,
+            agentAccess:
+              offer.initiator_kind === 'local_operator' ? 'host' : 'restricted',
+          });
       this.#database.prepare(`
         INSERT INTO ilink_enrollment_audit (
-          offer_id, source_message_key, source_open_kfid,
-          source_external_userid, account_key, result, offered_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, 'confirmed', ?, ?)
+          offer_id, initiator_kind, source_channel, source_message_key,
+          source_account_id, source_peer_id,
+          account_key, result, offered_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'confirmed', ?, ?)
       `).run(
         offerId,
+        offer.initiator_kind,
+        offer.source_channel,
         offer.source_message_key,
-        offer.source_open_kfid,
-        offer.source_external_userid,
+        offer.source_account_id,
+        offer.source_peer_id,
         account.accountKey,
         offer.created_at,
         this.#now(input.now),
@@ -826,6 +857,70 @@ export class IlinkSqliteStore {
   getAccount(accountKey: IlinkAccountKey): IlinkAccountRecord | undefined {
     const row = this.#accountRow(accountKey);
     return row ? mapAccount(row) : undefined;
+  }
+
+  confirmExistingEnrollment(input: {
+    readonly offerId: string;
+    readonly accountKey: IlinkAccountKey;
+    readonly now?: number;
+  }): IlinkAccountRecord {
+    if (!/^qo_[A-Za-z0-9_-]{1,128}$/u.test(input.offerId)) {
+      fail('invalid_input', 'iLink login offer ID is invalid');
+    }
+    assertIlinkAccountKey(input.accountKey);
+    const now = this.#now(input.now);
+    return this.#transaction(() => {
+      const offer = rowAs<{
+        initiator_kind: string;
+        source_channel: string;
+        source_message_key: string;
+        source_account_id: string;
+        source_peer_id: string;
+        created_at: number;
+      }>(this.#database.prepare(`
+        SELECT initiator_kind, source_channel, source_message_key,
+               source_account_id, source_peer_id, created_at
+        FROM ilink_login_offers
+        WHERE offer_id = ? AND initiator_kind = 'local_operator'
+          AND status IN ('waiting', 'scanned') AND expires_at > ?
+          AND EXISTS (
+            SELECT 1 FROM json_each(candidate_account_keys_json)
+            WHERE value = ?
+          )
+      `).get(input.offerId, now, input.accountKey));
+      if (!offer) fail('invalid_input', 'Unknown or invalid local iLink login offer');
+      const account = this.#accountRow(input.accountKey);
+      if (!account || account.status !== 'active') {
+        fail('account_not_active', 'iLink account is not active');
+      }
+      this.#database.prepare(`
+        UPDATE ilink_accounts SET agent_access = 'host', updated_at = ?
+        WHERE account_key = ?
+      `).run(now, input.accountKey);
+      this.#database.prepare(`
+        INSERT INTO ilink_enrollment_audit (
+          offer_id, initiator_kind, source_channel, source_message_key,
+          source_account_id, source_peer_id, account_key,
+          result, offered_at, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'already_connected', ?, ?)
+      `).run(
+        input.offerId,
+        offer.initiator_kind,
+        offer.source_channel,
+        offer.source_message_key,
+        offer.source_account_id,
+        offer.source_peer_id,
+        input.accountKey,
+        offer.created_at,
+        now,
+      );
+      const removed = this.#database.prepare(`
+        DELETE FROM ilink_login_offers
+        WHERE offer_id = ? AND status IN ('waiting', 'scanned')
+      `).run(input.offerId);
+      if (removed.changes !== 1) fail('attempt_conflict', 'iLink login offer changed');
+      return mapAccount(this.#accountRow(input.accountKey)!);
+    });
   }
 
   getAccountSecret(

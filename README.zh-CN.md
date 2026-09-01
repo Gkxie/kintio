@@ -50,7 +50,7 @@ codex login status
 `kintio setup` 会在 `~/.kintio` 创建私有实例目录、安装内置 Agent Skill，并生成渠道配置
 模板 `.env`。macOS/Linux 使用 `0600`，Windows 则限定在当前用户目录的 ACL
 边界内。默认不启用任何适配器；请按英文
-[部署指南](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)配置 WeChat KF API，或为已有 Weixin iLink 绑定设置
+[部署指南](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)配置 WeChat KF API，或为 Weixin iLink 设置
 `ILINK_ENABLED=true`。
 
 ```bash
@@ -58,6 +58,16 @@ kintio start
 kintio status
 kintio logs --lines 100
 ```
+
+Kintio 运行后，可直接在交互式终端连接新的 iLink 身份：
+
+```bash
+kintio ilink login
+```
+
+二维码五分钟后过期；该命令不会唤醒 Agent。通过本机命令建立的 iLink 身份代表宿主机
+所有者的明确授权，后续对话直接继承宿主 Agent 配置，不再套用不可信渠道的能力限制。
+只应让获准控制宿主 Agent 的人扫描该二维码。
 
 启动后应确认 `kintio logs` 包含 `Hono server is listening on port 8888`；投入使用前仍需按
 部署指南完成回调或绑定验证。需要前台进程时使用 `kintio run`；现有源码目录部署可以在完成
