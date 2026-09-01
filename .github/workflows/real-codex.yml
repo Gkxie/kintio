@@ -1,25 +1,55 @@
 name: Real Codex validation
 
 on:
+  pull_request:
+    branches: [master]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - .github/workflows/real-codex.yml
+      - codex-workspace/**
+      - package.json
+      - pnpm-lock.yaml
+      - src/agent/**
+      - src/config.ts
+      - src/domain/**
+      - src/mcp/**
+      - src/runtime.ts
+      - src/services/codex-agent.ts
+      - src/services/codex-app-server.ts
+      - src/services/conversation-processor.ts
+      - src/services/image-stager.ts
+      - src/services/media-gateway.ts
+      - src/state/**
+      - src/types.ts
+      - test/opt-in/real-codex.integration.ts
+      - vitest.config.ts
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: real-codex-validation
-  cancel-in-progress: false
+  group: real-codex-validation-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   validate:
     name: Approved synthetic smoke test
     if: >-
       github.repository == 'Gkxie/kintio' &&
-      (github.ref == 'refs/heads/master' ||
-      startsWith(github.ref, 'refs/heads/codex/')) &&
-      github.actor == 'Gkxie' &&
-      github.triggering_actor == 'Gkxie' &&
-      github.run_attempt == 1
+      github.run_attempt == 1 &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (github.ref == 'refs/heads/master' ||
+         startsWith(github.ref, 'refs/heads/codex/')) &&
+        github.actor == 'Gkxie' &&
+        github.triggering_actor == 'Gkxie') ||
+       (github.event_name == 'pull_request' &&
+        github.event.pull_request.draft == false &&
+        github.event.pull_request.base.ref == 'master' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        github.event.pull_request.user.login == 'Gkxie' &&
+        github.actor == 'Gkxie' &&
+        github.triggering_actor == 'Gkxie'))
     environment: codex-eval
     runs-on: ubuntu-latest
     timeout-minutes: 15
