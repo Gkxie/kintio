@@ -35,6 +35,7 @@ function daemon(overrides: Partial<DaemonRecord> = {}): DaemonRecord {
     runId: 'run_1',
     daemonPid: 1234,
     configFile: CONFIG_FILE,
+    mode: 'service',
     packageRoot: PACKAGE_ROOT,
     token: TOKEN,
     ...overrides,
@@ -78,6 +79,9 @@ test('control address identity follows filesystem aliases', async (t) => {
 
 test('protocol schemas are versioned, closed, and validate security-sensitive fields', () => {
   assert.deepEqual(parseDaemonRecord(daemon()), daemon());
+  const legacy: Record<string, unknown> = { ...daemon() };
+  delete legacy.mode;
+  assert.deepEqual(parseDaemonRecord(legacy), daemon());
   assert.deepEqual(parseControlRequest({ version: 1, command: 'stop', token: TOKEN }), {
     version: 1,
     command: 'stop',

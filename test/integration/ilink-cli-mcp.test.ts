@@ -170,8 +170,8 @@ test('non-TTY QR output reaches the Worker through private local MCP and cleans 
     packageRoot: path.resolve('.'),
     signal: new AbortController().signal,
     stdout: (text) => lifecycleOutput.push(text),
-  })).startForeground, false);
-  assert.match(lifecycleOutput.join(''), /cli-mcp-bot@im\.bot.*\[stopped\]/u);
+  })).runtimeRequired, false);
+  assert.equal(lifecycleOutput.join(''), 'cli-mcp-bot@im.bot\n');
   await runIlinkAccountCommand({
     command: 'stop',
     config,

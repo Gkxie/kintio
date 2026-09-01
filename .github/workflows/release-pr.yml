@@ -33,12 +33,17 @@ jobs:
     permissions:
       actions: write
       contents: write
-      pull-requests: read
+      pull-requests: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
       - name: Validate the merged Release PR, create its tag, and dispatch
+        id: release
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_REF: ${{ github.event.pull_request.head.ref }}
@@ -50,6 +55,8 @@ jobs:
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
           node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+
           const repository = process.env.REPOSITORY;
           const mergeSha = process.env.MERGE_SHA;
           const pullNumber = Number(process.env.PR_NUMBER);
@@ -269,20 +276,51 @@ jobs:
             });
           }
 
-          const runs = await api(
+          const findReleaseRun = (runs) => runs.workflow_runs?.find(
+            (run) => run.head_sha === mergeSha && run.conclusion !== 'cancelled',
+          );
+          let runs = await api(
             '/actions/workflows/release.yml/runs?branch='
               + encodeURIComponent(tag) + '&per_page=20',
           );
-          const alreadyDispatched = runs.workflow_runs?.some(
-            (run) => run.head_sha === mergeSha && run.conclusion !== 'cancelled',
-          );
-          if (!alreadyDispatched) {
+          let releaseRun = findReleaseRun(runs);
+          if (!releaseRun) {
             await api('/actions/workflows/release.yml/dispatches', {
               method: 'POST',
               body: { ref: tag },
             });
             console.log('Created ' + tag + ' and dispatched release.yml');
+            for (let attempt = 0; attempt < 20 && !releaseRun; attempt += 1) {
+              await new Promise((resolve) => setTimeout(resolve, 250));
+              runs = await api(
+                '/actions/workflows/release.yml/runs?branch='
+                  + encodeURIComponent(tag) + '&per_page=20',
+              );
+              releaseRun = findReleaseRun(runs);
+            }
           } else {
             console.log(tag + ' already has a release workflow run');
           }
+          const runUrl = releaseRun?.html_url
+            || 'https://github.com/' + repository + '/actions/workflows/release.yml';
+          const status = releaseRun?.status === 'completed'
+            ? releaseRun.conclusion === 'success' ? 'succeeded' : 'failed'
+            : 'started';
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            'pull_request=' + pullNumber + '\n'
+              + 'run_url=' + runUrl + '\n'
+              + 'status=' + status + '\n'
+              + 'version=' + version + '\n',
+          );
           NODE
+      - name: Link publication progress from the Release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR_NUMBER: ${{ steps.release.outputs.pull_request }}
+          RELEASE_RUN_URL: ${{ steps.release.outputs.run_url }}
+          RELEASE_STATUS: ${{ steps.release.outputs.status }}
+          RELEASE_VERSION: ${{ steps.release.outputs.version }}
+        run: >-
+          node --experimental-strip-types
+          .github/scripts/report-release.ts
