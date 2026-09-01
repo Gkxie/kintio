@@ -138,6 +138,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     fs.copyFile('cli.ts', path.join(packageRoot, 'cli.ts')),
     fs.copyFile('daemon.ts', path.join(packageRoot, 'daemon.ts')),
     fs.copyFile('index.ts', path.join(packageRoot, 'index.ts')),
+    fs.copyFile('ilink.ts', path.join(packageRoot, 'ilink.ts')),
     fs.copyFile('tsconfig.json', path.join(packageRoot, 'tsconfig.json')),
     fs.copyFile('package.json', path.join(packageRoot, 'package.json')),
     fs.copyFile('.env.example', path.join(packageRoot, '.env.example')),
@@ -190,6 +191,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     'dist/cli.js',
     'dist/daemon.js',
     'dist/index.js',
+    'dist/ilink.js',
     'bin/kintio.js',
     'assets/ilink-login-card.png',
     '.env.example',
@@ -345,7 +347,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     explicitEnvironment,
   );
   assert.equal(status.code, 0, status.output);
-  assert.match(status.output, /Kintio is running/u);
+  assert.match(status.output, /Kintio is running in service mode/u);
   const logs = await kintio(
     ['logs', '--home', instanceRoot, '--lines', '20', '--no-follow'],
     explicitEnvironment,

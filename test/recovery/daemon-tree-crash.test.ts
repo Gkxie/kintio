@@ -271,7 +271,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
     fs.cp('bin', path.join(packageRoot, 'bin'), { recursive: true }),
     fs.cp('assets', path.join(packageRoot, 'assets'), { recursive: true }),
     fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), { recursive: true }),
-    ...['cli.ts', 'daemon.ts', 'index.ts', 'mcp-relay.ts', 'tsconfig.json',
+    ...['cli.ts', 'daemon.ts', 'index.ts', 'ilink.ts', 'mcp-relay.ts', 'tsconfig.json',
       'package.json', '.env.example'].map((file) =>
       fs.copyFile(file, path.join(packageRoot, file))),
     fs.symlink(

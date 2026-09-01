@@ -18,6 +18,7 @@ import {
   daemonRecordPath,
   parseControlRequest,
   type ControlResponse,
+  type DaemonMode,
   type DaemonPhase,
   writeDaemonRecord,
 } from './daemon-protocol.ts';
@@ -80,11 +81,13 @@ export async function runNativeDaemon({
   home,
   configFile,
   packageRoot,
+  mode = 'service',
   environment = process.env,
 }: {
   home: string;
   configFile: string;
   packageRoot: string;
+  mode?: DaemonMode;
   environment?: NodeJS.ProcessEnv;
 }): Promise<void> {
   const instanceHome = path.resolve(home);
@@ -169,7 +172,10 @@ export async function runNativeDaemon({
     phase = 'starting';
     const child = spawn(
       process.execPath,
-      [path.join(instancePackageRoot, 'dist/index.js')],
+      [path.join(
+        instancePackageRoot,
+        mode === 'ilink' ? 'dist/ilink.js' : 'dist/index.js',
+      )],
       {
         cwd: instanceHome,
         env: {
@@ -210,7 +216,7 @@ export async function runNativeDaemon({
     readyTimer.unref?.();
     child.stdout?.on('data', (chunk: Buffer) => log.write(chunk));
     child.stderr?.on('data', (chunk: Buffer) => log.write(chunk));
-    child.once('message', (message) => {
+    child.on('message', (message) => {
       if (
         worker === child &&
         !readinessExpired &&
@@ -225,6 +231,15 @@ export async function runNativeDaemon({
         clearTimeout(readyTimer);
         phase = 'running';
         lastError = undefined;
+      }
+      if (
+        worker === child &&
+        phase === 'running' &&
+        message && typeof message === 'object' &&
+        'type' in message && message.type === 'shutdown-request' &&
+        'pid' in message && message.pid === child.pid
+      ) {
+        void shutdown();
       }
     });
     child.once('error', (error) => log.line(`worker spawn error: ${error.message}`));
@@ -332,6 +347,7 @@ export async function runNativeDaemon({
       runId,
       daemonPid: process.pid,
       configFile: instanceConfig,
+      mode,
       packageRoot: instancePackageRoot,
       token,
     });

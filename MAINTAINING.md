@@ -270,6 +270,10 @@ proves an owner-merged Release PR. Expose the private key only to the trusted
    verifies the same bot-created and owner-merged Release PR before publishing.
    A release tag must never be deleted, moved, or reused, even if the release
    workflow fails.
+   The merged Release PR receives one version-scoped status comment linking the
+   exact workflow run. The terminal report updates that comment with npm and
+   GitHub Release links, or with the failed run to inspect. Retries update the
+   same comment instead of adding another.
 5. The read-only release verification job rechecks version monotonicity, the
    Changelog, source commit, tests, build, and dependencies, then uploads one
    npm tarball with its SHA-512 integrity.
