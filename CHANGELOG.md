@@ -4,6 +4,8 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.7.2
+
 - Prevented the background Agent process on Windows from opening a persistent
   empty `cmd.exe` window while preserving its stdio transport and lifecycle
   ownership ([#70](https://github.com/Gkxie/kintio/issues/70)).
