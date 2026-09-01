@@ -4,6 +4,10 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Added a repository-scoped Release App that deterministically maintains one
+  fully checked Release PR from the reviewed Unreleased notes; maintainers now
+  authorize a release by reviewing and merging that PR only
+  ([#48](https://github.com/Gkxie/kintio/issues/48)).
 - Made a merged, owner-authored Release PR the sole human release authorization;
   Kintio now creates the annotated tag and dispatches its verified OIDC release
   automatically

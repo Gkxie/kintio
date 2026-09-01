@@ -40,6 +40,7 @@ jobs:
         env:
           EVENT_SHA: ${{ github.sha }}
           GH_TOKEN: ${{ github.token }}
+          RELEASE_BOT_LOGIN: kintio-release[bot]
           RELEASE_TAG: ${{ github.ref_name }}
           REPOSITORY_OWNER: ${{ github.repository_owner }}
         run: |
@@ -83,10 +84,18 @@ jobs:
           const releaseCandidate = associatedPulls.find((pull) =>
             pull.merged_at
             && pull.merge_commit_sha === process.env.EVENT_SHA
-            && pull.user?.login === process.env.REPOSITORY_OWNER
             && pull.base?.ref === 'master'
             && pull.head?.repo?.full_name === process.env.GITHUB_REPOSITORY
-            && pull.head?.ref === 'release/v' + version
+            && (
+              (
+                pull.user?.login === process.env.REPOSITORY_OWNER
+                && pull.head?.ref === 'release/v' + version
+              )
+              || (
+                pull.user?.login === process.env.RELEASE_BOT_LOGIN
+                && pull.head?.ref === 'release/next'
+              )
+            )
             && pull.title === 'chore(release): prepare v' + version
           );
           if (!releaseCandidate) {
@@ -107,6 +116,9 @@ jobs:
             releaseFiles.push(...items);
             if (items.length < 100) break;
           }
+          if (releaseFiles.length !== releasePull.changed_files) {
+            throw new Error('Release PR file enumeration is incomplete');
+          }
           const requiredReleaseFiles = ['CHANGELOG.md', 'package.json', 'src/version.ts'];
           const allowedReleaseFiles = new Set([...requiredReleaseFiles, 'SECURITY.md']);
           for (const file of requiredReleaseFiles) {
@@ -118,6 +130,37 @@ jobs:
             if (file.status === 'renamed' || !allowedReleaseFiles.has(file.filename)) {
               throw new Error('Release PR changed a forbidden file');
             }
+          }
+
+          const readFile = async (file, ref) => {
+            const result = await github(
+              '/contents/' + file + '?ref=' + encodeURIComponent(ref),
+            );
+            if (result.type !== 'file' || typeof result.content !== 'string') {
+              throw new Error('cannot read ' + file + ' at ' + ref);
+            }
+            return Buffer.from(result.content.replace(/\s/gu, ''), 'base64')
+              .toString('utf8');
+          };
+          const [basePackageSource, baseRuntimeSource] = await Promise.all([
+            readFile('package.json', releasePull.base.sha),
+            readFile('src/version.ts', releasePull.base.sha),
+          ]);
+          const releasePackage = { ...packageJson };
+          const basePackage = JSON.parse(basePackageSource);
+          const previousPackage = { ...basePackage };
+          delete releasePackage.version;
+          delete previousPackage.version;
+          if (JSON.stringify(releasePackage) !== JSON.stringify(previousPackage)) {
+            throw new Error('Release PR changed package.json beyond its version');
+          }
+          const baseRuntimeVersion = /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u
+            .exec(baseRuntimeSource)?.[1];
+          if (
+            baseRuntimeVersion !== basePackage.version
+            || runtimeVersion !== `export const KINTIO_VERSION = '${version}';\n`
+          ) {
+            throw new Error('Release PR changed the runtime version file unexpectedly');
           }
 
           const releases = [];
@@ -172,16 +215,22 @@ jobs:
           );
           if (unreleased.length !== 1) throw new Error('CHANGELOG.md requires one Unreleased section');
           const findVersion = (target) => {
-            const prefix = `## ${target} - `;
+            const escaped = target.replaceAll('.', '\\.');
             const matches = lines.reduce(
               (indexes, line, index) =>
-                line.startsWith(prefix) && /^\d{4}-\d{2}-\d{2}$/u.test(line.slice(prefix.length))
+                (
+                  line === `## ${target}`
+                  || new RegExp(
+                    `^## ${escaped} - \\d{4}-\\d{2}-\\d{2}$`,
+                    'u',
+                  ).test(line)
+                )
                   ? [...indexes, index]
                   : indexes,
               [],
             );
             if (matches.length !== 1) {
-              throw new Error(`CHANGELOG.md requires one dated section for ${target}`);
+              throw new Error(`CHANGELOG.md requires one section for ${target}`);
             }
             return matches[0];
           };
@@ -582,3 +631,15 @@ jobs:
             --verify-tag \
             --title "$RELEASE_TAG" \
             --notes-file release-input/release-notes.md
+
+  prepare-next:
+    needs: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: write
+    steps:
+      - name: Reconcile the next Release PR after publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run prepare-release.yml --ref master
