@@ -308,7 +308,10 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(release, /attestationBundles/u);
   assert.match(release, /gh release create/u);
   assert.match(release, /name: Reconcile the next Release PR after publication/u);
-  assert.match(release, /gh workflow run prepare-release\.yml --ref master/u);
+  assert.match(
+    release,
+    /gh workflow run prepare-release\.yml[\s\S]*--repo "\$GITHUB_REPOSITORY"[\s\S]*--ref master/u,
+  );
   assert.doesNotMatch(
     release,
     /pnpm audit|gh release edit|NPM_TOKEN|NODE_AUTH_TOKEN|secrets\./u,
