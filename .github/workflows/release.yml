@@ -22,6 +22,8 @@ jobs:
       package_version: ${{ steps.package.outputs.version }}
       package_file: ${{ steps.package.outputs.filename }}
       package_integrity: ${{ steps.package.outputs.integrity }}
+      pull_request: ${{ steps.metadata.outputs.pull_request }}
+      release_version: ${{ steps.metadata.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -108,6 +110,10 @@ jobs:
           ) {
             throw new Error('Release PR was not merged by the repository owner');
           }
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `pull_request=${releasePull.number}\nversion=${version}\n`,
+          );
           const releaseFiles = [];
           for (let page = 1; page <= 100; page += 1) {
             const items = await github(
@@ -646,3 +652,36 @@ jobs:
           gh workflow run prepare-release.yml
           --repo "$GITHUB_REPOSITORY"
           --ref master
+
+  report:
+    if: always() && needs.verify.outputs.pull_request != ''
+    needs: [verify, publish-npm, smoke-registry, release, prepare-next]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Update the Release PR with the terminal result
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_PR_NUMBER: ${{ needs.verify.outputs.pull_request }}
+          RELEASE_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RELEASE_STATUS: >-
+            ${{ needs.verify.result == 'success' &&
+                needs.publish-npm.result == 'success' &&
+                needs.smoke-registry.result == 'success' &&
+                needs.release.result == 'success' &&
+                needs.prepare-next.result == 'success' &&
+                'succeeded' || 'failed' }}
+          RELEASE_VERSION: ${{ needs.verify.outputs.release_version }}
+        run: >-
+          node --experimental-strip-types
+          .github/scripts/report-release.ts

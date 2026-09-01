@@ -314,6 +314,13 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(release, /attestationBundles/u);
   assert.match(release, /gh release create/u);
   assert.match(release, /name: Reconcile the next Release PR after publication/u);
+  assert.match(release, /^  report:\n    if: always\(\) && needs\.verify\.outputs\.pull_request != ''$/mu);
+  assert.match(
+    release,
+    /needs: \[verify, publish-npm, smoke-registry, release, prepare-next\]/u,
+  );
+  assert.match(release, /pull-requests: write/u);
+  assert.match(release, /\.github\/scripts\/report-release\.ts/u);
   assert.match(
     release,
     /gh workflow run prepare-release\.yml[\s\S]*--repo "\$GITHUB_REPOSITORY"[\s\S]*--ref master/u,
@@ -325,12 +332,15 @@ test('repository workflows preserve executable security boundaries', async () =>
   const publishJob = /^  publish-npm:[\s\S]+?(?=^  smoke-registry:)/mu.exec(release)?.[0] || '';
   const smokeJob = /^  smoke-registry:[\s\S]+?(?=^  release:)/mu.exec(release)?.[0] || '';
   const verifyJob = /^  verify:[\s\S]+?(?=^  publish-npm:)/mu.exec(release)?.[0] || '';
+  const reportJob = /^  report:[\s\S]+$/mu.exec(release)?.[0] || '';
   assert.match(verifyJob, /tag_type=\$\(git cat-file -t/u);
   assert.match(verifyJob, /Release tags must be annotated tags/u);
   assert.ok(verifyJob.indexOf('tag_type=$(') < verifyJob.indexOf('npm pack'));
   assert.match(publishJob, /id-token: write/u);
   assert.doesNotMatch(publishJob, /actions\/checkout|pnpm install/u);
   assert.doesNotMatch(smokeJob, /id-token: write/u);
+  assert.match(reportJob, /contents: read[\s\S]+pull-requests: write/u);
+  assert.doesNotMatch(reportJob, /id-token: write|secrets\./u);
 
   const releasePr = workflows.get('.github/workflows/release-pr.yml') || '';
   assert.match(releasePr, /types: \[closed\]/u);
@@ -341,17 +351,20 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(releasePr, /pull_request\.merged_by\.login == github\.repository_owner/u);
   assert.match(releasePr, /pull_request\.head\.repo\.full_name == github\.repository/u);
   assert.match(releasePr, /startsWith\(github\.event\.pull_request\.head\.ref, 'release\/v'\)/u);
-  assert.match(releasePr, /actions: write[\s\S]+contents: write[\s\S]+pull-requests: read/u);
+  assert.match(releasePr, /actions: write[\s\S]+contents: write[\s\S]+pull-requests: write/u);
+  assert.match(releasePr, /ref: \$\{\{ github\.event\.pull_request\.merge_commit_sha \}\}/u);
+  assert.match(releasePr, /persist-credentials: false/u);
   assert.match(releasePr, /const required = \['CHANGELOG\.md', 'package\.json', 'src\/version\.ts'\]/u);
   assert.match(releasePr, /new Set\(\[\.\.\.required, 'SECURITY\.md'\]\)/u);
   assert.match(releasePr, /file\.status === 'renamed'/u);
   assert.match(releasePr, /'\/git\/tags'/u);
   assert.match(releasePr, /'\/git\/refs'/u);
   assert.match(releasePr, /'\/actions\/workflows\/release\.yml\/dispatches'/u);
-  assert.match(releasePr, /workflow_runs\?\.some/u);
+  assert.match(releasePr, /workflow_runs\?\.find/u);
+  assert.match(releasePr, /\.github\/scripts\/report-release\.ts/u);
   assert.match(releasePr, /Release PR changed package\.json beyond its version/u);
   assert.match(releasePr, /Release PR file enumeration is incomplete/u);
-  assert.doesNotMatch(releasePr, /actions\/checkout|secrets\.|NPM_TOKEN|NODE_AUTH_TOKEN/u);
+  assert.doesNotMatch(releasePr, /secrets\.|NPM_TOKEN|NODE_AUTH_TOKEN/u);
 });
 
 test('release workflow inline modules remain syntactically executable', async () => {
