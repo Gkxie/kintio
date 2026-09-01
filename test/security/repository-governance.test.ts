@@ -235,12 +235,29 @@ test('repository workflows preserve executable security boundaries', async () =>
 
   const realCodex = workflows.get('.github/workflows/real-codex.yml') || '';
   assert.match(realCodex, /^  workflow_dispatch:$/mu);
-  assert.doesNotMatch(realCodex, /^  (?:push|pull_request|schedule):/mu);
+  assert.match(realCodex, /^  pull_request:\n    branches: \[master\]$/mu);
+  assert.match(realCodex, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
+  assert.match(realCodex, /^    paths:\n(?:      - .+\n){3,}/mu);
+  assert.doesNotMatch(realCodex, /^  (?:push|pull_request_target|schedule):/mu);
+  assert.match(realCodex, /github\.event_name == 'workflow_dispatch'/u);
+  assert.match(realCodex, /github\.event_name == 'pull_request'/u);
   assert.match(realCodex, /github\.ref == 'refs\/heads\/master'/u);
   assert.match(realCodex, /startsWith\(github\.ref, 'refs\/heads\/codex\/'\)/u);
+  assert.match(realCodex, /github\.event\.pull_request\.draft == false/u);
+  assert.match(realCodex, /github\.event\.pull_request\.base\.ref == 'master'/u);
+  assert.match(
+    realCodex,
+    /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/u,
+  );
+  assert.match(realCodex, /github\.event\.pull_request\.user\.login == 'Gkxie'/u);
   assert.match(realCodex, /github\.actor == 'Gkxie'/u);
   assert.match(realCodex, /github\.triggering_actor == 'Gkxie'/u);
   assert.match(realCodex, /github\.run_attempt == 1/u);
+  assert.match(
+    realCodex,
+    /group: real-codex-validation-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}/u,
+  );
+  assert.match(realCodex, /cancel-in-progress: true/u);
   assert.match(realCodex, /^    environment: codex-eval$/mu);
   assert.match(realCodex, /persist-credentials: false/u);
   assert.match(realCodex, /pnpm install --frozen-lockfile --ignore-scripts/u);
