@@ -246,7 +246,9 @@ export async function createRuntime({
           if (ilinkRuntimeStarted) await ilinkListener?.refresh();
           const runningCount = enrollment.accounts
             .listRuntimeAccountsWithSecrets().length;
-          if (!enabled && runningCount === 0) onIlinkStopRequested?.();
+          if (!enabled && runningCount === 0 && onIlinkStopRequested) {
+            setImmediate(onIlinkStopRequested);
+          }
           return {
             account: {
               accountKey: account.accountKey,
@@ -263,7 +265,9 @@ export async function createRuntime({
           if (ilinkRuntimeStarted) await ilinkListener?.refresh();
           const runningCount = enrollment.accounts
             .listRuntimeAccountsWithSecrets().length;
-          if (runningCount === 0) onIlinkStopRequested?.();
+          if (runningCount === 0 && onIlinkStopRequested) {
+            setImmediate(onIlinkStopRequested);
+          }
           return {
             account: {
               accountKey: account.accountKey,

@@ -70,11 +70,8 @@ function control({
   return { calls, value };
 }
 
-test('iLink list reports physical runtime state and closes its control', async () => {
-  for (const [mode, expected] of [
-    ['standalone', /bot-a@im\.bot.*\[stopped\]/u],
-    ['runtime', /bot-a@im\.bot.*\[running\]/u],
-  ] as const) {
+test('iLink list prints directly reusable provider account IDs only', async () => {
+  for (const mode of ['standalone', 'runtime'] as const) {
     const fake = control({ mode, accounts: [ACCOUNT_A, ACCOUNT_B] });
     const output: string[] = [];
     const result = await runIlinkAccountCommand({
@@ -85,9 +82,9 @@ test('iLink list reports physical runtime state and closes its control', async (
       stdout: (text) => output.push(text),
       openControl: async () => fake.value,
     });
-    assert.equal(result.startForeground, false);
-    assert.match(output.join(''), expected);
-    assert.match(output.join(''), /bot-b@im\.bot.*\[stopped\]/u);
+    assert.equal(result.runtimeRequired, false);
+    assert.equal(output.join(''), 'bot-a@im.bot\nbot-b@im.bot\n');
+    assert.doesNotMatch(output.join(''), /ia_|running|stopped|"/u);
     assert.deepEqual(fake.calls, ['list', 'close']);
   }
 });
@@ -102,7 +99,7 @@ test('one account is implicit and a provider ID selects one of many accounts', a
     stdout() {},
     openControl: async () => single.value,
   });
-  assert.equal(started.startForeground, true);
+  assert.equal(started.runtimeRequired, true);
   assert.deepEqual(single.calls, ['list', `start:${ACCOUNT_A.accountKey}`, 'close']);
 
   const multiple = control({ mode: 'runtime', accounts: [ACCOUNT_A, ACCOUNT_B] });
@@ -115,8 +112,28 @@ test('one account is implicit and a provider ID selects one of many accounts', a
     stdout() {},
     openControl: async () => multiple.value,
   });
-  assert.equal(stopped.startForeground, false);
+  assert.equal(stopped.runtimeRequired, false);
   assert.deepEqual(multiple.calls, ['list', `stop:${ACCOUNT_B.accountKey}`, 'close']);
+});
+
+test('a deferred standalone start selects an account without mutating it before daemon readiness', async () => {
+  const fake = control({ accounts: [ACCOUNT_A, ACCOUNT_B] });
+  const selected = await runIlinkAccountCommand({
+    command: 'start',
+    selector: ACCOUNT_B.providerAccountId,
+    deferStandaloneStart: true,
+    config: config('kintio-deferred-start'),
+    packageRoot: path.resolve('.'),
+    signal: new AbortController().signal,
+    stdout() {},
+    openControl: async () => fake.value,
+  });
+  assert.deepEqual(selected, {
+    runtimeRequired: true,
+    runningCount: 0,
+    selectedAccountKey: ACCOUNT_B.accountKey,
+  });
+  assert.deepEqual(fake.calls, ['list', 'close']);
 });
 
 test('multiple accounts require an exact selector and always close control', async () => {
@@ -171,7 +188,7 @@ test('an absent database is an empty list and cannot start an account', async ()
     packageRoot: path.resolve('.'),
     signal: new AbortController().signal,
     stdout: (text) => output.push(text),
-  }), { startForeground: false, runningCount: 0 });
+  }), { runtimeRequired: false, runningCount: 0 });
   assert.equal(output.join(''), 'No iLink accounts enrolled.\n');
   await assert.rejects(() => runIlinkAccountCommand({
     command: 'start',

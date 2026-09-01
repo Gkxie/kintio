@@ -10,8 +10,9 @@ import {
 export type IlinkAccountCommand = 'list' | 'start' | 'stop' | 'delete';
 
 export interface IlinkAccountCommandResult {
-  readonly startForeground: boolean;
+  readonly runtimeRequired: boolean;
   readonly runningCount: number;
+  readonly selectedAccountKey?: `ia_${string}`;
 }
 
 function choices(
@@ -60,6 +61,7 @@ export async function runIlinkAccountCommand({
   signal,
   stdout,
   openControl,
+  deferStandaloneStart = false,
 }: {
   readonly command: IlinkAccountCommand;
   readonly selector?: string;
@@ -69,11 +71,12 @@ export async function runIlinkAccountCommand({
   readonly signal: AbortSignal;
   readonly stdout: (text: string) => void;
   readonly openControl?: () => Promise<IlinkOperatorControl>;
+  readonly deferStandaloneStart?: boolean;
 }): Promise<IlinkAccountCommandResult> {
   if (!openControl && !fs.existsSync(config.state.databaseFile)) {
     if (command === 'list') {
       stdout('No iLink accounts enrolled.\n');
-      return { startForeground: false, runningCount: 0 };
+      return { runtimeRequired: false, runningCount: 0 };
     }
     throw new Error('No iLink account is enrolled; run "kintio ilink login" first');
   }
@@ -84,14 +87,21 @@ export async function runIlinkAccountCommand({
     const runtimeActive = control.mode === 'runtime';
     if (command === 'list') {
       stdout(accounts.length
-        ? `${choices(accounts, runtimeActive)}\n`
+        ? `${accounts.map((account) => account.providerAccountId).join('\n')}\n`
         : 'No iLink accounts enrolled.\n');
       return {
-        startForeground: false,
+        runtimeRequired: false,
         runningCount: accounts.filter((account) => account.runtimeEnabled).length,
       };
     }
     const account = selectAccount(accounts, selector, runtimeActive);
+    if (command === 'start' && control.mode === 'standalone' && deferStandaloneStart) {
+      return {
+        runtimeRequired: true,
+        runningCount: 0,
+        selectedAccountKey: account.accountKey,
+      };
+    }
     if (command === 'delete' && !confirmed) {
       throw new Error(
         `Deleting ${JSON.stringify(account.providerAccountId)} permanently removes the account, ` +
@@ -107,8 +117,9 @@ export async function runIlinkAccountCommand({
       `${JSON.stringify(account.providerAccountId)}.\n`,
     );
     return {
-      startForeground: command === 'start' && control.mode === 'standalone',
+      runtimeRequired: command === 'start' && control.mode === 'standalone',
       runningCount: result.runningCount,
+      ...(command === 'start' ? { selectedAccountKey: account.accountKey } : {}),
     };
   } finally {
     await control.close();

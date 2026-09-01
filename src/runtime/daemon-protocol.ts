@@ -10,6 +10,7 @@ import { ensurePrivateDirectory } from '../lib/private-directory.ts';
 
 export type ControlCommand = 'ping' | 'stop';
 export type DaemonPhase = 'starting' | 'running' | 'backoff' | 'stopping' | 'failed';
+export type DaemonMode = 'service' | 'ilink';
 
 export const CONTROL_MAX_BYTES = 4 * 1024;
 export const CONTROL_TIMEOUT_MS = 2_000;
@@ -29,6 +30,7 @@ const daemonRecordSchema = z.strictObject({
   runId,
   daemonPid: positiveInteger,
   configFile: absolutePath,
+  mode: z.enum(['service', 'ilink']).default('service'),
   packageRoot: absolutePath,
   token,
 });

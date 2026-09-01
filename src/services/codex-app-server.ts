@@ -346,12 +346,22 @@ export class CodexAppServer implements CodexBoundary {
       this.#pending.delete(message.id);
       const rpcError = asRecord(message.error);
       if (rpcError) {
+        const code = typeof rpcError.code === 'number' && Number.isSafeInteger(rpcError.code)
+          ? rpcError.code
+          : undefined;
+        const errorData = asRecord(rpcError.data);
+        const category = codexFailureLabel(
+          errorData?.codexErrorInfo ?? rpcError.codexErrorInfo,
+        );
+        const diagnostic = [
+          ...(code === undefined ? [] : [`code ${code}`]),
+          ...(category ? [`category ${category}`] : []),
+        ];
         const error = new Error(
-          `Codex app-server request failed: ${pending.method}`,
+          `Codex app-server request failed: ${pending.method}` +
+          (diagnostic.length ? ` (${diagnostic.join('; ')})` : ''),
         ) as Error & { code?: number };
-        if (typeof rpcError.code === 'number' && Number.isSafeInteger(rpcError.code)) {
-          error.code = rpcError.code;
-        }
+        if (code !== undefined) error.code = code;
         pending.reject(error);
       } else {
         pending.resolve(message.result);

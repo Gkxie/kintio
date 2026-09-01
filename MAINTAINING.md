@@ -116,6 +116,15 @@ only to make a direct PR look issue-driven.
 - Every PR must explain the problem, observable result, verification, and
   compatibility impact. Use `Refs` for issues that remain open until release.
 - `Quality`, `Unit, integration, recovery, security`, and `gitleaks` must pass.
+- An Owner-authored, same-repository, non-draft PR that changes the Agent,
+  prompt/Skill, MCP, runtime, state, or real-evaluation boundary automatically
+  queues `Real Codex validation`. Review the exact diff, then explicitly approve
+  the `codex-eval` Environment deployment; its API key is unavailable before
+  approval. Forks, bots, and other authors must remain ineligible. The workflow
+  must use `pull_request`, never `pull_request_target`. For a deliberate smoke
+  test outside a PR, dispatch the same workflow on `master` or a `codex/*`
+  branch. The Environment's selected branch policies are `master`, `codex/*`,
+  and `refs/pull/*/merge`.
 - A CODEOWNER reviews external contributions. A sole maintainer cannot approve
   their own PR, but their changes must still pass the same automated checks.
 - Use squash merge and delete the source branch after merging. The PR title must
@@ -261,6 +270,10 @@ proves an owner-merged Release PR. Expose the private key only to the trusted
    verifies the same bot-created and owner-merged Release PR before publishing.
    A release tag must never be deleted, moved, or reused, even if the release
    workflow fails.
+   The merged Release PR receives one version-scoped status comment linking the
+   exact workflow run. The terminal report updates that comment with npm and
+   GitHub Release links, or with the failed run to inspect. Retries update the
+   same comment instead of adding another.
 5. The read-only release verification job rechecks version monotonicity, the
    Changelog, source commit, tests, build, and dependencies, then uploads one
    npm tarball with its SHA-512 integrity.

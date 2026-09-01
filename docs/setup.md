@@ -16,8 +16,8 @@ kintio ilink start
 
 `ilink login` owns the canonical instance lock only while it enrolls and persists an
 account. If the same instance is already running, it delegates to that process through the
-private operator IPC instead of opening a second SQLite writer. `ilink start` owns the normal
-foreground runtime, provider polling, and Agent lifecycle without starting Hono.
+private operator IPC instead of opening a second SQLite writer. `ilink start` launches the
+iLink-only Runtime through Kintio's background daemon without starting Hono.
 
 Continue with the sections below only for a configured callback deployment or optional
 overrides.
@@ -189,24 +189,28 @@ tool, approval, or multi-agent powers enabled there. Only show the terminal QR c
 person authorized to control that host Agent.
 
 The login command exits after persisting credentials and starts no listener. Run
-`kintio ilink start` to process
-iLink messages in the foreground without Hono, or use the combined `kintio start` runtime
-when the callback adapter is also configured.
+`kintio ilink start` to process iLink messages in the background without Hono, or use
+`kintio ilink start --foreground` under an external service manager. The combined
+`kintio start` runtime remains available when the callback adapter is also configured.
 
 Account lifecycle is explicit:
 
 ```bash
 kintio ilink list
-kintio ilink start [--account <provider-id-or-account-key>]
+kintio ilink start [--account <provider-id-or-account-key>] [--foreground]
 kintio ilink stop [--account <provider-id-or-account-key>]
 kintio ilink delete [--account <provider-id-or-account-key>] --yes
 ```
 
 One enrolled account is selected automatically. Multiple accounts require `--account`;
-the stable choices come from `list`. The first standalone `start` owns the foreground
-runtime. Further `start` and `stop` commands reach that owner over private operator IPC,
+the stable choices come from `list`. The first standalone `start` launches one managed
+daemon. Further `start` and `stop` commands reach that owner over private operator IPC,
 so one process owns SQLite while independently reconciling account listeners. Stopping
-the last running account exits the standalone runtime.
+the last running account stops the iLink-only daemon. `kintio status` and `kintio logs`
+expose its state and output.
+
+`kintio ilink list` prints one provider account ID per line. Pass that exact value to
+`--account`; Kintio's internal hashed account key is not needed for normal operation.
 
 `delete` is intentionally stronger than logout. It atomically removes the selected
 account, credentials, conversations, messages, media, send records, reply windows, and
