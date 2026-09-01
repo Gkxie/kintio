@@ -4,6 +4,10 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Prevented the background Agent process on Windows from opening a persistent
+  empty `cmd.exe` window while preserving its stdio transport and lifecycle
+  ownership ([#70](https://github.com/Gkxie/kintio/issues/70)).
+
 ## 0.7.1
 
 - Made `kintio ilink start` use the managed background daemon by default while
