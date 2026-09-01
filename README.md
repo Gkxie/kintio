@@ -78,7 +78,8 @@ kintio ilink start
 ```
 
 `ilink login` performs one encrypted enrollment, starts no listener, and exits. `ilink start` then runs provider
-polling and the host Agent in the foreground without Hono or a TCP listener. Both commands
+polling and the host Agent through the background daemon without Hono or a TCP listener.
+Use `--foreground` only when a service manager needs to own the process. Both commands
 use `~/.kintio` by default and accept `--home`. With multiple accounts, use `ilink list`
 and pass the displayed provider ID or account key through `--account`. Repeated `start`
 commands add accounts to the live runtime; `stop` removes one.

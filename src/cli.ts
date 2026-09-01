@@ -29,6 +29,7 @@ import {
   readDaemonRecord,
   requestControl,
   type ControlResponse,
+  type DaemonMode,
 } from './runtime/daemon-protocol.ts';
 import {
   acquireSingleInstanceLock,
@@ -127,14 +128,14 @@ Options:
 
 const ILINK_START_HELP = `Usage: kintio ilink start [options]
 
-Run iLink long polling and the host Agent in the foreground without starting
+Run iLink long polling and the host Agent in the background without starting
 Hono or opening a TCP listener. This command does not require setup or an
 environment file. One account is selected automatically; multiple accounts
-require --account. While this runtime is active, additional start commands add
-accounts to the same process.
+require --account. Additional start commands add accounts to the same process.
 
 Options:
   --account <id>        Provider account ID or Kintio account key
+  --foreground          Keep the iLink-only Runtime attached to this terminal
   --home <directory>     Instance directory (default: ~/.kintio)
   --config <file>        Optional environment overrides
   -h, --help             Show this help
@@ -142,8 +143,8 @@ Options:
 
 const ILINK_STOP_HELP = `Usage: kintio ilink stop [options]
 
-Stop one iLink account. Stopping the last account also exits a foreground
-"kintio ilink start" runtime. One account is selected automatically; multiple
+Stop one iLink account. Stopping the last account also stops the background
+iLink-only Runtime. One account is selected automatically; multiple
 accounts require --account.
 
 Options:
@@ -536,6 +537,7 @@ async function probeDaemon(location: InstanceLocation): Promise<ControlResponse 
 function assertDaemonInstance(
   location: InstanceLocation,
   packageRoot: string,
+  mode?: DaemonMode,
 ): void {
   const daemon = readDaemonRecord(location.home);
   if (!daemon) throw new Error('Kintio daemon record is missing');
@@ -545,6 +547,11 @@ function assertDaemonInstance(
   ) {
     throw new Error(
       'Kintio is running with another config or installation; use "kintio restart" to switch deliberately',
+    );
+  }
+  if (mode && daemon.mode !== mode) {
+    throw new Error(
+      `Kintio is already running in ${daemon.mode} mode; stop it before starting ${mode} mode`,
     );
   }
 }
@@ -616,22 +623,25 @@ async function rollbackLaunch(
   removeLaunchMetadata(location, daemon.pid);
 }
 
-async function start(
+async function startBackgroundDaemon(
   location: InstanceLocation,
   runtime: CliRuntime,
+  environment: NodeJS.ProcessEnv,
+  mode: DaemonMode,
   restart: boolean,
-): Promise<number> {
-  const environment = processEnvironment(location, runtime);
+): Promise<{ readonly alreadyRunning: boolean; readonly pid: number }> {
   const timeout = parseStartTimeout(environment.KINTIO_START_TIMEOUT_MS);
   return withLifecycleLock(location, async () => {
     const existing = await probeDaemon(location);
     if (existing && !restart) {
-      assertDaemonInstance(location, runtime.packageRoot);
+      assertDaemonInstance(location, runtime.packageRoot, mode);
       if (existing.phase !== 'running') {
         await waitUntilRunning(location, Date.now() + timeout);
       }
-      runtime.stdout(`Kintio is already running (PID ${existing.workerPid || existing.daemonPid}).\n`);
-      return 0;
+      return {
+        alreadyRunning: true,
+        pid: existing.workerPid || existing.daemonPid,
+      };
     }
     if (existing) {
       await stopDaemon(location, DAEMON_STOP_TIMEOUT_MS);
@@ -641,7 +651,7 @@ async function start(
       file: process.execPath,
       args: [path.join(runtime.packageRoot, 'dist/daemon.js')],
       cwd: location.home,
-      env: environment,
+      env: { ...environment, KINTIO_DAEMON_MODE: mode },
     });
     try {
       await waitUntilRunning(location, deadline);
@@ -649,8 +659,64 @@ async function start(
       await rollbackLaunch(location, daemon);
       throw error;
     }
-    return 0;
+    const running = await requestControl(location.home, 'ping');
+    return {
+      alreadyRunning: false,
+      pid: running.workerPid || running.daemonPid,
+    };
   });
+}
+
+async function start(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+  restart: boolean,
+): Promise<number> {
+  const result = await startBackgroundDaemon(
+    location,
+    runtime,
+    processEnvironment(location, runtime),
+    'service',
+    restart,
+  );
+  if (result.alreadyRunning) {
+    runtime.stdout(`Kintio is already running (PID ${result.pid}).\n`);
+  }
+  return 0;
+}
+
+function ilinkDaemonEnvironment(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+): NodeJS.ProcessEnv {
+  const config = loadIlinkRuntimeConfig({
+    environment: { ...runtime.env },
+    envFile: location.configFile,
+    root: location.home,
+  });
+  refreshManagedSkill(config.codex.workingDirectory, runtime);
+  return {
+    ...runtime.env,
+    KINTIO_HOME: location.home,
+    KINTIO_CONFIG_FILE: location.configFile,
+    NODE_ENV: 'production',
+  };
+}
+
+async function startIlinkDaemon(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+): Promise<void> {
+  const result = await startBackgroundDaemon(
+    location,
+    runtime,
+    ilinkDaemonEnvironment(location, runtime),
+    'ilink',
+    false,
+  );
+  if (!result.alreadyRunning) {
+    runtime.stdout(`Kintio iLink runtime is running in background (PID ${result.pid}).\n`);
+  }
 }
 
 async function waitUntilRunning(
@@ -820,6 +886,7 @@ export async function runCli(
         'no-follow': { type: 'boolean' },
         'qr-output': { type: 'string' },
         account: { type: 'string' },
+        foreground: { type: 'boolean' },
         yes: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
@@ -899,6 +966,9 @@ export async function runCli(
     if (parsed.values.yes && (command !== 'ilink' || subcommand !== 'delete')) {
       throw new Error('--yes is valid only for "kintio ilink delete"');
     }
+    if (parsed.values.foreground && (command !== 'ilink' || subcommand !== 'start')) {
+      throw new Error('--foreground is valid only for "kintio ilink start"');
+    }
     const location = instanceLocation(parsed.values, runtime);
     const qrOutputPath = parsed.values['qr-output'] === undefined
       ? undefined
@@ -932,6 +1002,7 @@ export async function runCli(
             signal,
           });
         }
+        const foreground = Boolean(parsed.values.foreground);
         const commandResult = await runtime.ilinkAccount({
           command: subcommand as 'list' | 'start' | 'stop' | 'delete',
           ...(parsed.values.account ? { selector: parsed.values.account } : {}),
@@ -940,17 +1011,54 @@ export async function runCli(
           packageRoot: runtime.packageRoot,
           signal,
           stdout: runtime.stdout,
+          ...(subcommand === 'start'
+            ? { deferStandaloneStart: !foreground }
+            : {}),
         });
-        if (subcommand !== 'start' || !commandResult.startForeground) return 0;
-        return await runtime.ilinkStart({
-          config: loadIlinkRuntimeConfig({
+        if (subcommand === 'start' && commandResult.runtimeRequired) {
+          const runtimeConfig = loadIlinkRuntimeConfig({
             environment: { ...runtime.env },
             envFile: location.configFile,
             root: location.home,
-          }),
-          signal,
-          stdout: runtime.stdout,
-        });
+          });
+          if (foreground) {
+            refreshManagedSkill(runtimeConfig.codex.workingDirectory, runtime);
+            return await runtime.ilinkStart({
+              config: runtimeConfig,
+              signal,
+              stdout: runtime.stdout,
+            });
+          }
+          if (!commandResult.selectedAccountKey) {
+            throw new Error('iLink start did not resolve an account identity');
+          }
+          await startIlinkDaemon(location, runtime);
+          await runtime.ilinkAccount({
+            command: 'start',
+            selector: commandResult.selectedAccountKey,
+            config: enrollmentConfig,
+            packageRoot: runtime.packageRoot,
+            signal,
+            stdout: runtime.stdout,
+          });
+          return 0;
+        }
+        if (
+          (subcommand === 'stop' || subcommand === 'delete') &&
+          commandResult.runningCount === 0 &&
+          readDaemonRecord(location.home)?.mode === 'ilink'
+        ) {
+          await withLifecycleLock(location, async () => {
+            if (readDaemonRecord(location.home)?.mode === 'ilink') {
+              try {
+                await stopDaemon(location, DAEMON_STOP_TIMEOUT_MS);
+              } catch (error: unknown) {
+                if (readDaemonRecord(location.home)) throw error;
+              }
+            }
+          });
+        }
+        return 0;
       });
     }
     if (command === 'setup') return setup(location, runtime);
@@ -973,7 +1081,7 @@ export async function runCli(
       }
       assertDaemonInstance(location, runtime.packageRoot);
       runtime.stdout(
-        `Kintio is ${existing.phase} ` +
+        `Kintio is ${existing.phase} in ${readDaemonRecord(location.home)?.mode || 'service'} mode ` +
         `(daemon PID ${existing.daemonPid}` +
         `${existing.workerPid ? `, worker PID ${existing.workerPid}` : ''}).` +
         `${existing.message ? ` ${existing.message}` : ''}\n`,
