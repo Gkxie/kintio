@@ -56,7 +56,15 @@ test('iLink enrollment stays available when the Codex adapter is disabled', asyn
   }));
   assert.deepEqual(
     (await client.listTools()).tools.map((tool) => tool.name),
-    ['begin_login', 'login_status', 'cancel_login'],
+    [
+      'begin_login',
+      'login_status',
+      'cancel_login',
+      'list_accounts',
+      'start_account',
+      'stop_account',
+      'delete_account',
+    ],
   );
   await client.close();
   await runtime.close();

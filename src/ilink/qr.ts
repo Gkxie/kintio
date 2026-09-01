@@ -3,7 +3,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { PNG } from 'pngjs';
-import { create } from 'qrcode';
+import { create, toBuffer } from 'qrcode';
 
 const MAX_QR_CONTENT_BYTES = 2_048;
 const MAX_QR_PNG_BYTES = 512 * 1_024;
@@ -13,6 +13,7 @@ const QR_REGION_X = 120;
 const QR_REGION_Y = 220;
 const QR_REGION_SIZE = 480;
 const QUIET_ZONE_MODULES = 4;
+const RAW_QR_SCALE = 6;
 const QR_DARK = Object.freeze([0x11, 0x18, 0x14, 0xff] as const);
 const PNG_SIGNATURE = Buffer.from([
   0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
@@ -139,6 +140,35 @@ export async function renderIlinkQrPng(content: string): Promise<Buffer> {
   let png: Buffer;
   try {
     png = renderCard(content);
+  } catch {
+    throw new IlinkQrRenderError(
+      'qr_render_failed',
+      'Unable to render iLink QR image',
+    );
+  }
+  if (png.length < PNG_SIGNATURE.length || !png.subarray(0, 8).equals(PNG_SIGNATURE)) {
+    throw new IlinkQrRenderError('invalid_qr_png', 'Rendered iLink QR image is invalid');
+  }
+  if (png.length > MAX_QR_PNG_BYTES) {
+    throw new IlinkQrRenderError('qr_png_too_large', 'Rendered iLink QR image is too large');
+  }
+  return png;
+}
+
+export async function renderIlinkRawQrPng(content: string): Promise<Buffer> {
+  assertIlinkQrContent(content);
+  let png: Buffer;
+  try {
+    png = await toBuffer(content, {
+      errorCorrectionLevel: 'M',
+      margin: QUIET_ZONE_MODULES,
+      scale: RAW_QR_SCALE,
+      type: 'png',
+      color: {
+        dark: '#111814ff',
+        light: '#ffffffff',
+      },
+    });
   } catch {
     throw new IlinkQrRenderError(
       'qr_render_failed',

@@ -8,6 +8,7 @@ import { test, vi } from 'vitest';
 import {
   IlinkQrRenderError,
   renderIlinkQrPng,
+  renderIlinkRawQrPng,
   renderIlinkQrTerminal,
 } from '../../src/ilink/qr.ts';
 
@@ -26,6 +27,45 @@ test('renders deterministic in-memory PNG bytes', async () => {
   assert.ok(first.length > PNG_SIGNATURE.length);
   assert.ok(first.length <= 512 * 1_024);
   assert.deepEqual(first, second);
+});
+
+test('renders a raw PNG from the same QR payload with a four-module quiet zone', async () => {
+  const content = 'weixin://ilink/login/raw-output-test';
+  const first = await renderIlinkRawQrPng(content);
+  const second = await renderIlinkRawQrPng(content);
+  assert.deepEqual(first, second);
+  const image = PNG.sync.read(first);
+  const matrix = create(content, { errorCorrectionLevel: 'M' }).modules;
+  const scale = 6;
+  const quiet = 4;
+  assert.deepEqual({ width: image.width, height: image.height }, {
+    width: (matrix.size + quiet * 2) * scale,
+    height: (matrix.size + quiet * 2) * scale,
+  });
+  const pixel = (x: number, y: number): number[] => {
+    const offset = (y * image.width + x) * 4;
+    return [...image.data.subarray(offset, offset + 4)];
+  };
+  const white = [0xff, 0xff, 0xff, 0xff];
+  const dark = [0x11, 0x18, 0x14, 0xff];
+  for (let module = 0; module < quiet; module += 1) {
+    const center = module * scale + Math.floor(scale / 2);
+    assert.deepEqual(pixel(center, Math.floor(image.height / 2)), white);
+    assert.deepEqual(pixel(image.width - center - 1, Math.floor(image.height / 2)), white);
+    assert.deepEqual(pixel(Math.floor(image.width / 2), center), white);
+    assert.deepEqual(pixel(Math.floor(image.width / 2), image.height - center - 1), white);
+  }
+  for (let row = 0; row < matrix.size; row += 1) {
+    for (let column = 0; column < matrix.size; column += 1) {
+      assert.deepEqual(
+        pixel(
+          (column + quiet) * scale + Math.floor(scale / 2),
+          (row + quiet) * scale + Math.floor(scale / 2),
+        ),
+        matrix.get(row, column) ? dark : white,
+      );
+    }
+  }
 });
 
 test('renders a branded card with integer modules and a four-module quiet zone', async () => {
@@ -128,6 +168,13 @@ test('enforces non-empty and 2048-byte UTF-8 input limits without echoing conten
         error.code === 'invalid_qr_content' &&
         !/qr-secret|x{16}/u.test(error.message),
     );
+    await assert.rejects(
+      () => renderIlinkRawQrPng(invalid),
+      (error: unknown) =>
+        error instanceof IlinkQrRenderError &&
+        error.code === 'invalid_qr_content' &&
+        !/qr-secret|x{16}/u.test(error.message),
+    );
   }
 });
 
@@ -141,6 +188,8 @@ test('renders without network access or filesystem output', async () => {
 
   const png = await renderIlinkQrPng('offline-and-memory-only');
   assert.ok(png.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE));
+  const raw = await renderIlinkRawQrPng('offline-and-memory-only');
+  assert.ok(raw.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE));
   assert.equal(fetchSpy.mock.calls.length, 0);
   assert.equal(fileSpy.mock.calls.length, 0);
 });

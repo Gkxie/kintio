@@ -10,6 +10,8 @@ import { parseEnv } from 'node:util';
 import {
   createConfig,
   loadConfig,
+  loadIlinkEnrollmentConfig,
+  loadIlinkRuntimeConfig,
   resolveProjectRoot,
   resolveStateFiles,
 } from '../../src/config.ts';
@@ -109,6 +111,34 @@ test('direct config loading defaults mutable state to the user instance', async 
   assert.equal(config.ilink.storageKeyFile, path.join(instance, 'data/ilink-storage.key'));
   assert.equal(config.codex.imageTempDirectory, path.join(instance, 'data/codex-input'));
   assert.equal(config.codex.workingDirectory, path.join(instance, 'codex-workspace'));
+});
+
+test('standalone iLink config ignores unrelated callback settings and needs no file', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-ilink-config-'));
+  t.onTestFinished(() => fs.rm(root, { recursive: true, force: true }));
+  const missingFile = path.join(root, 'missing.env');
+  const defaults = loadIlinkEnrollmentConfig({
+    environment: {},
+    envFile: missingFile,
+    root,
+  });
+  assert.equal(defaults.state.databaseFile, path.join(root, 'data/kintio.sqlite'));
+  assert.equal(defaults.ilink.maxAccounts, 20);
+
+  const envFile = path.join(root, 'ilink.env');
+  await fs.writeFile(envFile, [
+    'PORT=invalid-for-hono',
+    'WECOM_CORP_ID=incomplete-and-ignored',
+    'ILINK_MAX_ACCOUNTS=2',
+    'CODEX_WORKING_DIRECTORY=./agent-work',
+  ].join('\n'));
+  const enrollment = loadIlinkEnrollmentConfig({ environment: {}, envFile, root });
+  assert.equal(enrollment.ilink.maxAccounts, 2);
+  const runtime = loadIlinkRuntimeConfig({ environment: {}, envFile, root });
+  assert.equal(runtime.ilink.enabled, true);
+  assert.equal(runtime.ilink.maxAccounts, 2);
+  assert.equal(runtime.codex.workingDirectory, path.join(root, 'agent-work'));
+  assert.equal('wecom' in runtime, false);
 });
 
 test('an instance root owns relative config, state, cache, and workspace paths', async (t) => {

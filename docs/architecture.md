@@ -23,16 +23,18 @@ implements setup and lifecycle commands. Background execution launches a small
 native daemon, which owns logs, local control, and bounded worker restarts. The
 worker entry [index.ts](../index.ts) remains the thin process bootstrap for
 [KintioSupervisor](../src/supervisor.ts). The CLI does not duplicate the SQLite
-single-instance lock or compile TypeScript during start. Background start
+schema or invent a second lock; standalone enrollment acquires the canonical
+instance lock only when no runtime owns it. Background start
 succeeds only after the worker publishes readiness following Hono listen and
 runtime initialization. Downtime backlog is a low-priority responsibility and
 is not part of the readiness gate.
 
 ```text
 Kintio CLI
-└── Native daemon
-    └── Worker
-        └── KintioSupervisor
+├── ilink login → running owner IPC or temporary Enrollment Service
+├── ilink list/start/stop/delete → running owner IPC or temporary account control
+├── ilink start → channel-neutral foreground Runtime without Hono
+└── start       → Native daemon → Worker → KintioSupervisor
 ```
 
 The Supervisor—not Hono—is the process composition root:
@@ -49,8 +51,13 @@ Kintio process
         └── SQLite Inbox, scheduler, Agent runtime, and delivery tools
 ```
 
-The Supervisor is the process-level composition root; `createRuntime()` is its
-application-level sub-composition root. A future long-lived transport belongs
+The Supervisor is the callback deployment's process-level composition root;
+`createRuntime()` is the channel-neutral application composition root and can
+also run directly through `kintio ilink start`. WeChat synchronization is an
+optional Runtime input rather than an iLink prerequisite. Removing that adapter
+in the future should remove its optional Runtime branch without changing the
+iLink enrollment, polling, Agent configuration, or persistence contracts.
+A future long-lived transport belongs
 beside the existing iLink listeners in the runtime's explicit lifecycle, not in
 a Hono route. Extract a shared channel lifecycle only after the second such
 transport exposes real repetition. Separate operating-system processes remain
@@ -172,10 +179,20 @@ short-lived session capability embedded in the current trusted Agent input. Each
 tool revalidates the adapter, recipient, message direction, media ownership,
 expiration, and quota. The model cannot select a recipient through tool arguments.
 
-The local operator route is not registered with Codex. `kintio ilink login` reaches it
-through a separate private descriptor, random token, IPC address, and stdio relay. No Agent
-process receives that descriptor path or credential. The running Worker remains the only
-SQLite writer while the CLI only renders the returned QR content.
+The local operator route is not registered with Codex. When an instance is running,
+`kintio ilink login`, `list`, `start`, `stop`, and `delete` reach it through a separate
+private descriptor, random token, IPC address, and stdio relay; the running process remains
+the only SQLite writer. Without a running owner, the CLI acquires the same instance lock.
+Login lazily composes the shared Enrollment Service; account lifecycle commands operate on
+the account store directly. A held lock with unavailable IPC fails closed. No Agent process
+receives the operator descriptor path or credential.
+
+One Runtime owns every selected iLink listener. Starting another account reconciles it into
+that process rather than creating another SQLite owner; stopping or deleting one account
+reconciles only that listener. Stopping or deleting the last running account from a
+standalone iLink runtime also closes that runtime. Complete deletion is account-scoped and transactional: Kintio
+removes its credentials, Inbox history, conversations, media, reply windows, delivery
+records, and enrollment audit while preserving unrelated accounts and channels.
 
 ### Agent access provenance
 
@@ -207,7 +224,7 @@ Tools return execution facts only: accepted, failed, or uncertain. Provider-spec
 
 Every send is persisted before invoking the provider API. If the process exits after a send begins but before its result is known, the record becomes `uncertain` and is not retried automatically.
 
-At startup, the WeChat KF adapter backfills messages from its saved cursor, while iLink resumes long polling for every bound bot. Live traffic receives agent concurrency first; backfill begins only when no active conversation is waiting. An archived Codex thread starts a new thread and exposes a read-only memory tool bound only to the archived thread ID. A deleted thread simply starts over.
+At startup, the WeChat KF adapter backfills messages from its saved cursor, while iLink resumes long polling for every runtime-selected bot. Live traffic receives agent concurrency first; backfill begins only when no active conversation is waiting. An archived Codex thread starts a new thread and exposes a read-only memory tool bound only to the archived thread ID. A deleted thread simply starts over.
 
 The exact recovery, race, and idempotency transitions are specified by these tests:
 

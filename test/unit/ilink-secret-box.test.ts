@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import { test } from 'vitest';
 
 import {
   IlinkSecretBox,
   IlinkSecretBoxError,
+  readOrCreateIlinkStorageKey,
   type IlinkSealedSecret,
   type IlinkSecretScope,
 } from '../../src/ilink/secret-box.ts';
@@ -109,6 +113,30 @@ test('configured key must be canonical unpadded base64url for exactly 32 bytes',
       () => new IlinkSecretBox(invalid),
       (error: unknown) =>
         error instanceof IlinkSecretBoxError && error.code === 'invalid_key',
+    );
+  }
+});
+
+test('storage key creation is private, stable, and fails closed for encrypted state', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'kintio-ilink-key-'));
+  t.onTestFinished(() => fs.rmSync(root, { recursive: true, force: true }));
+  const keyFile = path.join(root, 'data', 'ilink-storage.key');
+  assert.throws(
+    () => readOrCreateIlinkStorageKey(keyFile, { allowCreate: false }),
+    /missing for existing encrypted state/u,
+  );
+  const created = readOrCreateIlinkStorageKey(keyFile, { allowCreate: true });
+  assert.match(created, /^[A-Za-z0-9_-]{43}$/u);
+  assert.equal(
+    readOrCreateIlinkStorageKey(keyFile, { allowCreate: false }),
+    created,
+  );
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(keyFile).mode & 0o777, 0o600);
+    fs.chmodSync(keyFile, 0o644);
+    assert.throws(
+      () => readOrCreateIlinkStorageKey(keyFile, { allowCreate: false }),
+      /unsafe permissions/u,
     );
   }
 });

@@ -143,6 +143,7 @@ test('registers one-to-one encrypted accounts and fences cursor generations', as
   });
   assert.equal(registered.accountKey, accountKey);
   assert.equal(registered.generation, 1);
+  assert.equal(registered.runtimeEnabled, false);
   assert.deepEqual(ilink.listActiveAccounts(), [registered]);
 
   const stored = ilink.getAccountWithSecret(accountKey);
@@ -240,8 +241,212 @@ test('registers one-to-one encrypted accounts and fences cursor generations', as
   });
   assert.equal(reactivated.status, 'active');
   assert.equal(reactivated.generation, 3);
+  assert.equal(reactivated.runtimeEnabled, false);
   assert.ok(ilink.getAccountSecret(accountKey));
   assert.deepEqual(store.foreignKeyCheck(), []);
+});
+
+test('login starts no listener; standalone selection is exclusive and runtime start is additive', async (t) => {
+  const { ilink, box, now, advance } = await fixture(t);
+  const first = ilink.registerAccount({
+    providerAccountId: botId,
+    ownerPeerId,
+    baseUrl,
+    encryptedBotToken: botToken(box),
+    now: now(),
+  });
+  const secondBotId = 'second-bot@im.bot';
+  const secondOwner = 'second-owner@im.wechat';
+  const secondKey = createIlinkAccountKey(secondBotId);
+  const second = ilink.registerAccount({
+    providerAccountId: secondBotId,
+    ownerPeerId: secondOwner,
+    baseUrl,
+    encryptedBotToken: box.seal('second-token', {
+      secretKind: 'bot_token',
+      accountId: secondKey,
+      peerId: secondOwner,
+      generation: 1,
+    }),
+    now: advance(),
+  });
+  assert.equal(first.runtimeEnabled, false);
+  assert.equal(second.runtimeEnabled, false);
+  assert.deepEqual(ilink.listRuntimeAccountsWithSecrets(), []);
+
+  ilink.selectRuntimeAccount(secondKey, advance());
+  assert.deepEqual(
+    ilink.listRuntimeAccountsWithSecrets().map(({ account }) => account.accountKey),
+    [secondKey],
+  );
+  ilink.setRuntimeEnabled(accountKey, true, advance());
+  assert.deepEqual(
+    ilink.listRuntimeAccountsWithSecrets().map(({ account }) => account.accountKey),
+    [accountKey, secondKey],
+  );
+  ilink.setRuntimeEnabled(secondKey, false, advance());
+  assert.deepEqual(
+    ilink.listRuntimeAccountsWithSecrets().map(({ account }) => account.accountKey),
+    [accountKey],
+  );
+});
+
+test('deleting an account purges every account-scoped Kintio row atomically', async (t) => {
+  const { store, ilink, database, box, now } = await fixture(t);
+  ilink.registerAccount({
+    providerAccountId: botId,
+    ownerPeerId,
+    baseUrl,
+    encryptedBotToken: botToken(box),
+    now: now(),
+  });
+  const otherBotId = 'preserved-bot@im.bot';
+  const otherOwner = 'preserved-owner@im.wechat';
+  const otherKey = createIlinkAccountKey(otherBotId);
+  ilink.registerAccount({
+    providerAccountId: otherBotId,
+    ownerPeerId: otherOwner,
+    baseUrl,
+    encryptedBotToken: box.seal('preserved-token', {
+      secretKind: 'bot_token', accountId: otherKey,
+      peerId: otherOwner, generation: 1,
+    }),
+    now: now() + 1,
+  });
+  database.prepare(`
+    INSERT INTO sync_cursors (open_kfid, cursor, updated_at)
+    VALUES (?, 'cross-channel-cursor', ?)
+  `).run(accountKey, now());
+  database.prepare(`
+    INSERT INTO conversations (
+      channel, open_kfid, external_userid, thread_id, memory_thread_id, updated_at
+    ) VALUES ('wechat_kf', ?, 'cross-channel-user', 'cross-channel-thread', '', ?)
+  `).run(accountKey, now());
+  const inbound = candidate(rawMessage({
+    id: 71,
+    seq: 71,
+    createdAt: now(),
+    contextToken: 'delete-context',
+    text: 'delete everything',
+  }), '', 0);
+  const committed = ilink.commitPollPage({
+    accountKey,
+    expectedGeneration: 1,
+    expectedCursor: '',
+    nextCursor: 'delete-cursor',
+    messages: [pageEntry(box, inbound, 71)],
+  });
+  const messageKey = committed.insertedMessageKeys[0]!;
+  store.claimInbound({ messageKey });
+  store.setConversationThread({
+    channel: 'weixin_ilink',
+    accountKey,
+    peerId: ownerPeerId,
+    threadId: 'thread-to-delete',
+  });
+  store.rememberInboundMedia({
+    messageKey,
+    attachments: [{ kind: 'image', mediaId: 'ilink:0', filename: 'input.png' }],
+  });
+  const session = store.createAgentSession({ messageKey });
+  store.registerAgentArtifact({
+    sessionToken: session.token,
+    bytes: Buffer.from('89504e470d0a1a0a0909090a', 'hex'),
+    filename: 'output.png',
+    contentType: 'image/png',
+  });
+  const attempt = ilink.reserveReplyAttempt({
+    sessionToken: session.token,
+    sentType: 'text',
+    payload: { text: 'pending send' },
+  });
+  database.prepare(`
+    INSERT INTO delivery_failures (
+      wecom_msgid, fail_type, observed_at, matched_attempt_key, matched_at
+    ) VALUES ('purged-failure', 13, ?, ?, ?)
+  `).run(now(), attempt.attemptId, now());
+  database.prepare(`
+    INSERT INTO ilink_enrollment_audit (
+      offer_id, initiator_kind, source_channel, source_message_key,
+      source_account_id, source_peer_id, account_key, result,
+      offered_at, completed_at
+    ) VALUES (?, 'local_operator', 'terminal', '', 'local', 'operator', ?,
+      'confirmed', ?, ?)
+  `).run(`qo_${'d'.repeat(20)}`, accountKey, now(), now());
+  database.prepare(`
+    INSERT INTO ilink_enrollment_audit (
+      offer_id, initiator_kind, source_channel, source_message_key,
+      source_account_id, source_peer_id, account_key, result,
+      offered_at, completed_at
+    ) VALUES (?, 'remote_adapter', 'wechat_kf', '', ?, 'cross-channel-user', ?,
+      'confirmed', ?, ?)
+  `).run(`qo_${'f'.repeat(20)}`, accountKey, otherKey, now(), now());
+  database.prepare(`
+    INSERT INTO ilink_login_offers (
+      offer_id, initiator_kind, source_channel, source_message_key,
+      source_account_id, source_peer_id, candidate_account_keys_json,
+      secret_generation, nonce, ciphertext, auth_tag, api_base_url,
+      status, expires_at, created_at, updated_at
+    ) VALUES (?, 'remote_adapter', 'wechat_kf', '', ?, 'cross-channel-user', ?,
+      1, 'nonce', 'ciphertext', 'tag', ?, 'waiting', ?, ?, ?)
+  `).run(
+    `qo_${'e'.repeat(20)}`,
+    accountKey,
+    JSON.stringify([accountKey, otherKey]),
+    baseUrl,
+    now() + 300_000,
+    now(),
+    now(),
+  );
+
+  const deleted = ilink.deleteAccountCompletely(accountKey, now() + 2);
+  assert.equal(deleted.status, 'revoked');
+  assert.equal(deleted.runtimeEnabled, false);
+  assert.equal(ilink.getAccount(accountKey), undefined);
+  assert.ok(ilink.getAccountWithSecret(otherKey));
+  for (const [table, predicate] of [
+    ['ilink_accounts', 'account_key = ?'],
+    ['ilink_account_secrets', 'account_key = ?'],
+    ['ilink_reply_windows', 'account_key = ?'],
+    ['ilink_inbound_images', 'account_key = ?'],
+    ['inbound_messages', "channel = 'weixin_ilink' AND open_kfid = ?"],
+    ['inbound_media', "channel = 'weixin_ilink' AND open_kfid = ?"],
+    ['agent_sessions', "channel = 'weixin_ilink' AND open_kfid = ?"],
+    ['send_attempts', "channel = 'weixin_ilink' AND open_kfid = ?"],
+    ['conversations', "channel = 'weixin_ilink' AND open_kfid = ?"],
+    ['ilink_enrollment_audit', 'account_key = ?'],
+  ] as const) {
+    const count = Number((database.prepare(`
+      SELECT COUNT(*) AS count FROM ${table} WHERE ${predicate}
+    `).get(accountKey) as { count: number }).count);
+    assert.equal(count, 0, `${table} retained account-scoped rows`);
+  }
+  assert.equal(Number((database.prepare(`
+    SELECT COUNT(*) AS count FROM agent_artifacts
+  `).get() as { count: number }).count), 0);
+  assert.equal(Number((database.prepare(`
+    SELECT COUNT(*) AS count FROM delivery_failures
+    WHERE matched_attempt_key = ?
+  `).get(attempt.attemptId) as { count: number }).count), 0);
+  const candidates = String((database.prepare(`
+    SELECT candidate_account_keys_json FROM ilink_login_offers
+  `).get() as { candidate_account_keys_json: string }).candidate_account_keys_json);
+  assert.deepEqual(JSON.parse(candidates), [otherKey]);
+  assert.equal(String((database.prepare(`
+    SELECT cursor FROM sync_cursors WHERE open_kfid = ?
+  `).get(accountKey) as { cursor: string }).cursor), 'cross-channel-cursor');
+  assert.equal(Number((database.prepare(`
+    SELECT COUNT(*) AS count FROM conversations
+    WHERE channel = 'wechat_kf' AND open_kfid = ?
+  `).get(accountKey) as { count: number }).count), 1);
+  assert.equal(Number((database.prepare(`
+    SELECT COUNT(*) AS count FROM ilink_enrollment_audit WHERE account_key = ?
+  `).get(otherKey) as { count: number }).count), 1);
+  assert.deepEqual(store.foreignKeyCheck(), []);
+  assert.throws(
+    () => ilink.deleteAccountCompletely(accountKey),
+    (error: unknown) => errorCode(error, 'account_not_found'),
+  );
 });
 
 test('commits cursor, inbox, encrypted windows, and out-of-order ordering atomically', async (t) => {

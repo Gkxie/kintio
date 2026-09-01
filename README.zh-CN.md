@@ -43,35 +43,49 @@
 
 ```bash
 npm install --global @kin-tio/cli
-kintio setup
 codex login status
 ```
 
-`kintio setup` 会在 `~/.kintio` 创建私有实例目录、安装内置 Agent Skill，并生成渠道配置
-模板 `.env`。macOS/Linux 使用 `0600`，Windows 则限定在当前用户目录的 ACL
-边界内。默认不启用任何适配器；请按英文
-[部署指南](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)配置 WeChat KF API，或为 Weixin iLink 设置
-`ILINK_ENABLED=true`。
+iLink 可以完全独立使用，不需要 `setup`、`.env` 或公网 HTTP：
 
 ```bash
+kintio ilink login
+kintio ilink start
+```
+
+`ilink login` 完成一次扫码、加密保存凭据后退出，不会自行启动监听；`ilink start` 不启动 Hono 或 TCP 端口，
+只以前台方式运行 iLink 长轮询和宿主 Agent。两者默认使用 `~/.kintio`。
+存在多个账号时，先用 `kintio ilink list` 查看账号，再通过 `--account` 指定
+`start`、`stop` 或 `delete` 的目标；正在运行时可继续执行 `start` 增加监听账号。
+
+需要部署公网回调渠道时，再使用：
+
+```bash
+kintio setup
 kintio start
 kintio status
 kintio logs --lines 100
 ```
 
-Kintio 运行后，可直接在交互式终端连接新的 iLink 身份：
+具体配置见英文[部署指南](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)。
+
+图形界面或非交互调用方可以显式选择临时的原始 PNG，而不是解析终端字符：
 
 ```bash
-kintio ilink login
+kintio ilink login --qr-output ~/.kintio/ilink-login.png
 ```
 
-二维码五分钟后过期；该命令不会唤醒 Agent。通过本机命令建立的 iLink 身份代表宿主机
+目标文件必须直接位于所选 Kintio 实例目录中且不能预先存在；登录成功、过期、取消或失败后，Kintio 会自动删除该文件，并且
+不会打印二维码原始内容。二维码五分钟后过期；该命令不会唤醒 Agent。通过本机命令建立的 iLink 身份代表宿主机
 所有者的明确授权，后续对话直接继承宿主 Agent 配置，不再套用不可信渠道的能力限制。
-只应让获准控制宿主 Agent 的人扫描该二维码。
+只应让获准控制宿主 Agent 的人扫描该二维码。登录后运行 `kintio ilink start` 即可在不
+启动 Hono 的情况下处理消息。
 
-启动后应确认 `kintio logs` 包含 `Hono server is listening on port 8888`；投入使用前仍需按
-部署指南完成回调或绑定验证。需要前台进程时使用 `kintio run`；现有源码目录部署可以在完成
-部署指南中的一次性进程管理器迁移后，继续使用原数据库和配置。
+`kintio ilink delete --account <账号> --yes` 会不可恢复地删除该账号及其在 Kintio
+中的凭据、会话、消息、媒体、发送记录和登录审计；`--yes` 为强制确认参数。
+
+公网回调部署启动后，应确认 `kintio logs` 包含
+`Hono server is listening on port 8888`。
 源码构建与贡献者开发环境见英文
 [贡献指南](https://github.com/Gkxie/kintio/blob/master/CONTRIBUTING.md)。
 

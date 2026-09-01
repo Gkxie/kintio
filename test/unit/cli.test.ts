@@ -51,6 +51,14 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
   assert.equal(await runCli([], runtime.overrides), 0);
   assert.match(runtime.stdout.join(''), /Commands:\n  setup/u);
   assert.match(runtime.stdout.join(''), /ilink login/u);
+  assert.match(runtime.stdout.join(''), /ilink start/u);
+  assert.match(runtime.stdout.join(''), /ilink delete/u);
+  runtime.stdout.length = 0;
+  assert.equal(await runCli(['help'], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /Usage: kintio <command>/u);
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['help', 'extra'], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /Unexpected argument: extra/u);
   runtime.stdout.length = 0;
   assert.equal(await runCli(['--version'], runtime.overrides), 0);
   assert.equal(runtime.stdout.join(''), `${KINTIO_VERSION}\n`);
@@ -59,6 +67,31 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
   runtime.stderr.length = 0;
   assert.equal(await runCli(['start', '--lines', '5'], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /valid only for "kintio logs"/u);
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['start', '--qr-output', 'qr.png'], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /valid only for "kintio ilink login"/u);
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['--qr-output', 'qr.png'], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /valid only for "kintio ilink login"/u);
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['ilink', 'logout', '--help'], runtime.overrides), 1);
+  assert.match(
+    runtime.stderr.join(''),
+    /Usage: kintio ilink <login\|list\|start\|stop\|delete>/u,
+  );
+  runtime.stderr.length = 0;
+  assert.equal(await runCli([
+    'ilink', 'login', 'extra', '--help',
+  ], runtime.overrides), 1);
+  assert.match(
+    runtime.stderr.join(''),
+    /Usage: kintio ilink <login\|list\|start\|stop\|delete>/u,
+  );
+  runtime.stderr.length = 0;
+  assert.equal(await runCli([
+    'ilink', 'login', '--qr-output', '',
+  ], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /requires a non-empty file path/u);
 });
 
 test('CLI routes only the exact ilink login subcommand to an interactive adapter', async (t) => {
@@ -68,13 +101,21 @@ test('CLI routes only the exact ilink login subcommand to an interactive adapter
   assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
   await fs.appendFile(path.join(home, '.env'), '\nILINK_ENABLED=true\n');
   const signals: AbortSignal[] = [];
-  const previousListeners = [...process.listeners('SIGINT')];
+  const qrOutputPaths: Array<string | undefined> = [];
+  const loginSignals: NodeJS.Signals[] = process.platform === 'win32'
+    ? ['SIGINT', 'SIGTERM']
+    : ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  const previousListeners = new Map(loginSignals.map((signal) => [
+    signal,
+    [...process.listeners(signal)],
+  ]));
   const runtime = cliRuntime(root, {
     stdoutIsTTY: true,
     stdoutColumns: 120,
     ilinkLogin: async (options) => {
       signals.push(options.signal);
-      assert.equal(options.config.ilink.enabled, true);
+      qrOutputPaths.push(options.qrOutputPath);
+      assert.equal(options.config.ilink.baseUrl, 'https://ilinkai.weixin.qq.com/');
       assert.equal(options.stdoutColumns, 120);
       return 0;
     },
@@ -82,13 +123,192 @@ test('CLI routes only the exact ilink login subcommand to an interactive adapter
   assert.equal(await runCli(['ilink', 'login', '--home', home], runtime.overrides), 0);
   assert.equal(signals.length, 1);
   assert.equal(signals[0]?.aborted, false);
-  assert.deepEqual(process.listeners('SIGINT'), previousListeners);
+  assert.deepEqual(qrOutputPaths, [undefined]);
+  for (const signal of loginSignals) {
+    assert.deepEqual(process.listeners(signal), previousListeners.get(signal));
+  }
 
+  runtime.stdout.length = 0;
+  assert.equal(await runCli(['ilink', '--help'], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /Usage: kintio ilink <command>/u);
+  assert.match(runtime.stdout.join(''), /login \[options\]/u);
+  assert.equal(signals.length, 1);
+
+  runtime.stdout.length = 0;
+  assert.equal(await runCli(['ilink', 'login', '--help'], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /Usage: kintio ilink login \[options\]/u);
+  assert.match(runtime.stdout.join(''), /--qr-output <file>/u);
+  assert.match(runtime.stdout.join(''), /directly inside the instance directory/u);
+  assert.match(runtime.stdout.join(''), /removed when the login attempt ends/u);
+  assert.match(runtime.stdout.join(''), /authorized operator/u);
+  assert.equal(signals.length, 1);
+
+  const outputPath = path.join(home, 'login-qr.png');
+  assert.equal(await runCli([
+    'ilink', 'login', '--home', home, '--qr-output', outputPath,
+  ], runtime.overrides), 0);
+  assert.deepEqual(qrOutputPaths, [undefined, outputPath]);
+  assert.equal(signals.length, 2);
+
+  runtime.stderr.length = 0;
+  assert.equal(await runCli([
+    'ilink', 'login', '--home', home,
+    '--qr-output', path.join(root, 'outside.png'),
+  ], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /directly inside the instance directory/u);
+  assert.equal(signals.length, 2);
+
+  runtime.stderr.length = 0;
   assert.equal(await runCli(['ilink', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /Usage: kintio ilink login/u);
+  assert.match(
+    runtime.stderr.join(''),
+    /Usage: kintio ilink <login\|list\|start\|stop\|delete>/u,
+  );
   runtime.stderr.length = 0;
   assert.equal(await runCli(['ilink', 'logout', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /Usage: kintio ilink login/u);
+  assert.match(
+    runtime.stderr.join(''),
+    /Usage: kintio ilink <login\|list\|start\|stop\|delete>/u,
+  );
+});
+
+test('iLink login and start need no setup, config file, or Hono lifecycle', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'fresh-instance');
+  let loginCalls = 0;
+  let accountCalls = 0;
+  let startCalls = 0;
+  const runtime = cliRuntime(root, {
+    stdoutIsTTY: true,
+    ilinkLogin: async ({ config }) => {
+      loginCalls += 1;
+      assert.equal(config.state.databaseFile, path.join(home, 'data/kintio.sqlite'));
+      return 0;
+    },
+    ilinkAccount: async ({ command, config }) => {
+      accountCalls += 1;
+      assert.equal(command, 'start');
+      assert.equal(config.state.databaseFile, path.join(home, 'data/kintio.sqlite'));
+      return { startForeground: true, runningCount: 1 };
+    },
+    ilinkStart: async ({ config }) => {
+      startCalls += 1;
+      assert.equal('wecom' in config, false);
+      assert.equal(config.ilink.enabled, true);
+      assert.equal(config.state.databaseFile, path.join(home, 'data/kintio.sqlite'));
+      return 0;
+    },
+  });
+
+  assert.equal(await runCli(['ilink', 'login', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['ilink', 'start', '--home', home], runtime.overrides), 0);
+  assert.deepEqual(
+    { loginCalls, accountCalls, startCalls },
+    { loginCalls: 1, accountCalls: 1, startCalls: 1 },
+  );
+  await assert.rejects(() => fs.stat(path.join(home, '.env')), /ENOENT/u);
+
+  runtime.stdout.length = 0;
+  assert.equal(await runCli(['ilink', 'start', '--help'], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /without starting\nHono/u);
+  assert.equal(startCalls, 1);
+
+  runtime.stderr.length = 0;
+  assert.equal(await runCli([
+    'ilink', 'start', '--home', home, '--qr-output', path.join(home, 'qr.png'),
+  ], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /valid only for "kintio ilink login"/u);
+});
+
+test('CLI routes iLink account lifecycle selectors and destructive confirmation', async (t) => {
+  const root = await temporaryRoot(t);
+  const calls: Array<Record<string, unknown>> = [];
+  let foregroundStarts = 0;
+  const runtime = cliRuntime(root, {
+    ilinkAccount: async (options) => {
+      calls.push({
+        command: options.command,
+        selector: options.selector,
+        confirmed: options.confirmed,
+      });
+      return {
+        startForeground: options.command === 'start',
+        runningCount: options.command === 'stop' || options.command === 'delete' ? 0 : 1,
+      };
+    },
+    ilinkStart: async () => {
+      foregroundStarts += 1;
+      return 0;
+    },
+  });
+  const home = path.join(root, 'account-lifecycle');
+
+  assert.equal(await runCli(['ilink', 'list', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli([
+    'ilink', 'start', '--home', home, '--account', 'bot-a@im.bot',
+  ], runtime.overrides), 0);
+  assert.equal(await runCli([
+    'ilink', 'stop', '--home', home, '--account', `ia_${'a'.repeat(40)}`,
+  ], runtime.overrides), 0);
+  assert.equal(await runCli([
+    'ilink', 'delete', '--home', home, '--account', 'bot-a@im.bot', '--yes',
+  ], runtime.overrides), 0);
+  assert.deepEqual(calls, [
+    { command: 'list', selector: undefined, confirmed: false },
+    { command: 'start', selector: 'bot-a@im.bot', confirmed: false },
+    { command: 'stop', selector: `ia_${'a'.repeat(40)}`, confirmed: false },
+    { command: 'delete', selector: 'bot-a@im.bot', confirmed: true },
+  ]);
+  assert.equal(foregroundStarts, 1);
+
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['ilink', 'list', '--account', 'bad'], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /--account is valid only/u);
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['ilink', 'start', '--yes'], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /--yes is valid only/u);
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['ilink', 'delete', '--account', ''], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /requires a non-empty account ID or key/u);
+
+  runtime.stdout.length = 0;
+  for (const command of ['list', 'start', 'stop', 'delete']) {
+    assert.equal(await runCli(['ilink', command, '--help'], runtime.overrides), 0);
+  }
+  assert.match(runtime.stdout.join(''), /cannot be undone/u);
+});
+
+test('CLI drains an iLink login before honoring terminal signals', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const setupRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  await fs.appendFile(path.join(home, '.env'), '\nILINK_ENABLED=true\n');
+  const runtime = cliRuntime(root, {
+    stdoutIsTTY: true,
+    ilinkLogin: ({ signal }) => new Promise<number>((resolve) => {
+      signal.addEventListener('abort', () => resolve(130), { once: true });
+    }),
+  });
+  const cases: Array<[NodeJS.Signals, number]> = [
+    ['SIGINT', 130],
+    ['SIGTERM', 143],
+    ...(process.platform === 'win32'
+      ? []
+      : [['SIGHUP', 129] as [NodeJS.Signals, number]]),
+  ];
+  for (const [signal, exitCode] of cases) {
+    const previousListeners = [...process.listeners(signal)];
+    const running = runCli(['ilink', 'login', '--home', home], runtime.overrides);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const handler = process.listeners(signal).find(
+      (listener) => !previousListeners.includes(listener),
+    );
+    assert.ok(handler);
+    (handler as () => void)();
+    assert.equal(await running, exitCode);
+    assert.deepEqual(process.listeners(signal), previousListeners);
+  }
 });
 
 test('setup creates one private config and refreshes the managed Agent skill', async (t) => {

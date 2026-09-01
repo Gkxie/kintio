@@ -5,6 +5,12 @@ import type { IlinkLoginStatus } from '../ilink/login-store.ts';
 import { KINTIO_VERSION } from '../version.ts';
 
 const OFFER_ID = z.string().regex(/^qo_[A-Za-z0-9_-]{1,128}$/u);
+const ACCOUNT_KEY = z.string().regex(/^ia_[0-9a-f]{40}$/u);
+const OPERATOR_ACCOUNT = z.object({
+  accountKey: ACCOUNT_KEY,
+  providerAccountId: z.string().min(1).max(512),
+  runtimeEnabled: z.boolean(),
+});
 const LOGIN_STATUS = z.enum([
   'waiting',
   'scanned',
@@ -18,7 +24,7 @@ const LOGIN_STATUS = z.enum([
 ]);
 
 export interface IlinkLoginOperator {
-  begin(): Promise<{
+  begin(signal?: AbortSignal): Promise<{
     readonly offerId: string;
     readonly qrContent: string;
     readonly expiresAt: number;
@@ -27,6 +33,15 @@ export interface IlinkLoginOperator {
     readonly status: IlinkLoginStatus;
   };
   cancel(offerId: string): boolean;
+  listAccounts(): readonly z.infer<typeof OPERATOR_ACCOUNT>[];
+  setAccountRuntime(accountKey: string, enabled: boolean): Promise<{
+    readonly account: z.infer<typeof OPERATOR_ACCOUNT>;
+    readonly runningCount: number;
+  }>;
+  deleteAccount(accountKey: string): Promise<{
+    readonly account: z.infer<typeof OPERATOR_ACCOUNT>;
+    readonly runningCount: number;
+  }>;
 }
 
 function textResult(
@@ -39,18 +54,22 @@ function textResult(
   };
 }
 
-function failure(error: unknown) {
+function failure(error: unknown, operation: 'login' | 'account' = 'login') {
   const message = error instanceof Error ? error.message : '';
   const code = /account limit reached/iu.test(message)
     ? 'account_limit_reached'
     : /already pending/iu.test(message)
       ? 'login_pending'
-      : 'login_unavailable';
+      : operation === 'account'
+        ? 'account_operation_unavailable'
+        : 'login_unavailable';
   const publicMessage = code === 'account_limit_reached'
     ? 'The iLink account limit has been reached.'
     : code === 'login_pending'
       ? 'An iLink terminal login is already pending.'
-      : 'The iLink login operation is unavailable.';
+      : code === 'account_operation_unavailable'
+        ? 'The iLink account operation is unavailable.'
+        : 'The iLink login operation is unavailable.';
   return {
     content: [{ type: 'text' as const, text: publicMessage }],
     isError: true,
@@ -62,7 +81,7 @@ export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServ
     { name: 'kintio-ilink-login', version: KINTIO_VERSION },
     {
       instructions:
-        'Private local operator tools for one iLink QR login. Never expose this server to an Agent.',
+        'Private local operator tools for iLink enrollment and account lifecycle. Never expose this server to an Agent.',
     },
   );
 
@@ -81,7 +100,7 @@ export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServ
     async (_input, { signal }) => {
       let offered: Awaited<ReturnType<IlinkLoginOperator['begin']>> | undefined;
       try {
-        offered = await operator.begin();
+        offered = await operator.begin(signal);
         if (signal.aborted) {
           throw signal.reason;
         }
@@ -127,6 +146,70 @@ export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServ
         });
       } catch (error: unknown) {
         return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    'list_accounts',
+    {
+      description: 'List enrolled iLink accounts without credentials.',
+      inputSchema: {},
+      outputSchema: { accounts: z.array(OPERATOR_ACCOUNT).max(1_000) },
+      annotations: { readOnlyHint: true, idempotentHint: true },
+    },
+    () => {
+      try {
+        return textResult('iLink accounts.', { accounts: operator.listAccounts() });
+      } catch (error: unknown) {
+        return failure(error, 'account');
+      }
+    },
+  );
+
+  for (const [name, enabled] of [
+    ['start_account', true],
+    ['stop_account', false],
+  ] as const) {
+    server.registerTool(
+      name,
+      {
+        description: `${enabled ? 'Start' : 'Stop'} one enrolled iLink account.`,
+        inputSchema: { accountKey: ACCOUNT_KEY },
+        outputSchema: {
+          account: OPERATOR_ACCOUNT,
+          runningCount: z.number().int().nonnegative(),
+        },
+        annotations: { readOnlyHint: false, idempotentHint: true },
+      },
+      async ({ accountKey }) => {
+        try {
+          const result = await operator.setAccountRuntime(accountKey, enabled);
+          return textResult(`iLink account ${enabled ? 'started' : 'stopped'}.`, result);
+        } catch (error: unknown) {
+          return failure(error, 'account');
+        }
+      },
+    );
+  }
+
+  server.registerTool(
+    'delete_account',
+    {
+      description: 'Permanently delete one iLink account and all Kintio data scoped to it.',
+      inputSchema: { accountKey: ACCOUNT_KEY },
+      outputSchema: {
+        account: OPERATOR_ACCOUNT,
+        runningCount: z.number().int().nonnegative(),
+      },
+      annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true },
+    },
+    async ({ accountKey }) => {
+      try {
+        const result = await operator.deleteAccount(accountKey);
+        return textResult('iLink account and its Kintio data were deleted.', result);
+      } catch (error: unknown) {
+        return failure(error, 'account');
       }
     },
   );

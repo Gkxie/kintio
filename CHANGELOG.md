@@ -4,12 +4,29 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
-- Added `kintio ilink login`, which reuses the running iLink enrollment state
-  machine while rendering its five-minute QR code directly in an interactive
-  terminal; no WeChat KF conversation or Agent turn is required. Accounts
+- Added `kintio ilink login`, which reuses the iLink enrollment state machine
+  while rendering its five-minute QR code directly in an interactive terminal;
+  no WeChat KF conversation or Agent turn is required. Accounts
   enrolled locally receive host-level Agent access and inherit the host runtime
   configuration, while remotely offered iLink accounts remain restricted
   ([#54](https://github.com/Gkxie/kintio/issues/54)).
+- Added an explicit `--qr-output <file>` view for `kintio ilink login`, allowing
+  graphical and non-terminal callers to consume a temporary raw PNG directly
+  from the QR payload without parsing ANSI terminal output. The file is created
+  exclusively and removed when the login attempt ends
+  ([#57](https://github.com/Gkxie/kintio/issues/57)).
+- Made iLink a standalone lifecycle: `kintio ilink login` now initializes and
+  persists an account without setup, an environment file, Hono, or a running
+  Worker, while safely delegating to a running instance when present;
+  `kintio ilink start` starts polling and the host Agent in the foreground without
+  a public HTTP listener. The iLink Runtime configuration no longer contains a
+  synthetic WeChat KF adapter
+  ([#59](https://github.com/Gkxie/kintio/issues/59)).
+- Added per-account `kintio ilink list`, `start`, `stop`, and confirmed `delete`
+  lifecycle commands. One Runtime can reconcile multiple selected listeners;
+  complete deletion atomically purges the selected account and all Kintio data
+  scoped to it while preserving unrelated accounts and channels
+  ([#60](https://github.com/Gkxie/kintio/issues/60)).
 
 ## 0.6.2
 

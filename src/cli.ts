@@ -9,6 +9,8 @@ import crossSpawn from 'cross-spawn';
 import {
   DAEMON_STOP_TIMEOUT_MS,
   loadConfig,
+  loadIlinkEnrollmentConfig,
+  loadIlinkRuntimeConfig,
   parseStartTimeout,
   resolveProjectRoot,
   WORKER_GRACEFUL_TIMEOUT_MS,
@@ -20,6 +22,8 @@ import {
   ensurePrivateDirectory,
 } from './lib/private-directory.ts';
 import { runIlinkCliLogin } from './ilink/cli-login.ts';
+import { runIlinkAccountCommand } from './ilink/cli-accounts.ts';
+import { startIlinkCliRuntime } from './ilink/cli-start.ts';
 import {
   daemonRecordPath,
   readDaemonRecord,
@@ -65,6 +69,8 @@ interface CliRuntime {
   readonly stdoutIsTTY: boolean;
   readonly stdoutColumns: number;
   readonly ilinkLogin: typeof runIlinkCliLogin;
+  readonly ilinkAccount: typeof runIlinkAccountCommand;
+  readonly ilinkStart: typeof startIlinkCliRuntime;
 }
 
 interface InstanceLocation {
@@ -82,7 +88,11 @@ Commands:
   restart               Restart Kintio with the current installation and config
   status                Show the background process status
   logs                  Follow Kintio logs
-  ilink login           Connect an iLink account with a terminal QR code
+  ilink login [options] Connect an iLink account with a QR code
+  ilink list            List enrolled iLink accounts
+  ilink start [options] Start one iLink account without Hono
+  ilink stop [options]  Stop one iLink account
+  ilink delete [options] Permanently delete one iLink account and its data
 
 Options:
   --home <directory>     Instance directory (default: ~/.kintio)
@@ -91,7 +101,140 @@ Options:
   --no-follow            Print logs without following
   -h, --help             Show this help
   -v, --version          Show the Kintio version
+
+Run "kintio ilink --help" for iLink account commands.
 `;
+
+const ILINK_LOGIN_HELP = `Usage: kintio ilink login [options]
+
+Connect one iLink account, save its encrypted credentials, and exit. This
+command does not require setup, an environment file, Hono, or a running Kintio
+instance. By default, the QR code is rendered directly in an interactive
+terminal and expires after five minutes.
+
+The PNG option is required when stdout is not an interactive terminal. Whoever
+scans this locally issued QR receives the capabilities allowed by the host Agent
+configuration; show it only to an authorized operator.
+
+Options:
+  --qr-output <file>     Write a temporary raw QR PNG instead of terminal blocks
+                         The file must be directly inside the instance directory
+                         The file is removed when the login attempt ends
+  --home <directory>     Instance directory (default: ~/.kintio)
+  --config <file>        Optional environment overrides
+  -h, --help             Show this help
+`;
+
+const ILINK_START_HELP = `Usage: kintio ilink start [options]
+
+Run iLink long polling and the host Agent in the foreground without starting
+Hono or opening a TCP listener. This command does not require setup or an
+environment file. One account is selected automatically; multiple accounts
+require --account. While this runtime is active, additional start commands add
+accounts to the same process.
+
+Options:
+  --account <id>        Provider account ID or Kintio account key
+  --home <directory>     Instance directory (default: ~/.kintio)
+  --config <file>        Optional environment overrides
+  -h, --help             Show this help
+`;
+
+const ILINK_STOP_HELP = `Usage: kintio ilink stop [options]
+
+Stop one iLink account. Stopping the last account also exits a foreground
+"kintio ilink start" runtime. One account is selected automatically; multiple
+accounts require --account.
+
+Options:
+  --account <id>        Provider account ID or Kintio account key
+  --home <directory>    Instance directory (default: ~/.kintio)
+  --config <file>       Optional environment overrides
+  -h, --help            Show this help
+`;
+
+const ILINK_LIST_HELP = `Usage: kintio ilink list [options]
+
+List enrolled iLink accounts and whether each account is currently running.
+
+Options:
+  --home <directory>    Instance directory (default: ~/.kintio)
+  --config <file>       Optional environment overrides
+  -h, --help            Show this help
+`;
+
+const ILINK_DELETE_HELP = `Usage: kintio ilink delete [options]
+
+Permanently delete one iLink account and all Kintio data scoped to it,
+including credentials, conversations, messages, media, send records, and
+enrollment audit records. This operation cannot be undone.
+
+Options:
+  --account <id>        Provider account ID or Kintio account key
+  --yes                 Confirm permanent deletion
+  --home <directory>    Instance directory (default: ~/.kintio)
+  --config <file>       Optional environment overrides
+  -h, --help            Show this help
+`;
+
+const ILINK_HELP = `Usage: kintio ilink <command>
+
+Commands:
+  login [options]        Connect an iLink account with a QR code
+  list                   List enrolled accounts
+  start [options]        Start one account without Hono
+  stop [options]         Stop one account
+  delete [options]       Permanently delete one account and its data
+
+Run "kintio ilink <command> --help" for command options.
+`;
+
+const ILINK_COMMANDS = new Set(['login', 'list', 'start', 'stop', 'delete']);
+
+const COMMANDS = new Set([
+  'setup',
+  'start',
+  'run',
+  'stop',
+  'restart',
+  'status',
+  'logs',
+  'ilink',
+]);
+
+const ILINK_SIGNALS: readonly NodeJS.Signals[] = process.platform === 'win32'
+  ? ['SIGINT', 'SIGTERM']
+  : ['SIGINT', 'SIGTERM', 'SIGHUP'];
+
+function signalExitCode(signal: NodeJS.Signals): number {
+  if (signal === 'SIGHUP') return 129;
+  if (signal === 'SIGTERM') return 143;
+  return 130;
+}
+
+async function runWithIlinkSignals(
+  operation: (signal: AbortSignal) => Promise<number>,
+): Promise<number> {
+  const controller = new AbortController();
+  let interruptedBy: NodeJS.Signals | undefined;
+  const interrupt = (signal: NodeJS.Signals) => {
+    interruptedBy ||= signal;
+    controller.abort();
+  };
+  const listeners = ILINK_SIGNALS.map((signal) => ({
+    signal,
+    listener: () => interrupt(signal),
+  }));
+  for (const { signal, listener } of listeners) process.once(signal, listener);
+  try {
+    const result = await operation(controller.signal);
+    return result === 130 && interruptedBy
+      ? signalExitCode(interruptedBy)
+      : result;
+  } finally {
+    for (const { signal, listener } of listeners) process.off(signal, listener);
+  }
+}
 
 function defaultExecute(request: ProcessRequest): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -172,6 +315,8 @@ function runtimeDefaults(): CliRuntime {
     stdoutIsTTY: Boolean(process.stdout.isTTY),
     stdoutColumns: process.stdout.columns || 80,
     ilinkLogin: runIlinkCliLogin,
+    ilinkAccount: runIlinkAccountCommand,
+    ilinkStart: startIlinkCliRuntime,
   };
 }
 
@@ -673,6 +818,9 @@ export async function runCli(
         config: { type: 'string' },
         lines: { type: 'string' },
         'no-follow': { type: 'boolean' },
+        'qr-output': { type: 'string' },
+        account: { type: 'string' },
+        yes: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
         version: { type: 'boolean', short: 'v' },
       },
@@ -682,17 +830,47 @@ export async function runCli(
       return 0;
     }
     const command = parsed.positionals[0];
-    if (parsed.values.help || !command || command === 'help') {
+    const subcommand = parsed.positionals[1];
+    if (!command) {
+      if (parsed.values['qr-output'] !== undefined) {
+        throw new Error('--qr-output is valid only for "kintio ilink login"');
+      }
       runtime.stdout(HELP);
       return 0;
     }
-    const subcommand = parsed.positionals[1];
+    if (command === 'help') {
+      if (parsed.positionals.length !== 1) {
+        throw new Error(`Unexpected argument: ${subcommand}`);
+      }
+      runtime.stdout(HELP);
+      return 0;
+    }
+    if (!COMMANDS.has(command)) throw new Error(`Unknown command: ${command}`);
     if (command === 'ilink') {
-      if (subcommand !== 'login' || parsed.positionals.length !== 2) {
-        throw new Error('Usage: kintio ilink login');
+      if (parsed.values.help && parsed.positionals.length === 1) {
+        runtime.stdout(ILINK_HELP);
+        return 0;
+      }
+      if (
+        !subcommand || !ILINK_COMMANDS.has(subcommand) ||
+        parsed.positionals.length !== 2
+      ) {
+        throw new Error('Usage: kintio ilink <login|list|start|stop|delete>');
       }
     } else if (parsed.positionals.length !== 1) {
       throw new Error(`Unexpected argument: ${subcommand}`);
+    }
+    if (parsed.values.help) {
+      runtime.stdout(
+        command !== 'ilink'
+          ? HELP
+          : subcommand === 'login' ? ILINK_LOGIN_HELP
+            : subcommand === 'list' ? ILINK_LIST_HELP
+              : subcommand === 'start' ? ILINK_START_HELP
+                : subcommand === 'stop' ? ILINK_STOP_HELP
+                  : ILINK_DELETE_HELP,
+      );
+      return 0;
     }
     if (
       command !== 'logs' &&
@@ -700,32 +878,80 @@ export async function runCli(
     ) {
       throw new Error('--lines and --no-follow are valid only for "kintio logs"');
     }
+    if (
+      (command !== 'ilink' || subcommand !== 'login') &&
+      parsed.values['qr-output'] !== undefined
+    ) {
+      throw new Error('--qr-output is valid only for "kintio ilink login"');
+    }
+    if (parsed.values['qr-output'] === '') {
+      throw new Error('--qr-output requires a non-empty file path');
+    }
+    if (
+      parsed.values.account !== undefined &&
+      (command !== 'ilink' || !['start', 'stop', 'delete'].includes(subcommand || ''))
+    ) {
+      throw new Error('--account is valid only for "kintio ilink start|stop|delete"');
+    }
+    if (parsed.values.account === '') {
+      throw new Error('--account requires a non-empty account ID or key');
+    }
+    if (parsed.values.yes && (command !== 'ilink' || subcommand !== 'delete')) {
+      throw new Error('--yes is valid only for "kintio ilink delete"');
+    }
     const location = instanceLocation(parsed.values, runtime);
+    const qrOutputPath = parsed.values['qr-output'] === undefined
+      ? undefined
+      : resolveInputPath(parsed.values['qr-output'], runtime.cwd);
+    if (qrOutputPath && !samePath(path.dirname(qrOutputPath), location.home)) {
+      throw new Error('iLink QR output must be directly inside the instance directory');
+    }
     if (command === 'ilink') {
-      if (!privateFile(location.configFile, 'Kintio config')) {
-        throw new Error(`Kintio config is missing; run "kintio setup": ${location.configFile}`);
+      if (privateFile(location.configFile, 'Kintio config')) {
+        assertTrustedDirectory(
+          path.dirname(location.configFile),
+          'Kintio config directory',
+          false,
+        );
       }
-      assertTrustedDirectory(
-        path.dirname(location.configFile),
-        'Kintio config directory',
-        false,
-      );
       prepareDirectories(location.home);
-      const controller = new AbortController();
-      const interrupt = () => controller.abort();
-      process.once('SIGINT', interrupt);
-      try {
-        return await runtime.ilinkLogin({
-          config: loadInstanceConfig(location, runtime),
-          packageRoot: runtime.packageRoot,
-          stdout: runtime.stdout,
-          stdoutIsTTY: runtime.stdoutIsTTY,
-          stdoutColumns: runtime.stdoutColumns,
-          signal: controller.signal,
+      return await runWithIlinkSignals(async (signal) => {
+        const enrollmentConfig = loadIlinkEnrollmentConfig({
+          environment: { ...runtime.env },
+          envFile: location.configFile,
+          root: location.home,
         });
-      } finally {
-        process.off('SIGINT', interrupt);
-      }
+        if (subcommand === 'login') {
+          return await runtime.ilinkLogin({
+            config: enrollmentConfig,
+            packageRoot: runtime.packageRoot,
+            stdout: runtime.stdout,
+            stdoutIsTTY: runtime.stdoutIsTTY,
+            stdoutColumns: runtime.stdoutColumns,
+            ...(qrOutputPath ? { qrOutputPath } : {}),
+            signal,
+          });
+        }
+        const commandResult = await runtime.ilinkAccount({
+          command: subcommand as 'list' | 'start' | 'stop' | 'delete',
+          ...(parsed.values.account ? { selector: parsed.values.account } : {}),
+          confirmed: Boolean(parsed.values.yes),
+          config: enrollmentConfig,
+          packageRoot: runtime.packageRoot,
+          signal,
+          stdout: runtime.stdout,
+        });
+        if (subcommand !== 'start' || !commandResult.startForeground) return 0;
+        return await runtime.ilinkStart({
+          config: loadIlinkRuntimeConfig({
+            environment: { ...runtime.env },
+            envFile: location.configFile,
+            root: location.home,
+          }),
+          signal,
+          stdout: runtime.stdout,
+        });
+      });
     }
     if (command === 'setup') return setup(location, runtime);
     if (command === 'start') return await start(location, runtime, false);

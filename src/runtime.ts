@@ -1,12 +1,10 @@
-import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
 import { acquireSingleInstanceLock } from './runtime/single-instance-lock.ts';
-import { ensurePrivateDirectory } from './lib/private-directory.ts';
 import { CodexAgent, createCodexAppServer } from './services/codex-agent.ts';
 import { ConversationProcessor } from './services/conversation-processor.ts';
 import { cleanupStagedImageOrphans } from './services/image-stager.ts';
@@ -20,15 +18,13 @@ import { createIlinkLoginMcpServer } from './mcp/ilink-login-server.ts';
 import { McpIpcHost } from './mcp/ipc-host.ts';
 import { operatorMcpInstanceKey } from './mcp/ipc-protocol.ts';
 import { IlinkSendExecutor } from './ilink/executor.ts';
+import { createIlinkEnrollmentService } from './ilink/enrollment.ts';
 import { IlinkListenerManager } from './ilink/listener.ts';
-import { IlinkLoginManager } from './ilink/login-manager.ts';
-import type { IlinkLoginStore } from './ilink/login-store.ts';
 import { IlinkMediaGateway } from './ilink/media-gateway.ts';
 import { renderIlinkQrPng } from './ilink/qr.ts';
 import { DEFAULT_ILINK_MEDIA_TIMEOUT_MS } from './ilink/media.ts';
 import { DEFAULT_ILINK_IMAGE_TIMEOUT_MS } from './ilink/inbound-image.ts';
 import { IlinkClient } from './ilink/protocol/client.ts';
-import { IlinkSecretBox } from './ilink/secret-box.ts';
 import { assertIlinkAccountKey } from './ilink/store-types.ts';
 import {
   ConversationMemoryExecutor,
@@ -50,6 +46,13 @@ export interface Runtime {
   abort(): Promise<void>;
 }
 
+export interface RuntimeConfig {
+  readonly state: AppConfig['state'];
+  readonly codex: AppConfig['codex'];
+  readonly ilink: AppConfig['ilink'];
+  readonly wecom?: AppConfig['wecom'];
+}
+
 function ilinkSecretGeneration(providerMessageId: string): number {
   return Number.parseInt(
     createHash('sha256').update(providerMessageId).digest('hex').slice(0, 12),
@@ -57,42 +60,18 @@ function ilinkSecretGeneration(providerMessageId: string): number {
   );
 }
 
-function readOrCreatePrivateKey(filePath: string, label: string): string {
-  const target = path.resolve(filePath);
-  ensurePrivateDirectory(path.dirname(target));
-  try {
-    const existing = fs.readFileSync(target, 'utf8').trim();
-    if (!/^[A-Za-z0-9_-]{43}$/u.test(existing)) {
-      throw new Error(`${label} file is invalid`);
-    }
-    fs.chmodSync(target, 0o600);
-    return existing;
-  } catch (error: unknown) {
-    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
-      throw error;
-    }
-  }
-  const token = randomBytes(32).toString('base64url');
-  try {
-    fs.writeFileSync(target, `${token}\n`, { flag: 'wx', mode: 0o600 });
-    return token;
-  } catch (error: unknown) {
-    if (error instanceof Error && 'code' in error && error.code === 'EEXIST') {
-      return readOrCreatePrivateKey(target, label);
-    }
-    throw error;
-  }
-}
-
 export async function createRuntime({
   config,
   logger = console,
+  onIlinkStopRequested,
 }: {
-  config: AppConfig;
+  config: RuntimeConfig;
   logger?: Logger;
+  onIlinkStopRequested?: () => void;
 }): Promise<Runtime> {
+  const wecom = config.wecom;
   if (
-    (!config.wecom.api.enabled && !config.ilink.enabled) ||
+    (!wecom?.api.enabled && !config.ilink.enabled) ||
     (!config.codex.enabled && !config.ilink.enabled)
   ) {
     logger.info('[runtime] message processing is disabled');
@@ -106,8 +85,8 @@ export async function createRuntime({
   }
 
   const enabledChannels: readonly ChatChannel[] = [
-    ...(config.wecom.api.enabled ? ['wechat_kf' as const] : []),
-    ...(config.ilink.enabled ? ['weixin_ilink' as const] : []),
+    ...(wecom?.api.enabled ? ['wechat_kf' as const] : []),
+    'weixin_ilink',
   ];
 
   const instanceLock = acquireSingleInstanceLock({
@@ -117,7 +96,8 @@ export async function createRuntime({
   });
   let persistence: StatePersistence | undefined;
   let cleanupTimer: NodeJS.Timeout | undefined;
-  let ilinkOffers: IlinkLoginStore | undefined;
+  let ilinkEnrollment: ReturnType<typeof createIlinkEnrollmentService> | undefined;
+  let ilinkEnrollmentStart: Promise<void> | undefined;
   let mcpHost: McpIpcHost | undefined;
   let operatorMcpHost: McpIpcHost | undefined;
 
@@ -131,7 +111,7 @@ export async function createRuntime({
     cleanupTimer = setInterval(() => {
       try {
         activeStore.cleanup();
-        ilinkOffers?.cleanup();
+        ilinkEnrollment?.offers.cleanup();
       } catch (error) {
         logger.error(
           `[cleanup] SQLite retention failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -141,30 +121,48 @@ export async function createRuntime({
     cleanupTimer.unref();
     const startupInbound = store.recoverStartup().inbound.filter((record) =>
       enabledChannels.includes(record.channel));
-    const apiClient = config.wecom.api.enabled
+    const apiClient = wecom?.api.enabled
       ? new WecomApiClient({
-          corpId: config.wecom.api.corpId,
-          kfSecret: config.wecom.api.kfSecret,
-          baseUrl: config.wecom.api.baseUrl,
-          timeoutMs: config.wecom.api.timeoutMs,
+          corpId: wecom.api.corpId,
+          kfSecret: wecom.api.kfSecret,
+          baseUrl: wecom.api.baseUrl,
+          timeoutMs: wecom.api.timeoutMs,
         })
       : undefined;
     const mediaGateway = apiClient ? new WecomMediaGateway({ apiClient }) : undefined;
-    let ilinkLogin: IlinkLoginManager | undefined;
     let ilinkListener: IlinkListenerManager | undefined;
+    let ilinkRuntimeStarted = false;
     let toolsUnavailable = false;
+    const ensureIlinkEnrollment = () => {
+      ilinkEnrollment ||= createIlinkEnrollmentService({
+        persistence: activePersistence,
+        config: config.ilink,
+        logger,
+        onAccountsChanged: () => ilinkListener?.refresh(),
+      });
+      return ilinkEnrollment;
+    };
+    const startIlinkEnrollment = async () => {
+      const enrollment = ensureIlinkEnrollment();
+      ilinkEnrollmentStart ||= enrollment.manager.start();
+      await ilinkEnrollmentStart;
+      return enrollment;
+    };
+    const activeIlinkEnrollment = ensureIlinkEnrollment();
+    const ilinkSecretBox = activeIlinkEnrollment?.secretBox;
+    const ilinkStore = activeIlinkEnrollment?.accounts;
     const wechatTools = apiClient && mediaGateway
       ? new WechatKfToolExecutor({
           store,
           apiClient,
           mediaGateway,
-          observeMs: config.wecom.api.observeMs,
+          observeMs: wecom?.api.observeMs || 5_000,
           logger,
           ...(config.ilink.enabled ? {
             ilinkOffers: {
               async offer(sessionToken: string) {
-                if (!ilinkLogin) throw new Error('iLink login manager is unavailable');
-                const offered = await ilinkLogin.offer({
+                const enrollment = await startIlinkEnrollment();
+                const offered = await enrollment.manager.offer({
                   kind: 'wechat_kf',
                   sessionToken,
                 });
@@ -174,27 +172,16 @@ export async function createRuntime({
                     png: await renderIlinkQrPng(offered.qrContent),
                   };
                 } catch (error) {
-                  ilinkLogin.cancel(offered.offerId);
+                  enrollment.manager.cancel(offered.offerId);
                   throw error;
                 }
               },
               cancel(offerId: string) {
-                ilinkLogin?.cancel(offerId);
+                ilinkEnrollment?.manager.cancel(offerId);
               },
             },
           } : {}),
         })
-      : undefined;
-    const ilinkSecretBox = config.ilink.enabled
-      ? new IlinkSecretBox(
-          config.ilink.storageKey || readOrCreatePrivateKey(
-            config.ilink.storageKeyFile,
-            'iLink storage key',
-          ),
-        )
-      : undefined;
-    const ilinkStore = config.ilink.enabled
-      ? activePersistence.createIlinkStore()
       : undefined;
     const recoveredIlinkReservations = ilinkStore?.recoverPendingAttempts() || 0;
     if (recoveredIlinkReservations) {
@@ -216,56 +203,81 @@ export async function createRuntime({
           ...(ilinkMedia ? { mediaGateway: ilinkMedia } : {}),
         })
       : undefined;
-    if (ilinkStore && ilinkSecretBox) {
-      ilinkOffers = activePersistence.createIlinkLoginStore({
-        secretBox: ilinkSecretBox,
-      });
-      ilinkOffers.cleanup();
-      ilinkLogin = new IlinkLoginManager({
-        offers: ilinkOffers,
-        accounts: ilinkStore,
-        secretBox: ilinkSecretBox,
-        maxAccounts: config.ilink.maxAccounts,
-        logger,
-        client: new IlinkClient({
-          baseUrl: config.ilink.baseUrl,
-          timeoutMs: config.ilink.apiTimeoutMs,
-          longPollTimeoutMs: config.ilink.longPollTimeoutMs,
-        }),
-        onAccountsChanged: () => ilinkListener?.refresh(),
-      });
-    }
     const runtimeFile = fileURLToPath(import.meta.url);
     const relayFile = path.resolve(
       path.dirname(runtimeFile),
       '..',
       `mcp-relay${path.extname(runtimeFile)}`,
     );
-    if (ilinkLogin) {
-      const activeOperatorHost = new McpIpcHost({
-        instanceKey: operatorMcpInstanceKey(config.state.lockFile),
-        stateDirectory: path.dirname(config.state.lockFile),
-        relayFile,
-        memory: () => new McpServer({
-          name: 'kintio-operator-isolation',
-          version: KINTIO_VERSION,
-        }),
-        operator: () => createIlinkLoginMcpServer({
-          begin: () => {
-            if (toolsUnavailable) throw new Error('service unavailable');
-            return ilinkLogin.offer({ kind: 'terminal' });
-          },
-          status: (offerId) => {
-            if (toolsUnavailable) throw new Error('service unavailable');
-            return ilinkLogin.status(offerId);
-          },
-          cancel: (offerId) => ilinkLogin.cancel(offerId),
-        }),
-        logger,
-      });
-      operatorMcpHost = activeOperatorHost;
-      await activeOperatorHost.start();
-    }
+    const activeOperatorHost = new McpIpcHost({
+      instanceKey: operatorMcpInstanceKey(config.state.lockFile),
+      stateDirectory: path.dirname(config.state.lockFile),
+      relayFile,
+      memory: () => new McpServer({
+        name: 'kintio-operator-isolation',
+        version: KINTIO_VERSION,
+      }),
+      operator: () => createIlinkLoginMcpServer({
+        async begin(signal) {
+          if (toolsUnavailable) throw new Error('service unavailable');
+          return (await startIlinkEnrollment()).manager.offer(
+            { kind: 'terminal' },
+            signal ? { signal } : {},
+          );
+        },
+        status(offerId) {
+          if (toolsUnavailable) throw new Error('service unavailable');
+          return ensureIlinkEnrollment().manager.status(offerId);
+        },
+        cancel: (offerId) => ilinkEnrollment?.manager.cancel(offerId) || false,
+        listAccounts: () => ensureIlinkEnrollment().accounts.listActiveAccounts()
+          .map((account) => ({
+            accountKey: account.accountKey,
+            providerAccountId: account.providerAccountId,
+            runtimeEnabled: account.runtimeEnabled,
+          })),
+        async setAccountRuntime(accountKey, enabled) {
+          const enrollment = ensureIlinkEnrollment();
+          assertIlinkAccountKey(accountKey);
+          const account = enrollment.accounts.setRuntimeEnabled(
+            accountKey,
+            enabled,
+          );
+          if (ilinkRuntimeStarted) await ilinkListener?.refresh();
+          const runningCount = enrollment.accounts
+            .listRuntimeAccountsWithSecrets().length;
+          if (!enabled && runningCount === 0) onIlinkStopRequested?.();
+          return {
+            account: {
+              accountKey: account.accountKey,
+              providerAccountId: account.providerAccountId,
+              runtimeEnabled: account.runtimeEnabled,
+            },
+            runningCount,
+          };
+        },
+        async deleteAccount(accountKey) {
+          const enrollment = ensureIlinkEnrollment();
+          assertIlinkAccountKey(accountKey);
+          const account = enrollment.accounts.deleteAccountCompletely(accountKey);
+          if (ilinkRuntimeStarted) await ilinkListener?.refresh();
+          const runningCount = enrollment.accounts
+            .listRuntimeAccountsWithSecrets().length;
+          if (runningCount === 0) onIlinkStopRequested?.();
+          return {
+            account: {
+              accountKey: account.accountKey,
+              providerAccountId: account.providerAccountId,
+              runtimeEnabled: account.runtimeEnabled,
+            },
+            runningCount,
+          };
+        },
+      }),
+      logger,
+    });
+    operatorMcpHost = activeOperatorHost;
+    await activeOperatorHost.start();
     if (!config.codex.enabled) {
       logger.info('[runtime] Agent processing is disabled; iLink enrollment remains available');
       let started: Promise<void> | undefined;
@@ -276,13 +288,13 @@ export async function createRuntime({
           accepting = false;
           toolsUnavailable = true;
           await Promise.allSettled([
-            ilinkLogin?.close(),
+            ilinkEnrollment?.manager.close(),
             operatorMcpHost?.close(force),
           ]);
           if (cleanupTimer) clearInterval(cleanupTimer);
           try {
             activeStore.cleanup();
-            ilinkOffers?.cleanup();
+            ilinkEnrollment?.offers.cleanup();
             activeStore.checkpoint('TRUNCATE');
           } finally {
             try {
@@ -298,7 +310,7 @@ export async function createRuntime({
         messageProcessor: null,
         start() {
           if (!accepting) return Promise.reject(new Error('Kintio runtime is stopping'));
-          started ||= ilinkLogin?.start() || Promise.resolve();
+          started ||= startIlinkEnrollment().then(() => undefined);
           return started;
         },
         stopAccepting() {
@@ -355,8 +367,8 @@ export async function createRuntime({
     mcpHost = activeMcpHost;
     const mcpLaunches = await activeMcpHost.start();
     const mcpToolTimeoutSec = Math.ceil((
-      config.wecom.api.timeoutMs * 4 +
-      config.wecom.api.observeMs +
+      (wecom?.api.timeoutMs || 10_000) * 4 +
+      (wecom?.api.observeMs || 5_000) +
       5_000
     ) / 1_000);
     const ilinkMcpToolTimeoutSec = Math.ceil((
@@ -410,8 +422,8 @@ export async function createRuntime({
         }
       },
       channel: channelDispatcher,
-      allowedUserIds: config.wecom.allowedUserIds,
-      authorization: config.wecom.authorization,
+      allowedUserIds: wecom?.allowedUserIds || [],
+      ...(wecom ? { authorization: wecom.authorization } : {}),
       logger,
     });
     let requestDeferredDrain = (): void => {};
@@ -432,7 +444,7 @@ export async function createRuntime({
           logger,
           host: {
             listActiveRuntimeAccounts() {
-              const accounts = ilinkStore.listActiveAccountsWithSecrets();
+              const accounts = ilinkStore.listRuntimeAccountsWithSecrets();
               if (accounts.length > config.ilink.maxAccounts) {
                 throw new Error('Active iLink account count exceeds configured limit');
               }
@@ -568,7 +580,8 @@ export async function createRuntime({
           );
           sync?.startConsuming();
           await ilinkListener?.start();
-          await ilinkLogin?.start();
+          ilinkRuntimeStarted = true;
+          await startIlinkEnrollment();
           startupRecovery = Promise.all([catchUp, recovery])
             .then(async () => {
               await channelDispatcher.kick();
@@ -590,9 +603,10 @@ export async function createRuntime({
         sync?.stopAccepting();
         processor.stopAccepting();
         ilinkClosing ||= Promise.all([
-          ilinkLogin?.close(),
+          ilinkEnrollment?.manager.close(),
           ilinkListener?.close(),
         ]).then(() => undefined);
+        ilinkRuntimeStarted = false;
       },
       close(): Promise<void> {
         if (closing) return closing;
@@ -620,7 +634,7 @@ export async function createRuntime({
               if (cleanupTimer) clearInterval(cleanupTimer);
               try {
                 activeStore.cleanup();
-                ilinkOffers?.cleanup();
+                ilinkEnrollment?.offers.cleanup();
                 activeStore.checkpoint('TRUNCATE');
               } finally {
                 try {

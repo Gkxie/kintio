@@ -13,6 +13,9 @@ test('local login MCP supports cancellation and sanitizes provider failures', as
     },
     status() { return { status: 'unknown' }; },
     cancel(offerId) { return offerId === `qo_${'c'.repeat(20)}`; },
+    listAccounts() { return []; },
+    async setAccountRuntime() { throw new Error('not used'); },
+    async deleteAccount() { throw new Error('not used'); },
   });
   const client = new Client({ name: 'ilink-login-mcp-test', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -51,6 +54,9 @@ test('aborting begin_login cancels an offer created after the caller disconnects
       cancelled.push(offerId);
       return true;
     },
+    listAccounts() { return []; },
+    async setAccountRuntime() { throw new Error('not used'); },
+    async deleteAccount() { throw new Error('not used'); },
   });
   const client = new Client({ name: 'ilink-login-abort-test', version: '1.0.0' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -71,4 +77,88 @@ test('aborting begin_login cancels an offer created after the caller disconnects
     await new Promise<void>((resolve) => setImmediate(resolve));
   }
   assert.deepEqual(cancelled, [`qo_${'b'.repeat(20)}`]);
+});
+
+test('private operator MCP exposes account list, start, stop, and delete results', async (t) => {
+  const accountKey = `ia_${'a'.repeat(40)}`;
+  let runtimeEnabled = false;
+  let deleted = false;
+  const account = () => ({
+    accountKey,
+    providerAccountId: 'operator-bot@im.bot',
+    runtimeEnabled,
+  });
+  const server = createIlinkLoginMcpServer({
+    async begin() { throw new Error('not used'); },
+    status() { return { status: 'unknown' }; },
+    cancel() { return false; },
+    listAccounts() { return deleted ? [] : [account()]; },
+    async setAccountRuntime(received, enabled) {
+      assert.equal(received, accountKey);
+      runtimeEnabled = enabled;
+      return { account: account(), runningCount: enabled ? 1 : 0 };
+    },
+    async deleteAccount(received) {
+      assert.equal(received, accountKey);
+      runtimeEnabled = false;
+      deleted = true;
+      return { account: account(), runningCount: 0 };
+    },
+  });
+  const client = new Client({ name: 'ilink-account-mcp-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  t.onTestFinished(async () => {
+    await Promise.allSettled([client.close(), server.close()]);
+  });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+
+  assert.deepEqual((await client.callTool({
+    name: 'list_accounts', arguments: {},
+  })).structuredContent, { accounts: [account()] });
+  assert.deepEqual((await client.callTool({
+    name: 'start_account', arguments: { accountKey },
+  })).structuredContent, { account: account(), runningCount: 1 });
+  assert.deepEqual((await client.callTool({
+    name: 'stop_account', arguments: { accountKey },
+  })).structuredContent, { account: account(), runningCount: 0 });
+  const deletion = await client.callTool({
+    name: 'delete_account', arguments: { accountKey },
+  });
+  assert.deepEqual(deletion.structuredContent, { account: account(), runningCount: 0 });
+  assert.equal(deleted, true);
+});
+
+test('private operator MCP sanitizes every account lifecycle failure', async (t) => {
+  const accountKey = `ia_${'f'.repeat(40)}`;
+  const server = createIlinkLoginMcpServer({
+    async begin() { throw new Error('not used'); },
+    status() { throw new Error('secret status detail'); },
+    cancel() { throw new Error('secret cancel detail'); },
+    listAccounts() { throw new Error('secret list detail'); },
+    async setAccountRuntime() { throw new Error('secret start detail'); },
+    async deleteAccount() { throw new Error('secret delete detail'); },
+  });
+  const client = new Client({ name: 'ilink-account-errors-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  t.onTestFinished(async () => {
+    await Promise.allSettled([client.close(), server.close()]);
+  });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  const results = await Promise.all([
+    client.callTool({
+      name: 'login_status', arguments: { offerId: `qo_${'s'.repeat(20)}` },
+    }),
+    client.callTool({
+      name: 'cancel_login', arguments: { offerId: `qo_${'c'.repeat(20)}` },
+    }),
+    client.callTool({ name: 'list_accounts', arguments: {} }),
+    client.callTool({ name: 'start_account', arguments: { accountKey } }),
+    client.callTool({ name: 'delete_account', arguments: { accountKey } }),
+  ]);
+  assert.ok(results.every((result) => result.isError));
+  assert.ok(results.slice(0, 2).every((result) =>
+    JSON.stringify(result).includes('login operation is unavailable')));
+  assert.ok(results.slice(2).every((result) =>
+    JSON.stringify(result).includes('account operation is unavailable')));
+  assert.doesNotMatch(JSON.stringify(results), /secret .* detail/u);
 });
