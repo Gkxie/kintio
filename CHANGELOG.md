@@ -4,6 +4,8 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.6.2
+
 - Added a custom Kintio wordmark and its circular-safe TIO avatar to the English
   and Simplified Chinese entry pages and public package.
 - Added a repository-scoped Release App that deterministically maintains one
