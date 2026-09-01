@@ -1,6 +1,8 @@
 <div align="center">
 
-# Kintio
+<h1>
+  <img src="assets/logo.svg" alt="Kintio" width="320" />
+</h1>
 
 **Connect chat channels to an Agent you control.**
 

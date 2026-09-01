@@ -63,13 +63,16 @@ test('English is canonical and Chinese is limited to the entry README', async ()
 });
 
 test('package, release version, and public entry points stay aligned', async () => {
-  const [packageSource, runtimeVersion, license, cla, gitignore] = await Promise.all([
-    read('package.json'),
-    read('src/version.ts'),
-    read('LICENSE'),
-    read('CLA.md'),
-    read('.gitignore'),
-  ]);
+  const [packageSource, runtimeVersion, license, cla, gitignore, logo, avatar] =
+    await Promise.all([
+      read('package.json'),
+      read('src/version.ts'),
+      read('LICENSE'),
+      read('CLA.md'),
+      read('.gitignore'),
+      read('assets/logo.svg'),
+      read('assets/avatar.svg'),
+    ]);
   const packageJson = JSON.parse(packageSource) as {
     name?: string;
     version?: string;
@@ -105,7 +108,9 @@ test('package, release version, and public entry points stay aligned', async () 
     'README.md',
     'README.zh-CN.md',
     'THIRD_PARTY_NOTICES',
+    'assets/avatar.svg',
     'assets/ilink-login-card.png',
+    'assets/logo.svg',
     'bin/kintio.js',
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
     'dist',
@@ -118,6 +123,10 @@ test('package, release version, and public entry points stay aligned', async () 
   }
   for (const file of ['README.md', 'README.zh-CN.md']) {
     const readme = await read(file);
+    assert.match(
+      readme,
+      /<h1>\s+<img src="assets\/logo\.svg" alt="Kintio" width="320" \/>\s+<\/h1>/u,
+    );
     const installIndex = readme.indexOf('npm install --global @kin-tio/cli');
     const setupIndex = readme.indexOf('kintio setup');
     assert.notEqual(installIndex, -1);
@@ -125,6 +134,10 @@ test('package, release version, and public entry points stay aligned', async () 
     assert.ok(installIndex < setupIndex);
     assert.ok(readme.indexOf('kintio start', setupIndex) > setupIndex);
   }
+  assert.match(logo, /<title id="kintio-wordmark-title">Kintio<\/title>/u);
+  assert.match(logo, /fill="#211920"/u);
+  assert.match(avatar, /<title id="kintio-avatar-title">Kintio TIO avatar<\/title>/u);
+  assert.match(avatar, /clipPath id="kintio-kinetic-panels-circle"/u);
 });
 
 test('Issue Forms expose stable input identifiers', async () => {

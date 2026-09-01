@@ -1,0 +1,32 @@
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="200"
+  height="200"
+  viewBox="190 15 190 190"
+  role="img"
+  aria-labelledby="kintio-avatar-title"
+  aria-describedby="kintio-avatar-description"
+>
+  <!-- Letterform foundation: Manrope by Mikhail Sharanda, SIL Open Font License 1.1. -->
+  <title id="kintio-avatar-title">Kintio TIO avatar</title>
+  <desc id="kintio-avatar-description">A circular Kinetic Panels background with the Kintio TIO return aperture.</desc>
+  <defs>
+    <clipPath id="kintio-kinetic-panels-circle">
+      <circle cx="285" cy="110" r="95"/>
+    </clipPath>
+  </defs>
+  <g clip-path="url(#kintio-kinetic-panels-circle)">
+    <rect x="190" y="15" width="190" height="190" fill="#17152B"/>
+    <polygon points="190,15 304,15 270,58 190,88" fill="#5268FF"/>
+    <polygon points="302,152 380,112 380,205 270,205" fill="#3B2F73"/>
+    <polygon points="190,88 214,78 214,104 190,116" fill="#8C78FF"/>
+    <g transform="translate(285 110) scale(0.86) translate(-285 -110)">
+      <path d="M766 0Q661 -20 561 -17Q461 -14 382 21Q303 56 262 132Q226 201 224 272Q222 343 222 433L222 1380L447 1380L447 445Q447 380 448.5 331.5Q450 283 469 251Q505 190 583.5 182.5Q662 175 766 190ZM20 902L20 1080L766 1080L766 902Z" fill="#F6F3EE" transform="translate(204.393 150) scale(0.063 -0.063)"/>
+      <path d="M160 1251L160 1463L385 1463L385 1251ZM160 0L160 1080L385 1080L385 0Z" fill="#FF7656" transform="translate(257.289 150) scale(0.063 -0.063)"/>
+      <path d="M613 -30Q451 -30 331 43Q211 116 145.5 244.5Q80 373 80 541Q80 710 147 838.5Q214 967 334 1038.5Q454 1110 613 1110Q776 1110 896 1037Q1016 964 1082 836Q1148 708 1148 541Q1148 372 1081.5 243.5Q1015 115 894.5 42.5Q774 -30 613 -30ZM613 182Q762 182 835.5 282Q909 382 909 541Q909 704 835 801.5Q761 899 613 899Q512 899 447 853.5Q382 808 350.5 727.5Q319 647 319 541Q319 377 393.5 279.5Q468 182 613 182Z" fill="#F6F3EE" transform="translate(290.624 150) scale(0.063 -0.063)"/>
+      <rect x="286" y="108" width="23" height="18" fill="#17152B"/>
+      <rect x="289" y="113" width="11" height="8" fill="#FF7656"/>
+    </g>
+  </g>
+</svg>
+
