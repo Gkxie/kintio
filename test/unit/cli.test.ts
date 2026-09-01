@@ -11,6 +11,7 @@ import { runCli } from '../../src/cli.ts';
 import { runNativeDaemon } from '../../src/runtime/native-daemon.ts';
 import {
   readDaemonRecord,
+  requestControl,
   writeDaemonRecord,
 } from '../../src/runtime/daemon-protocol.ts';
 import { acquireSingleInstanceLock } from '../../src/runtime/single-instance-lock.ts';
@@ -189,7 +190,11 @@ test('iLink login and start need no setup, config file, or Hono lifecycle', asyn
       accountCalls += 1;
       assert.equal(command, 'start');
       assert.equal(config.state.databaseFile, path.join(home, 'data/kintio.sqlite'));
-      return { startForeground: true, runningCount: 1 };
+      return {
+        runtimeRequired: true,
+        runningCount: 0,
+        selectedAccountKey: `ia_${'a'.repeat(40)}`,
+      };
     },
     ilinkStart: async ({ config }) => {
       startCalls += 1;
@@ -201,7 +206,9 @@ test('iLink login and start need no setup, config file, or Hono lifecycle', asyn
   });
 
   assert.equal(await runCli(['ilink', 'login', '--home', home], runtime.overrides), 0);
-  assert.equal(await runCli(['ilink', 'start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli([
+    'ilink', 'start', '--foreground', '--home', home,
+  ], runtime.overrides), 0);
   assert.deepEqual(
     { loginCalls, accountCalls, startCalls },
     { loginCalls: 1, accountCalls: 1, startCalls: 1 },
@@ -210,7 +217,7 @@ test('iLink login and start need no setup, config file, or Hono lifecycle', asyn
 
   runtime.stdout.length = 0;
   assert.equal(await runCli(['ilink', 'start', '--help'], runtime.overrides), 0);
-  assert.match(runtime.stdout.join(''), /without starting\nHono/u);
+  assert.match(runtime.stdout.join(''), /background without starting\nHono/u);
   assert.equal(startCalls, 1);
 
   runtime.stderr.length = 0;
@@ -232,8 +239,11 @@ test('CLI routes iLink account lifecycle selectors and destructive confirmation'
         confirmed: options.confirmed,
       });
       return {
-        startForeground: options.command === 'start',
+        runtimeRequired: options.command === 'start',
         runningCount: options.command === 'stop' || options.command === 'delete' ? 0 : 1,
+        ...(options.command === 'start'
+          ? { selectedAccountKey: `ia_${'a'.repeat(40)}` as const }
+          : {}),
       };
     },
     ilinkStart: async () => {
@@ -245,7 +255,7 @@ test('CLI routes iLink account lifecycle selectors and destructive confirmation'
 
   assert.equal(await runCli(['ilink', 'list', '--home', home], runtime.overrides), 0);
   assert.equal(await runCli([
-    'ilink', 'start', '--home', home, '--account', 'bot-a@im.bot',
+    'ilink', 'start', '--foreground', '--home', home, '--account', 'bot-a@im.bot',
   ], runtime.overrides), 0);
   assert.equal(await runCli([
     'ilink', 'stop', '--home', home, '--account', `ia_${'a'.repeat(40)}`,
@@ -268,6 +278,9 @@ test('CLI routes iLink account lifecycle selectors and destructive confirmation'
   assert.equal(await runCli(['ilink', 'start', '--yes'], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /--yes is valid only/u);
   runtime.stderr.length = 0;
+  assert.equal(await runCli(['ilink', 'list', '--foreground'], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /--foreground is valid only/u);
+  runtime.stderr.length = 0;
   assert.equal(await runCli(['ilink', 'delete', '--account', ''], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /requires a non-empty account ID or key/u);
 
@@ -276,6 +289,100 @@ test('CLI routes iLink account lifecycle selectors and destructive confirmation'
     assert.equal(await runCli(['ilink', command, '--help'], runtime.overrides), 0);
   }
   assert.match(runtime.stdout.join(''), /cannot be undone/u);
+});
+
+test('standalone iLink start launches one managed background daemon before activation', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'background-ilink');
+  const packageRoot = path.join(root, 'package');
+  const workerFile = path.join(packageRoot, 'dist/ilink.js');
+  await fs.mkdir(path.dirname(workerFile), { recursive: true });
+  await fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), {
+    recursive: true,
+  });
+  await fs.writeFile(workerFile, [
+    "process.send?.({ type: 'ready', pid: process.pid });",
+    "process.on('message', (message) => { if (message === 'shutdown') process.exit(0); });",
+    "process.on('disconnect', () => process.exit(0));",
+  ].join('\n'));
+  const daemonRuns: Promise<void>[] = [];
+  const accountKey = `ia_${'b'.repeat(40)}` as const;
+  const accountCalls: Array<{ command: string; defer?: boolean; selector?: string }> = [];
+  const runtime = cliRuntime(root, {
+    packageRoot,
+    ilinkAccount: async (options) => {
+      accountCalls.push({
+        command: options.command,
+        ...(options.deferStandaloneStart === undefined
+          ? {}
+          : { defer: options.deferStandaloneStart }),
+        ...(options.selector ? { selector: options.selector } : {}),
+      });
+      if (options.command === 'stop') {
+        return { runtimeRequired: false, runningCount: 0 };
+      }
+      return accountCalls.length === 1
+        ? { runtimeRequired: true, runningCount: 0, selectedAccountKey: accountKey }
+        : { runtimeRequired: false, runningCount: 1, selectedAccountKey: accountKey };
+    },
+    launchDaemon: (request) => {
+      assert.equal(request.env.KINTIO_DAEMON_MODE, 'ilink');
+      const running = runNativeDaemon({
+        home,
+        configFile: path.join(home, '.env'),
+        packageRoot,
+        mode: 'ilink',
+        environment: request.env,
+      });
+      daemonRuns.push(running);
+      return {
+        pid: process.pid,
+        exited: running,
+        kill: () => false,
+      };
+    },
+  });
+  t.onTestFinished(async () => {
+    await requestControl(home, 'stop').catch(() => undefined);
+    await Promise.allSettled(daemonRuns);
+  });
+
+  assert.equal(await runCli(['ilink', 'start', '--home', home], runtime.overrides), 0);
+  assert.deepEqual(accountCalls, [
+    { command: 'start', defer: true },
+    { command: 'start', selector: accountKey },
+  ]);
+  assert.equal(readDaemonRecord(home)?.mode, 'ilink');
+  assert.match(runtime.stdout.join(''), /running in background/u);
+  await fs.access(path.join(
+    home,
+    'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
+  ));
+  await fs.copyFile('.env.example', path.join(home, '.env'));
+  if (process.platform !== 'win32') await fs.chmod(path.join(home, '.env'), 0o600);
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /already running in ilink mode/u);
+  assert.equal(await runCli(['ilink', 'stop', '--home', home], runtime.overrides), 0);
+  await Promise.all(daemonRuns);
+  assert.equal(readDaemonRecord(home), null);
+  assert.deepEqual(accountCalls.at(-1), { command: 'stop' });
+});
+
+test('background iLink start refuses an unresolved account before daemon launch', async (t) => {
+  const root = await temporaryRoot(t);
+  let launched = false;
+  const runtime = cliRuntime(root, {
+    ilinkAccount: async () => ({ runtimeRequired: true, runningCount: 0 }),
+    launchDaemon: () => {
+      launched = true;
+      return exitedDaemon();
+    },
+  });
+  assert.equal(await runCli([
+    'ilink', 'start', '--home', path.join(root, 'instance'),
+  ], runtime.overrides), 1);
+  assert.equal(launched, false);
+  assert.match(runtime.stderr.join(''), /did not resolve an account identity/u);
 });
 
 test('CLI drains an iLink login before honoring terminal signals', async (t) => {
@@ -550,7 +657,7 @@ test('source CLI starts, probes, logs, and stops one native daemon', async (t) =
     args: [path.join(packageRoot, 'dist/daemon.js')],
   }]);
   assert.equal(await runCli(['status', '--home', home], runtime.overrides), 0);
-  assert.match(runtime.stdout.join(''), /Kintio is running/u);
+  assert.match(runtime.stdout.join(''), /Kintio is running in service mode/u);
   const mismatched = cliRuntime(root, {
     packageRoot: path.join(root, 'other-installation'),
   });
@@ -614,6 +721,7 @@ test('background startup policy and stale metadata fail safely', async (t) => {
     runId: 'stale-daemon',
     daemonPid: 2_147_483_647,
     configFile: path.join(home, '.env'),
+    mode: 'service',
     packageRoot: path.resolve('.'),
     token: 's'.repeat(43),
   });
@@ -630,6 +738,7 @@ test('background startup policy and stale metadata fail safely', async (t) => {
     runId: 'unreachable-daemon',
     daemonPid: process.pid,
     configFile: path.join(home, '.env'),
+    mode: 'service',
     packageRoot: path.resolve('.'),
     token: 'u'.repeat(43),
   });

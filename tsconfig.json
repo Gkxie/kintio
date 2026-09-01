@@ -30,6 +30,7 @@
   "include": [
     "cli.ts",
     "daemon.ts",
+    "ilink.ts",
     "index.ts",
     "mcp-relay.ts",
     "src/**/*.ts"

@@ -106,12 +106,45 @@ test('JSON-RPC errors retain the code but suppress the server message', async ()
     const server = new CodexAppServer({ spawnProcess: fake.spawn });
     await assert.rejects(server.initialize(), (error: unknown) =>
       error instanceof Error &&
-      error.message === 'Codex app-server request failed: initialize' &&
+      error.message === (
+        expected === undefined
+          ? 'Codex app-server request failed: initialize'
+          : `Codex app-server request failed: initialize (code ${expected})`
+      ) &&
       !error.message.includes('authentication-secret-canary') &&
       ('code' in error ? error.code : undefined) === expected
     );
     await server.close();
   }
+});
+
+test('request failures expose only safe code and category diagnostics', async () => {
+  const fake = fakeSpawn((message, child) => {
+    if (message.method === 'initialize') {
+      child.send({ id: message.id, result: { userAgent: 'mock' } });
+    } else if (message.method === 'thread/start') {
+      child.send({
+        id: message.id,
+        error: {
+          code: -32001,
+          message: 'thread-secret-canary /private/thread',
+          data: {
+            codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 401 } },
+          },
+        },
+      });
+    }
+  });
+  const server = new CodexAppServer({ spawnProcess: fake.spawn });
+  const thread = server.startThread(threadOptions);
+  await assert.rejects(
+    thread.startRun('hello'),
+    (error: unknown) => error instanceof Error &&
+      error.message === 'Codex app-server request failed: thread/start ' +
+        '(code -32001; category httpConnectionFailed (HTTP 401))' &&
+      !/secret-canary|\/private/u.test(error.message),
+  );
+  await server.close();
 });
 
 test('request timeout rejects and close terminates the unresponsive child', async () => {
