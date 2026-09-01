@@ -15,6 +15,7 @@ import type {
   ResolvedImage,
 } from '../types.ts';
 import type {
+  AgentAccess,
   AgentCompletion,
   AgentImageArtifact,
   AgentInput,
@@ -47,6 +48,7 @@ interface ProcessorOptions {
   readonly agent: AgentRuntime;
   readonly mediaGateway: MediaGateway;
   readonly channel: SendDrain;
+  readonly agentAccess?: (record: ChannelIdentity) => AgentAccess;
   readonly allowedUserIds?: readonly string[];
   readonly authorization?: {
     readonly trigger?: string;
@@ -60,6 +62,7 @@ interface ProcessorOptions {
 type UnboundAgentInput = Omit<
   AgentInput,
   | 'channel'
+  | 'agentAccess'
   | 'mode'
   | 'conversationId'
   | 'threadId'
@@ -122,7 +125,7 @@ export class ConversationProcessor {
   readonly #store: CoreState;
   readonly #pipeline: Pick<
     ProcessorOptions,
-    'agent' | 'mediaGateway' | 'channel'
+    'agent' | 'mediaGateway' | 'channel' | 'agentAccess'
   >;
   readonly #allowedUsers: ReadonlySet<string>;
   readonly #authorization: {
@@ -195,6 +198,10 @@ export class ConversationProcessor {
 
   #conversationKey(record: ChannelIdentity): string {
     return `${record.channel}\0${record.accountKey}\0${record.peerId}`;
+  }
+
+  #agentAccess(record: ChannelIdentity): AgentAccess {
+    return this.#pipeline.agentAccess?.(record) === 'host' ? 'host' : 'restricted';
   }
 
   #notifyQueued(record: InboundRecord): void {
@@ -429,6 +436,7 @@ export class ConversationProcessor {
     } = {},
   ): Promise<AgentSubmission> {
     const opaqueConversationId = conversationId(record);
+    const agentAccess = this.#agentAccess(record);
     const activePrimary = options.wait
       ? undefined
       : this.#pipeline.agent.activePrimary(opaqueConversationId);
@@ -452,6 +460,7 @@ export class ConversationProcessor {
       try {
         const submission = await this.#pipeline.agent.submit({
           ...input,
+          agentAccess,
           channel: record.channel,
           mode: 'steer',
           conversationId: opaqueConversationId,
@@ -497,6 +506,7 @@ export class ConversationProcessor {
     const ensuredThreadId = await this.#pipeline.agent.ensureThread(
       opaqueConversationId,
       conversationBefore?.threadId || '',
+      agentAccess,
     );
     const pendingMemoryThreadId =
       this.#pipeline.agent.takePendingMemoryThread?.(opaqueConversationId) || '';
@@ -532,6 +542,7 @@ export class ConversationProcessor {
     try {
       submission = await this.#pipeline.agent.submit({
         ...input,
+        agentAccess,
         channel: record.channel,
         ...(artifactCatalog.length ? { artifactCatalog } : {}),
         mode: 'start',
@@ -860,7 +871,12 @@ export class ConversationProcessor {
     const latestId = ids.at(-1) || primary.clientInputId;
     const steering = validGroup.filter((item) => item.status === 'steering');
     const inspection = conversation?.threadId && this.#pipeline.agent.inspectHistory
-      ? await this.#pipeline.agent.inspectHistory(conversation.threadId, ids, latestId)
+      ? await this.#pipeline.agent.inspectHistory(
+          conversation.threadId,
+          ids,
+          latestId,
+          this.#agentAccess(primary),
+        )
       : undefined;
     const missingInput = steering.some((record) => {
       const clientId = record.clientInputId || record.messageKey;

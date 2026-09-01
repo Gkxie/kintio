@@ -19,6 +19,7 @@ import {
   ensureContainedDirectory,
   ensurePrivateDirectory,
 } from './lib/private-directory.ts';
+import { runIlinkCliLogin } from './ilink/cli-login.ts';
 import {
   daemonRecordPath,
   readDaemonRecord,
@@ -61,6 +62,9 @@ interface CliRuntime {
   readonly launchDaemon: (request: DaemonLaunchRequest) => DaemonProcess;
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
+  readonly stdoutIsTTY: boolean;
+  readonly stdoutColumns: number;
+  readonly ilinkLogin: typeof runIlinkCliLogin;
 }
 
 interface InstanceLocation {
@@ -78,6 +82,7 @@ Commands:
   restart               Restart Kintio with the current installation and config
   status                Show the background process status
   logs                  Follow Kintio logs
+  ilink login           Connect an iLink account with a terminal QR code
 
 Options:
   --home <directory>     Instance directory (default: ~/.kintio)
@@ -164,6 +169,9 @@ function runtimeDefaults(): CliRuntime {
     launchDaemon: defaultLaunchDaemon,
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
+    stdoutIsTTY: Boolean(process.stdout.isTTY),
+    stdoutColumns: process.stdout.columns || 80,
+    ilinkLogin: runIlinkCliLogin,
   };
 }
 
@@ -678,8 +686,13 @@ export async function runCli(
       runtime.stdout(HELP);
       return 0;
     }
-    if (parsed.positionals.length !== 1) {
-      throw new Error(`Unexpected argument: ${parsed.positionals[1]}`);
+    const subcommand = parsed.positionals[1];
+    if (command === 'ilink') {
+      if (subcommand !== 'login' || parsed.positionals.length !== 2) {
+        throw new Error('Usage: kintio ilink login');
+      }
+    } else if (parsed.positionals.length !== 1) {
+      throw new Error(`Unexpected argument: ${subcommand}`);
     }
     if (
       command !== 'logs' &&
@@ -688,6 +701,32 @@ export async function runCli(
       throw new Error('--lines and --no-follow are valid only for "kintio logs"');
     }
     const location = instanceLocation(parsed.values, runtime);
+    if (command === 'ilink') {
+      if (!privateFile(location.configFile, 'Kintio config')) {
+        throw new Error(`Kintio config is missing; run "kintio setup": ${location.configFile}`);
+      }
+      assertTrustedDirectory(
+        path.dirname(location.configFile),
+        'Kintio config directory',
+        false,
+      );
+      prepareDirectories(location.home);
+      const controller = new AbortController();
+      const interrupt = () => controller.abort();
+      process.once('SIGINT', interrupt);
+      try {
+        return await runtime.ilinkLogin({
+          config: loadInstanceConfig(location, runtime),
+          packageRoot: runtime.packageRoot,
+          stdout: runtime.stdout,
+          stdoutIsTTY: runtime.stdoutIsTTY,
+          stdoutColumns: runtime.stdoutColumns,
+          signal: controller.signal,
+        });
+      } finally {
+        process.off('SIGINT', interrupt);
+      }
+    }
     if (command === 'setup') return setup(location, runtime);
     if (command === 'start') return await start(location, runtime, false);
     if (command === 'restart') return await start(location, runtime, true);

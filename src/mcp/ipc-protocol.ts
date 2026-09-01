@@ -10,6 +10,7 @@ const MCP_ROUTES = [
   'wechat_kf',
   'weixin_ilink',
   'conversation_memory',
+  'operator',
 ] as const;
 export type McpRoute = (typeof MCP_ROUTES)[number];
 
@@ -54,6 +55,10 @@ export function mcpIpcAddress(
 
 export function mcpInstanceId(instanceKey: string): string {
   return createHash('sha256').update(canonicalPath(instanceKey)).digest('hex').slice(0, 16);
+}
+
+export function operatorMcpInstanceKey(instanceKey: string): string {
+  return `${path.resolve(instanceKey)}.operator`;
 }
 
 export function ensureMcpStateDirectory(directory: string): string {
@@ -129,6 +134,31 @@ export function readMcpDescriptor(filePath: string): McpIpcDescriptor {
   } finally {
     fs.closeSync(descriptor);
   }
+}
+
+export function findMcpDescriptorFile(
+  stateDirectory: string,
+  instanceKey: string,
+): string {
+  const directory = path.join(
+    path.resolve(stateDirectory),
+    '.kintio-mcp',
+    mcpInstanceId(instanceKey),
+  );
+  let names: string[];
+  try {
+    names = fs.readdirSync(directory).filter((name) =>
+      /^mcp-runtime-[A-Za-z0-9_-]{24}\.json$/u.test(name));
+  } catch (error: unknown) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      throw new Error('Kintio runtime is not running');
+    }
+    throw error;
+  }
+  if (names.length !== 1) throw new Error('Kintio runtime is not running');
+  const descriptorFile = path.join(directory, names[0]!);
+  readMcpDescriptor(descriptorFile);
+  return descriptorFile;
 }
 
 export function mcpHandshake(

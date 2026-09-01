@@ -80,8 +80,8 @@ and edit `~/.kintio/.env` to configure one adapter:
 - For WeChat KF API, set its callback token, EncodingAESKey, CorpID, and secret. A temporary
   `WECOM_AUTH_TRIGGER` can authorize the first user without knowing their
   `external_userid` in advance.
-- For an existing Weixin iLink binding, set `ILINK_ENABLED=true`. Creating a new binding
-  currently starts from an authorized WeChat KF conversation.
+- For Weixin iLink, set `ILINK_ENABLED=true`. A new binding can start either from the
+  local CLI or, when configured, from an authorized WeChat KF conversation.
 
 Start Kintio:
 
@@ -90,6 +90,18 @@ kintio start
 kintio status
 kintio logs --lines 100
 ```
+
+To connect a new iLink identity, keep Kintio running and scan the terminal QR code:
+
+```bash
+kintio ilink login
+```
+
+The command requires an interactive terminal and stops waiting when the QR code expires
+after five minutes. It never starts an Agent turn. The resulting iLink identity represents
+the local operator and inherits the host Agent configuration without Kintio's untrusted-
+channel capability restrictions. Show this QR code only to someone authorized to control
+the host Agent.
 
 After startup, confirm that `kintio logs` contains `Hono server is listening on port 8888`.
 Complete the callback or binding checks described in the setup guide before sending traffic.
@@ -111,6 +123,9 @@ Source builds and contributor setup are documented in
   Hono route; every action still requires a short-lived conversation capability.
 - Project-level Agent capability restrictions are not an operating-system sandbox. Use a
   dedicated system account and additional isolation appropriate to the Agent's real powers.
+- An iLink account enrolled by `kintio ilink login` is explicitly host-authorized; its owner
+  receives the capabilities allowed by the host Agent configuration. Accounts enrolled from
+  a remote adapter remain restricted, and chat input cannot change this persisted trust level.
 - A provider accepting an outbound request does not prove that a client displayed it;
   uncertain outcomes remain explicit to avoid duplicate delivery.
 

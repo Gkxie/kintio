@@ -15,7 +15,7 @@ import type {
   NormalizedMessage,
 } from '../types.ts';
 
-const SCHEMA_VERSION = 22;
+const SCHEMA_VERSION = 23;
 const INBOUND_STATUSES = [
   'received',
   'processing',
@@ -615,10 +615,10 @@ export class SqliteStore {
       version !== 0 && version !== 11 && version !== 12 &&
       version !== 13 && version !== 14 && version !== 15 &&
       version !== 16 && version !== 17 && version !== 18 && version !== 19 &&
-      version !== 20 && version !== 21
+      version !== 20 && version !== 21 && version !== 22
     ) {
       throw new Error(
-        `SQLite schema version ${version} is no longer supported; migrate to version 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, or 21 first`,
+        `SQLite schema version ${version} is no longer supported; migrate to version 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, or 22 first`,
       );
     }
 
@@ -1675,6 +1675,107 @@ export class SqliteStore {
           PRAGMA foreign_keys = ON;
         `);
       }
+      version = 22;
+    }
+
+    if (version === 22) {
+      this.#database.exec('BEGIN IMMEDIATE');
+      try {
+        const accountColumns = this.#database.prepare(
+          'PRAGMA table_info(ilink_accounts)',
+        ).all() as unknown as Array<{ name: string }>;
+        if (!accountColumns.some(({ name }) => name === 'agent_access')) {
+          this.#database.exec(`
+            ALTER TABLE ilink_accounts ADD COLUMN agent_access TEXT NOT NULL
+              DEFAULT 'restricted'
+              CHECK (agent_access IN ('restricted', 'host'));
+          `);
+        }
+        this.#database.exec(`
+          DROP INDEX ilink_one_pending_offer_idx;
+          ALTER TABLE ilink_login_offers RENAME TO ilink_login_offers_v22;
+          CREATE TABLE ilink_login_offers (
+            offer_id TEXT PRIMARY KEY,
+            initiator_kind TEXT NOT NULL
+              CHECK (initiator_kind IN ('local_operator', 'remote_adapter')),
+            source_channel TEXT NOT NULL,
+            source_message_key TEXT NOT NULL,
+            source_account_id TEXT NOT NULL,
+            source_peer_id TEXT NOT NULL,
+            candidate_account_keys_json TEXT NOT NULL DEFAULT '[]'
+              CHECK (json_valid(candidate_account_keys_json)),
+            secret_generation INTEGER NOT NULL CHECK (secret_generation >= 0),
+            nonce TEXT NOT NULL,
+            ciphertext TEXT NOT NULL,
+            auth_tag TEXT NOT NULL,
+            api_base_url TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'waiting'
+              CHECK (status IN (
+                'waiting', 'scanned', 'confirmed', 'expired', 'failed', 'cancelled'
+              )),
+            expires_at INTEGER NOT NULL,
+            last_polled_at INTEGER NOT NULL DEFAULT 0,
+            error_code TEXT NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+          ) STRICT, WITHOUT ROWID;
+          INSERT INTO ilink_login_offers (
+            offer_id, initiator_kind, source_channel, source_message_key,
+            source_account_id, source_peer_id, secret_generation,
+            candidate_account_keys_json,
+            nonce, ciphertext, auth_tag, api_base_url, status,
+            expires_at, last_polled_at, error_code, created_at, updated_at
+          )
+          SELECT
+            offer_id, 'remote_adapter', 'wechat_kf', source_message_key,
+            source_open_kfid, source_external_userid, secret_generation,
+            '[]',
+            nonce, ciphertext, auth_tag, api_base_url, status,
+            expires_at, last_polled_at, error_code, created_at, updated_at
+          FROM ilink_login_offers_v22;
+          DROP TABLE ilink_login_offers_v22;
+          CREATE UNIQUE INDEX ilink_one_pending_offer_idx
+            ON ilink_login_offers(
+              source_channel, source_account_id, source_peer_id
+            )
+            WHERE status IN ('waiting', 'scanned');
+
+          ALTER TABLE ilink_enrollment_audit RENAME TO ilink_enrollment_audit_v22;
+          CREATE TABLE ilink_enrollment_audit (
+            offer_id TEXT PRIMARY KEY,
+            initiator_kind TEXT NOT NULL
+              CHECK (initiator_kind IN ('local_operator', 'remote_adapter')),
+            source_channel TEXT NOT NULL,
+            source_message_key TEXT NOT NULL,
+            source_account_id TEXT NOT NULL,
+            source_peer_id TEXT NOT NULL,
+            account_key TEXT NOT NULL DEFAULT '',
+            result TEXT NOT NULL CHECK (result IN (
+              'confirmed', 'expired', 'failed', 'cancelled',
+              'already_connected', 'verification_required'
+            )),
+            offered_at INTEGER NOT NULL,
+            completed_at INTEGER NOT NULL
+          ) STRICT, WITHOUT ROWID;
+          INSERT INTO ilink_enrollment_audit (
+            offer_id, initiator_kind, source_channel, source_message_key,
+            source_account_id, source_peer_id, account_key,
+            result, offered_at, completed_at
+          )
+          SELECT
+            offer_id, 'remote_adapter', 'wechat_kf', source_message_key,
+            source_open_kfid, source_external_userid, account_key,
+            result, offered_at, completed_at
+          FROM ilink_enrollment_audit_v22;
+          DROP TABLE ilink_enrollment_audit_v22;
+
+          PRAGMA user_version = 23;
+          COMMIT;
+        `);
+      } catch (error) {
+        this.#database.exec('ROLLBACK');
+        throw error;
+      }
       return;
     }
 
@@ -1717,6 +1818,8 @@ export class SqliteStore {
           generation INTEGER NOT NULL DEFAULT 1 CHECK (generation > 0),
           status TEXT NOT NULL DEFAULT 'active'
             CHECK (status IN ('active', 'paused', 'disabled', 'revoked')),
+          agent_access TEXT NOT NULL DEFAULT 'restricted'
+            CHECK (agent_access IN ('restricted', 'host')),
           pause_until INTEGER NOT NULL DEFAULT 0,
           cursor TEXT NOT NULL DEFAULT '',
           cursor_updated_at INTEGER NOT NULL DEFAULT 0,
@@ -1740,9 +1843,14 @@ export class SqliteStore {
 
         CREATE TABLE ilink_login_offers (
           offer_id TEXT PRIMARY KEY,
+          initiator_kind TEXT NOT NULL
+            CHECK (initiator_kind IN ('local_operator', 'remote_adapter')),
+          source_channel TEXT NOT NULL,
           source_message_key TEXT NOT NULL,
-          source_open_kfid TEXT NOT NULL,
-          source_external_userid TEXT NOT NULL,
+          source_account_id TEXT NOT NULL,
+          source_peer_id TEXT NOT NULL,
+          candidate_account_keys_json TEXT NOT NULL DEFAULT '[]'
+            CHECK (json_valid(candidate_account_keys_json)),
           secret_generation INTEGER NOT NULL CHECK (secret_generation >= 0),
           nonce TEXT NOT NULL,
           ciphertext TEXT NOT NULL,
@@ -1759,17 +1867,24 @@ export class SqliteStore {
           updated_at INTEGER NOT NULL
         ) STRICT, WITHOUT ROWID;
         CREATE UNIQUE INDEX ilink_one_pending_offer_idx
-          ON ilink_login_offers(source_open_kfid, source_external_userid)
+          ON ilink_login_offers(
+            source_channel, source_account_id, source_peer_id
+          )
           WHERE status IN ('waiting', 'scanned');
 
         CREATE TABLE ilink_enrollment_audit (
           offer_id TEXT PRIMARY KEY,
+          initiator_kind TEXT NOT NULL
+            CHECK (initiator_kind IN ('local_operator', 'remote_adapter')),
+          source_channel TEXT NOT NULL,
           source_message_key TEXT NOT NULL,
-          source_open_kfid TEXT NOT NULL,
-          source_external_userid TEXT NOT NULL,
+          source_account_id TEXT NOT NULL,
+          source_peer_id TEXT NOT NULL,
           account_key TEXT NOT NULL DEFAULT '',
-          result TEXT NOT NULL
-            CHECK (result IN ('confirmed', 'expired', 'failed', 'cancelled')),
+          result TEXT NOT NULL CHECK (result IN (
+            'confirmed', 'expired', 'failed', 'cancelled',
+            'already_connected', 'verification_required'
+          )),
           offered_at INTEGER NOT NULL,
           completed_at INTEGER NOT NULL
         ) STRICT, WITHOUT ROWID;

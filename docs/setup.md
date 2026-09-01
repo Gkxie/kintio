@@ -145,7 +145,27 @@ ILINK_STORAGE_KEY=paste_the_generated_value_here
 
 Without an explicit key, Kintio creates `ilink-storage.key` next to the SQLite database with `0600` permissions. Back up this key with the database; otherwise, restored iLink accounts cannot be decrypted.
 
-Existing accounts resume long polling at startup. The current enrollment flow for a new account begins in an authorized WeChat KF conversation: after the user explicitly asks for a separate bot channel, the agent calls `offer_weixin_bot_channel` to send a login QR code. The user who scans it becomes the only allowed user identity for that bot.
+Existing accounts resume long polling at startup. With Kintio running, an operator can
+connect a new account directly from an interactive terminal:
+
+```bash
+kintio ilink login
+```
+
+The command prints the QR code itself, waits for at most five minutes, and does not start
+an Agent turn. A locally enrolled account is marked as host-authorized: its owner receives
+the capabilities exposed by the host Agent configuration, including any local, network,
+tool, approval, or multi-agent powers enabled there. Only show the terminal QR code to a
+person authorized to control that host Agent.
+
+The same enrollment can still begin in an authorized WeChat KF conversation:
+after the user explicitly asks for a separate bot channel, the Agent calls
+`offer_weixin_bot_channel` to send a login QR image. In both cases, the user who scans the
+QR code becomes the only allowed user identity for that bot.
+
+Remote enrollment never grants host authorization. Re-enrolling an existing account from
+the local CLI may upgrade it to host authorization; later remote credential rotation does
+not silently remove that explicit local grant.
 
 WeChat KF and iLink identities remain separate. Scanning the QR code does not copy authorization, Codex threads, or conversation history from the originating adapter.
 

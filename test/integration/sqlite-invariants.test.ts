@@ -11,6 +11,7 @@ import {
   type CoreState,
 } from '../../src/state/sqlite-store.ts';
 import { StatePersistence } from '../../src/state/persistence.ts';
+import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import type { ImageAttachment, NormalizedMessage } from '../../src/types.ts';
 import { seedPendingAttempts } from '../support/pending-attempt.ts';
 import { withTestDatabase } from '../support/temp-sqlite.ts';
@@ -51,6 +52,48 @@ function schemaVersion(filePath: string): number {
     (database.prepare('PRAGMA user_version').get() as { user_version: number })
       .user_version,
   ));
+}
+
+function downgradeLoginSourcesToV22(database: DatabaseSync): void {
+  database.exec(`
+    DROP INDEX ilink_one_pending_offer_idx;
+    DROP TABLE ilink_login_offers;
+    CREATE TABLE ilink_login_offers (
+      offer_id TEXT PRIMARY KEY,
+      source_message_key TEXT NOT NULL,
+      source_open_kfid TEXT NOT NULL,
+      source_external_userid TEXT NOT NULL,
+      secret_generation INTEGER NOT NULL CHECK (secret_generation >= 0),
+      nonce TEXT NOT NULL,
+      ciphertext TEXT NOT NULL,
+      auth_tag TEXT NOT NULL,
+      api_base_url TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'waiting'
+        CHECK (status IN (
+          'waiting', 'scanned', 'confirmed', 'expired', 'failed', 'cancelled'
+        )),
+      expires_at INTEGER NOT NULL,
+      last_polled_at INTEGER NOT NULL DEFAULT 0,
+      error_code TEXT NOT NULL DEFAULT '',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+    CREATE UNIQUE INDEX ilink_one_pending_offer_idx
+      ON ilink_login_offers(source_open_kfid, source_external_userid)
+      WHERE status IN ('waiting', 'scanned');
+    DROP TABLE ilink_enrollment_audit;
+    CREATE TABLE ilink_enrollment_audit (
+      offer_id TEXT PRIMARY KEY,
+      source_message_key TEXT NOT NULL,
+      source_open_kfid TEXT NOT NULL,
+      source_external_userid TEXT NOT NULL,
+      account_key TEXT NOT NULL DEFAULT '',
+      result TEXT NOT NULL
+        CHECK (result IN ('confirmed', 'expired', 'failed', 'cancelled')),
+      offered_at INTEGER NOT NULL,
+      completed_at INTEGER NOT NULL
+    ) STRICT, WITHOUT ROWID;
+  `);
 }
 
 function createLegacyDatabase(
@@ -341,7 +384,7 @@ test('schema v11 removes retired state without losing durable facts', (t) => {
     withTestDatabase(filePath, (database) =>
       (database.prepare('PRAGMA user_version').get() as { user_version: number })
         .user_version),
-    22,
+    23,
   );
   assert.throws(() => upgraded.getAgentSession(sessionToken), /closed/u);
   const inboundSql = withTestDatabase(filePath, (database) => String((database.prepare(`
@@ -381,7 +424,7 @@ test('schema v12 adds durable deferred priority without losing inbox rows', (t) 
   });
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 22);
+  assert.equal(schemaVersion(filePath), 23);
   assert.equal(upgraded.getInbound(messageKey)?.deferred, false);
   assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
 });
@@ -409,7 +452,7 @@ test('schema v13 adds durable archived-memory bindings', (t) => {
   });
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 22);
+  assert.equal(schemaVersion(filePath), 23);
   assert.equal(
     upgraded.getConversation('wechat_kf', 'wk-one', 'wm-one')?.memoryThreadId,
     '',
@@ -425,6 +468,7 @@ test('schema v17 adds iLink invariant triggers and enrollment audit without rewr
   assert.ok(messageKey);
   persistence.close();
   const v17 = new DatabaseSync(filePath);
+  downgradeLoginSourcesToV22(v17);
   v17.exec(`
     DROP TRIGGER ilink_session_window_insert_guard;
     DROP TRIGGER ilink_session_window_update_guard;
@@ -440,7 +484,7 @@ test('schema v17 adds iLink invariant triggers and enrollment audit without rewr
   v17.close();
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 22);
+  assert.equal(schemaVersion(filePath), 23);
   assert.ok(upgraded.getInbound(messageKey));
   withTestDatabase(filePath, (database) => {
     assert.equal(Number((database.prepare(`
@@ -465,6 +509,7 @@ test('schema v19 adds cleanup indexes without rewriting iLink tables', (t) => {
   const { persistence, filePath } = harness(t);
   persistence.close();
   const v19 = new DatabaseSync(filePath);
+  downgradeLoginSourcesToV22(v19);
   v19.exec(`
     DROP INDEX ilink_reply_windows_expiry_idx;
     DROP INDEX ilink_reply_windows_updated_idx;
@@ -472,7 +517,7 @@ test('schema v19 adds cleanup indexes without rewriting iLink tables', (t) => {
   `);
   v19.close();
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 22);
+  assert.equal(schemaVersion(filePath), 23);
   assert.equal(withTestDatabase(filePath, (database) => Number((database.prepare(`
       SELECT COUNT(*) AS count FROM sqlite_master
       WHERE type = 'index' AND name IN (
@@ -522,6 +567,7 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
   persistence.close();
 
   const v20 = new DatabaseSync(filePath);
+  downgradeLoginSourcesToV22(v20);
   v20.exec(`
     CREATE TABLE maintainer_binding (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -542,7 +588,7 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
   v20.close();
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 22);
+  assert.equal(schemaVersion(filePath), 23);
   assert.equal(withTestDatabase(filePath, (database) => Number((database.prepare(`
       SELECT COUNT(*) AS count FROM sqlite_master
       WHERE type = 'table' AND name = 'maintainer_binding'
@@ -565,6 +611,54 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
   });
   assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
   assert.deepEqual(upgraded.foreignKeyCheck(), []);
+});
+
+test('schema v23 generalizes a live v22 login source without re-encrypting its QR token', (t) => {
+  const { persistence, filePath } = harness(t);
+  persistence.close();
+  const database = new DatabaseSync(filePath);
+  downgradeLoginSourcesToV22(database);
+  const offerId = `qo_${'m'.repeat(20)}`;
+  const generation = Number.parseInt(
+    createHash('sha256').update(offerId).digest('hex').slice(0, 12),
+    16,
+  );
+  const secretBox = new IlinkSecretBox(Buffer.alloc(32, 31).toString('base64url'));
+  const sealed = secretBox.seal('migrated-qr-status-token', {
+    secretKind: 'qr_token',
+    accountId: 'wk-migrated-source',
+    peerId: 'wm-migrated-source',
+    generation,
+  });
+  database.prepare(`
+    INSERT INTO ilink_login_offers (
+      offer_id, source_message_key, source_open_kfid, source_external_userid,
+      secret_generation, nonce, ciphertext, auth_tag, api_base_url,
+      status, expires_at, created_at, updated_at
+    ) VALUES (?, 'message-migrated-source', 'wk-migrated-source',
+      'wm-migrated-source', ?, ?, ?, ?, 'https://ilinkai.weixin.qq.com/',
+      'waiting', 9999999999999, 1, 1)
+  `).run(offerId, generation, sealed.nonce, sealed.ciphertext, sealed.authTag);
+  database.exec('PRAGMA user_version = 22');
+  database.close();
+
+  const upgraded = new StatePersistence({ filePath });
+  t.onTestFinished(() => upgraded.close());
+  const offers = upgraded.createIlinkLoginStore({ secretBox });
+  assert.equal(schemaVersion(filePath), 23);
+  assert.equal(offers.listActive()[0]?.qrCode, 'migrated-qr-status-token');
+  const migratedSource = withTestDatabase(filePath, (reader) => reader.prepare(`
+      SELECT initiator_kind, source_channel, source_message_key,
+             source_account_id, source_peer_id
+      FROM ilink_login_offers WHERE offer_id = ?
+    `).get(offerId) as Record<string, unknown>);
+  assert.deepEqual({ ...migratedSource }, {
+    initiator_kind: 'remote_adapter',
+    source_channel: 'wechat_kf',
+    source_message_key: 'message-migrated-source',
+    source_account_id: 'wk-migrated-source',
+    source_peer_id: 'wm-migrated-source',
+  });
 });
 
 test('status CHECK rejects invalid rows and filters remain parameterized', (t) => {

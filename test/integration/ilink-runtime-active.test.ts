@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
+import path from 'node:path';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -19,6 +20,11 @@ import {
 } from '../../src/ilink/protocol/types.ts';
 import { CodexAgent } from '../../src/services/codex-agent.ts';
 import { McpIpcHost, type LocalMcpLaunches } from '../../src/mcp/ipc-host.ts';
+import {
+  findMcpDescriptorFile,
+  operatorMcpInstanceKey,
+  readMcpDescriptor,
+} from '../../src/mcp/ipc-protocol.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
@@ -37,6 +43,7 @@ interface RuntimeAccountFixture {
   readonly contextToken: string;
   readonly initialCursor: string;
   readonly nextCursor: string;
+  readonly agentAccess: 'restricted' | 'host';
 }
 
 function deferred<T>(): Deferred<T> {
@@ -77,6 +84,7 @@ function account(name: string): RuntimeAccountFixture {
     contextToken: `encrypted-context-token-${name}`,
     initialCursor: `cursor-${name}-0`,
     nextCursor: `cursor-${name}-1`,
+    agentAccess: name === 'one' ? 'host' : 'restricted',
   };
 }
 
@@ -116,6 +124,7 @@ async function fixture(t: TestContext) {
         peerId: value.ownerPeerId,
         generation: 1,
       }),
+      agentAccess: value.agentAccess,
       now,
     });
     ilink.compareAndSetCursor({
@@ -273,7 +282,7 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   const startSpy = vi.spyOn(McpIpcHost.prototype, 'start').mockImplementation(
     function (this: McpIpcHost) {
       return originalStart.call(this).then((launches) => {
-        mcpLaunches = launches;
+        if (launches.ilink) mcpLaunches = launches;
         return launches;
       });
     },
@@ -282,6 +291,29 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   const runtime = await createRuntime({ config, logger });
   const ilinkLaunch = mcpLaunches?.ilink;
   assert.ok(ilinkLaunch);
+  const operatorDescriptor = findMcpDescriptorFile(
+    path.dirname(config.state.lockFile),
+    operatorMcpInstanceKey(config.state.lockFile),
+  );
+  const operatorLaunch = {
+    command: process.execPath,
+    args: [
+      path.resolve('mcp-relay.ts'),
+      '--descriptor',
+      operatorDescriptor,
+      '--route',
+      'operator',
+    ],
+  };
+  const agentDescriptor = ilinkLaunch.args[
+    ilinkLaunch.args.indexOf('--descriptor') + 1
+  ];
+  assert.ok(agentDescriptor);
+  assert.notEqual(agentDescriptor, operatorDescriptor);
+  assert.notEqual(
+    readMcpDescriptor(agentDescriptor).token,
+    readMcpDescriptor(operatorDescriptor).token,
+  );
   let shutDown = false;
   t.onTestFinished(async () => {
     closeReader();
@@ -295,14 +327,27 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   });
 
   await bounded('runtime start', runtime.start());
+  const operator = new Client({ name: 'active-ilink-operator-test', version: '1.0.0' });
+  await bounded('operator MCP connect', operator.connect(new StdioClientTransport({
+    command: operatorLaunch.command,
+    args: operatorLaunch.args,
+    stderr: 'pipe',
+  })));
+  assert.deepEqual(
+    (await operator.listTools()).tools.map((tool) => tool.name),
+    ['begin_login', 'login_status', 'cancel_login'],
+  );
+  await bounded('operator MCP close', operator.close());
   await bounded('second long poll', until(() => submissions.length === 2 &&
     accounts.every((value) => (pollCount.get(value.botToken) || 0) >= 2)));
 
   for (const value of accounts) {
-    assert.deepEqual(pollCursors.get(value.botToken), [
+    const cursors = pollCursors.get(value.botToken) || [];
+    assert.deepEqual(cursors.slice(0, 2), [
       value.initialCursor,
       value.nextCursor,
     ]);
+    assert.ok(cursors.slice(2).every((cursor) => cursor === value.nextCursor));
   }
   assert.deepEqual(
     [...lifecycleStarts].sort(),
@@ -311,6 +356,16 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   assert.deepEqual(
     submissions.map(({ input }) => input.channel),
     ['weixin_ilink', 'weixin_ilink'],
+  );
+  assert.deepEqual(
+    Object.fromEntries(submissions.map(({ input }) => [
+      input.message.text,
+      input.agentAccess,
+    ])),
+    {
+      'hello from one': 'host',
+      'hello from two': 'restricted',
+    },
   );
   assert.deepEqual(
     submissions.map(({ input }) => input.message.text).sort(),

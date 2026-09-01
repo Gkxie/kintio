@@ -4,6 +4,13 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Added `kintio ilink login`, which reuses the running iLink enrollment state
+  machine while rendering its five-minute QR code directly in an interactive
+  terminal; no WeChat KF conversation or Agent turn is required. Accounts
+  enrolled locally receive host-level Agent access and inherit the host runtime
+  configuration, while remotely offered iLink accounts remain restricted
+  ([#54](https://github.com/Gkxie/kintio/issues/54)).
+
 ## 0.6.2
 
 - Added a custom Kintio wordmark and its circular-safe TIO avatar to the English

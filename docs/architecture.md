@@ -157,6 +157,7 @@ MCP is the agent's only path for actions against messaging providers:
 - WeChat KF: [src/mcp/wechat-kf-server.ts](../src/mcp/wechat-kf-server.ts)
 - iLink: [src/mcp/ilink-server.ts](../src/mcp/ilink-server.ts)
 - read-only memory for archived threads: [src/mcp/conversation-memory-server.ts](../src/mcp/conversation-memory-server.ts)
+- local iLink enrollment for the CLI: [src/mcp/ilink-login-server.ts](../src/mcp/ilink-login-server.ts)
 - Worker-owned IPC lifecycle: [src/mcp/ipc-host.ts](../src/mcp/ipc-host.ts)
 - stdio relay: [src/mcp/stdio-relay.ts](../src/mcp/stdio-relay.ts)
 - bounded descriptor and handshake protocol: [src/mcp/ipc-protocol.ts](../src/mcp/ipc-protocol.ts)
@@ -170,6 +171,25 @@ variables. Public Hono routes never expose MCP. Every action still requires the
 short-lived session capability embedded in the current trusted Agent input. Each
 tool revalidates the adapter, recipient, message direction, media ownership,
 expiration, and quota. The model cannot select a recipient through tool arguments.
+
+The local operator route is not registered with Codex. `kintio ilink login` reaches it
+through a separate private descriptor, random token, IPC address, and stdio relay. No Agent
+process receives that descriptor path or credential. The running Worker remains the only
+SQLite writer while the CLI only renders the returned QR content.
+
+### Agent access provenance
+
+iLink accounts persist an Agent access level derived only from their enrollment source.
+Terminal enrollment grants `host` access; WeChat KF enrollment grants `restricted` access.
+Provider messages, Agent prompts, MCP arguments, and participant IDs cannot select or
+upgrade this field. Existing host access survives remote credential rotation and can only
+originate from the local operator path.
+
+Restricted conversations use Kintio's capability fence and channel Developer Instructions.
+Host-authorized conversations run in a separate lazy Agent boundary: Kintio adds only its
+iLink delivery and memory MCP servers, omits forced sandbox/approval/feature overrides, and
+inherits the host model, provider, tools, network, shell, MCP, and other Agent settings. The
+access contract is Agent-runtime-neutral even though the current implementation uses Codex.
 
 Tools return execution facts only: accepted, failed, or uncertain. Provider-specific errors are explained by tool results when they occur. They do not belong in the global prompt, and retry decisions are not hard-coded into channel-neutral agent behavior.
 

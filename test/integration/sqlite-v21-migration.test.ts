@@ -86,7 +86,7 @@ function replayedWechatMessage(): NormalizedMessage {
   };
 }
 
-test('a frozen real v21 database migrates to v22 without rewriting durable identity', (t) => {
+test('a frozen real v21 database migrates to v23 without rewriting durable identity', (t) => {
   const filePath = createV21Database(t, 'kintio-real-v21');
   const before = new DatabaseSync(filePath, { readOnly: true });
   assert.equal(pragmaNumber(before, 'user_version'), 21);
@@ -117,7 +117,7 @@ test('a frozen real v21 database migrates to v22 without rewriting durable ident
   const migrated = new DatabaseSync(filePath, { readOnly: true });
   t.onTestFinished(() => migrated.close());
 
-  assert.equal(pragmaNumber(migrated, 'user_version'), 22);
+  assert.equal(pragmaNumber(migrated, 'user_version'), 23);
   assert.deepEqual(
     migrated.prepare('PRAGMA integrity_check').all().map(Object.values),
     [['ok']],
@@ -305,7 +305,18 @@ test('a frozen real v21 database migrates to v22 without rewriting durable ident
   assert.equal(store.getCursor(ACCOUNT_KEY), 'legacy-wechat-cursor');
   assert.equal(store.getAuthorization(PEER_ID)?.lastMessageKey, WECHAT_KEY);
   assert.equal(ilink.getAccount(ACCOUNT_KEY)?.providerAccountId, 'fixture-bot@im.bot');
+  assert.equal(ilink.getAccount(ACCOUNT_KEY)?.agentAccess, 'restricted');
   assert.equal(ilink.getAccountSecret(ACCOUNT_KEY)?.sealedBotToken.ciphertext, 'AQ');
+  const loginColumns = new Set(
+    (migrated.prepare('PRAGMA table_info(ilink_login_offers)').all() as
+      Array<{ name: string }>).map(({ name }) => name),
+  );
+  for (const column of [
+    'initiator_kind', 'source_channel', 'source_message_key',
+    'source_account_id', 'source_peer_id',
+  ]) assert.equal(loginColumns.has(column), true, column);
+  assert.equal(loginColumns.has('source_open_kfid'), false);
+  assert.equal(loginColumns.has('source_external_userid'), false);
 
   const expectedIndexes = [
     'agent_session_source_idx',

@@ -1,5 +1,7 @@
 import type { ChatChannel, ResolvedImage } from '../types.ts';
 
+export type AgentAccess = 'restricted' | 'host';
+
 export interface AgentMessage {
   readonly messageKey: string;
   readonly text: string;
@@ -30,6 +32,7 @@ export interface AgentImageArtifact extends AgentArtifact {
 }
 
 export interface AgentInput {
+  readonly agentAccess?: AgentAccess;
   readonly channel: ChatChannel;
   readonly mode: 'start' | 'steer';
   readonly conversationId: string;
@@ -79,7 +82,11 @@ export interface HistoryInspection {
 }
 
 export interface AgentRuntime {
-  ensureThread(conversationId: string, threadId: string): Promise<string>;
+  ensureThread(
+    conversationId: string,
+    threadId: string,
+    agentAccess?: AgentAccess,
+  ): Promise<string>;
   takePendingMemoryThread?(conversationId: string): string;
   activePrimary(conversationId: string): string | undefined;
   interrupt?(conversationId: string): Promise<boolean>;
@@ -88,6 +95,7 @@ export interface AgentRuntime {
     threadId: string,
     clientInputIds: readonly string[],
     latestClientInputId: string,
+    agentAccess?: AgentAccess,
   ): Promise<HistoryInspection>;
   close(): Promise<void>;
   abort(): Promise<void>;

@@ -8,6 +8,7 @@ import { test, vi } from 'vitest';
 import {
   IlinkQrRenderError,
   renderIlinkQrPng,
+  renderIlinkQrTerminal,
 } from '../../src/ilink/qr.ts';
 
 const PNG_SIGNATURE = Buffer.from([
@@ -81,6 +82,23 @@ test('renders a branded card with integer modules and a four-module quiet zone',
   }
 });
 
+test('renders a compact terminal QR with a four-module quiet zone', () => {
+  const content = 'weixin://ilink/login/terminal-test';
+  const rendered = renderIlinkQrTerminal(content);
+  const matrix = create(content, { errorCorrectionLevel: 'M' }).modules;
+  assert.equal(rendered.columns, matrix.size + 8);
+  assert.equal(rendered.rows, Math.ceil((matrix.size + 8) / 2));
+  assert.doesNotMatch(rendered.text, /weixin|terminal-test/u);
+  const lines = rendered.text.trimEnd().split('\n').map((line) =>
+    line.replaceAll('\u001b[47m\u001b[30m', '').replaceAll('\u001b[0m', ''));
+  assert.equal(lines.length, rendered.rows);
+  assert.ok(lines.every((line) => [...line].length === rendered.columns));
+  assert.equal(lines[0], ' '.repeat(rendered.columns));
+  assert.equal(lines[1], ' '.repeat(rendered.columns));
+  assert.equal(lines.at(-1), ' '.repeat(rendered.columns));
+  assert.match(rendered.text, /[█▀▄]/u);
+});
+
 test('enforces non-empty and 2048-byte UTF-8 input limits without echoing content', async () => {
   const maximumContent = '🙂'.repeat(512);
   const maximum = PNG.sync.read(await renderIlinkQrPng(maximumContent));
@@ -103,6 +121,13 @@ test('enforces non-empty and 2048-byte UTF-8 input limits without echoing conten
     assert.equal(captured.code, 'invalid_qr_content');
     assert.equal(captured.message, 'Invalid iLink QR content');
     assert.doesNotMatch(captured.message, /qr-secret|x{16}/u);
+    assert.throws(
+      () => renderIlinkQrTerminal(invalid),
+      (error: unknown) =>
+        error instanceof IlinkQrRenderError &&
+        error.code === 'invalid_qr_content' &&
+        !/qr-secret|x{16}/u.test(error.message),
+    );
   }
 });
 

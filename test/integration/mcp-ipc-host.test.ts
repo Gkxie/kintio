@@ -19,6 +19,7 @@ import {
   MCP_HANDSHAKE_ERROR,
   MCP_HANDSHAKE_OK,
   MCP_FRAME_MAX_BYTES,
+  findMcpDescriptorFile,
   mcpHandshake,
   mcpInstanceId,
   mcpIpcAddress,
@@ -116,6 +117,10 @@ test('host exposes authenticated MCP over a pipe without a TCP listener or token
 
   const descriptorFile = descriptorArgument(launches.memory.args);
   const descriptor = readMcpDescriptor(descriptorFile);
+  assert.equal(
+    findMcpDescriptorFile(directory, instanceKey),
+    descriptorFile,
+  );
   assert.equal(path.dirname(descriptorFile), instanceStateDirectory(directory, instanceKey));
   if (process.platform !== 'win32') {
     assert.equal(fs.statSync(path.dirname(descriptorFile)).mode & 0o777, 0o700);
@@ -188,7 +193,7 @@ test('close racing start rejects the unpublished launch and leaves no descriptor
   await assert.rejects(host.start(), /MCP IPC host is closed/u);
 });
 
-test('one IPC listener routes three standard stdio MCP clients independently', async (t) => {
+test('one IPC listener routes three Agent MCP clients independently', async (t) => {
   const directory = await stateDirectory(t);
   const calls: string[] = [];
   const host = new McpIpcHost({

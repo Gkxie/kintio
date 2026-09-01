@@ -51,7 +51,8 @@ export interface CodexRun {
 
 export interface CodexThreadOptions {
   readonly workingDirectory: string;
-  readonly approvalPolicy: 'never';
+  readonly approvalPolicy?: 'never';
+  readonly sandbox?: 'read-only';
   readonly developerInstructions?: string;
 }
 
@@ -503,8 +504,10 @@ class CodexAppServerThread implements CodexThread {
   #params(): JsonRecord {
     return {
       cwd: this.#options.workingDirectory,
-      approvalPolicy: this.#options.approvalPolicy,
-      sandbox: 'read-only',
+      ...(this.#options.approvalPolicy
+        ? { approvalPolicy: this.#options.approvalPolicy }
+        : {}),
+      ...(this.#options.sandbox ? { sandbox: this.#options.sandbox } : {}),
       ...(this.#options.developerInstructions
         ? { developerInstructions: this.#options.developerInstructions }
         : {}),

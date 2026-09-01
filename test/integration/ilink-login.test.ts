@@ -51,6 +51,10 @@ async function eventually(predicate: () => boolean): Promise<void> {
   assert.fail('condition did not become true');
 }
 
+function wechatSource(created: Awaited<ReturnType<typeof fixture>>) {
+  return { kind: 'wechat_kf' as const, sessionToken: created.session.token };
+}
+
 test('confirmed QR creates a separate encrypted iLink identity and refreshes listeners', async (t) => {
   const created = await fixture(t);
   const botId = 'new-bot@im.bot';
@@ -86,14 +90,16 @@ test('confirmed QR creates a separate encrypted iLink identity and refreshes lis
   });
   t.onTestFinished(() => manager.close());
   await manager.start();
-  const offered = await manager.offer(created.session.token);
-  assert.deepEqual([...offered.png.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  const offered = await manager.offer(wechatSource(created));
+  assert.equal(offered.qrContent, 'weixin://ilink/login/test');
+  assert.equal(offered.expiresAt, created.clock() + 5 * 60 * 1_000);
   await eventually(() => created.accounts.listActiveAccounts().length === 1);
 
   const accountKey = createIlinkAccountKey(botId);
   const account = created.accounts.getAccountWithSecret(accountKey);
   assert.ok(account);
   assert.equal(account.account.ownerPeerId, owner);
+  assert.equal(account.account.agentAccess, 'restricted');
   assert.notEqual(account.account.ownerPeerId, 'wm-source');
   assert.equal(
     created.secretBox.open(account.secret.sealedBotToken, {
@@ -108,7 +114,7 @@ test('confirmed QR creates a separate encrypted iLink identity and refreshes lis
     undefined,
   );
 
-  await manager.offer(created.session.token);
+  await manager.offer(wechatSource(created));
   await eventually(() => created.accounts.getAccount(accountKey)?.generation === 2);
   const rotated = created.accounts.getAccountWithSecret(accountKey);
   assert.ok(rotated);
@@ -128,10 +134,149 @@ test('confirmed QR creates a separate encrypted iLink identity and refreshes lis
   assert.deepEqual(localTokenLists, [[], ['new-bot-secret']]);
 });
 
+test('terminal source uses the same encrypted enrollment and five-minute state machine', async (t) => {
+  const created = await fixture(t);
+  const statuses: IlinkQrStatusResponse[] = [
+    { status: 'scaned' },
+    {
+      status: 'confirmed',
+      bot_token: 'terminal-bot-secret',
+      ilink_bot_id: 'terminal-bot@im.bot',
+      ilink_user_id: 'terminal-owner@im.wechat',
+      baseurl: 'https://ilinkai.weixin.qq.com/',
+    },
+    {
+      status: 'confirmed',
+      bot_token: 'terminal-bot-secret-rotated',
+      ilink_bot_id: 'terminal-bot@im.bot',
+      ilink_user_id: 'terminal-owner@im.wechat',
+      baseurl: 'https://ilinkai.weixin.qq.com/',
+    },
+  ];
+  let refreshed = 0;
+  const manager = new IlinkLoginManager({
+    offers: created.offers,
+    accounts: created.accounts,
+    secretBox: created.secretBox,
+    client: {
+      async createQr() {
+        return { qrcode: 'terminal-status-token', qrcode_img_content: 'weixin://terminal' };
+      },
+      async getQrStatus() { return statuses.shift() || { status: 'wait' as const }; },
+      resolveRedirectBaseUrl(host: string) { return `https://${host}/`; },
+    },
+    sleep: async () => undefined,
+    clock: created.clock,
+    onAccountsChanged: () => { refreshed += 1; },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  t.onTestFinished(() => manager.close());
+  await manager.start();
+  const offered = await manager.offer({ kind: 'terminal' });
+  assert.equal(offered.qrContent, 'weixin://terminal');
+  assert.equal(offered.expiresAt, created.clock() + 5 * 60 * 1_000);
+  await eventually(() => manager.status(offered.offerId).status === 'confirmed');
+  assert.equal(refreshed, 1);
+  const audit = created.database.prepare(`
+    SELECT initiator_kind, source_channel, source_message_key, source_account_id,
+           source_peer_id, result
+    FROM ilink_enrollment_audit WHERE offer_id = ?
+  `).get(offered.offerId) as Record<string, unknown>;
+  assert.deepEqual({ ...audit }, {
+    initiator_kind: 'local_operator',
+    source_channel: 'terminal',
+    source_message_key: '',
+    source_account_id: 'local',
+    source_peer_id: 'operator',
+    result: 'confirmed',
+  });
+  assert.equal(Number((created.database.prepare(`
+    SELECT COUNT(*) AS count FROM agent_sessions
+  `).get() as { count: number }).count), 1);
+  const accountKey = createIlinkAccountKey('terminal-bot@im.bot');
+  const account = created.accounts.getAccountWithSecret(accountKey);
+  assert.ok(account);
+  assert.equal(account.account.agentAccess, 'host');
+  assert.equal(
+    created.secretBox.open(account.secret.sealedBotToken, {
+      secretKind: 'bot_token',
+      accountId: accountKey,
+      peerId: 'terminal-owner@im.wechat',
+      generation: 1,
+    }),
+    'terminal-bot-secret',
+  );
+  await manager.offer(wechatSource(created));
+  await eventually(() => created.accounts.getAccount(accountKey)?.generation === 2);
+  assert.equal(created.accounts.getAccount(accountKey)?.agentAccess, 'host');
+});
+
+test('terminal offers are released on runtime shutdown instead of resuming without a CLI', async (t) => {
+  const created = await fixture(t);
+  const manager = new IlinkLoginManager({
+    offers: created.offers,
+    accounts: created.accounts,
+    secretBox: created.secretBox,
+    client: {
+      async createQr() {
+        return { qrcode: 'terminal-shutdown-token', qrcode_img_content: 'weixin://stop' };
+      },
+      async getQrStatus(_request, options) {
+        return await new Promise<IlinkQrStatusResponse>((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => reject(options.signal.reason), {
+            once: true,
+          });
+        });
+      },
+      resolveRedirectBaseUrl(host: string) { return `https://${host}/`; },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  await manager.start();
+  const offered = await manager.offer({ kind: 'terminal' });
+  assert.equal(manager.status(offered.offerId).status, 'waiting');
+  await manager.close();
+  assert.equal(manager.status(offered.offerId).status, 'cancelled');
+  assert.equal(created.offers.listActive().length, 0);
+});
+
+test('observing the real five-minute expiry aborts the in-flight provider poll', async (t) => {
+  const created = await fixture(t);
+  let aborted = false;
+  const manager = new IlinkLoginManager({
+    offers: created.offers,
+    accounts: created.accounts,
+    secretBox: created.secretBox,
+    clock: created.clock,
+    client: {
+      async createQr() {
+        return { qrcode: 'terminal-expiry-token', qrcode_img_content: 'weixin://expiry' };
+      },
+      async getQrStatus(_request, options) {
+        return await new Promise<IlinkQrStatusResponse>((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            aborted = true;
+            reject(options.signal.reason);
+          }, { once: true });
+        });
+      },
+      resolveRedirectBaseUrl(host: string) { return `https://${host}/`; },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  t.onTestFinished(() => manager.close());
+  await manager.start();
+  const offered = await manager.offer({ kind: 'terminal' });
+  created.advance(5 * 60 * 1_000);
+  assert.equal(manager.status(offered.offerId).status, 'expired');
+  await eventually(() => aborted);
+  assert.equal(created.offers.listActive().length, 0);
+});
+
 test('confirmed account and enrollment audit commit in one transaction', async (t) => {
   const created = await fixture(t);
   const offer = created.offers.create({
-    sessionToken: created.session.token,
+    source: wechatSource(created),
     qrCode: 'atomic-confirm-token',
     apiBaseUrl: 'https://ilinkai.weixin.qq.com/',
   });
@@ -188,7 +333,7 @@ test('confirmed account and enrollment audit commit in one transaction', async (
   });
 
   const rotationOffer = created.offers.create({
-    sessionToken: created.session.token,
+    source: wechatSource(created),
     qrCode: 'atomic-rotation-token',
     apiBaseUrl: 'https://ilinkai.weixin.qq.com/',
   });
@@ -218,6 +363,57 @@ test('confirmed account and enrollment audit commit in one transaction', async (
   assert.equal(created.offers.listActive().length, 1);
 });
 
+test('existing-account host authorization and audit commit atomically', async (t) => {
+  const created = await fixture(t);
+  const providerAccountId = 'atomic-existing-bot@im.bot';
+  const ownerPeerId = 'atomic-existing-owner@im.wechat';
+  const accountKey = createIlinkAccountKey(providerAccountId);
+  created.accounts.registerAccount({
+    providerAccountId,
+    ownerPeerId,
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    encryptedBotToken: created.secretBox.seal('atomic-existing-secret', {
+      secretKind: 'bot_token',
+      accountId: accountKey,
+      peerId: ownerPeerId,
+      generation: 1,
+    }),
+    now: created.clock(),
+  });
+  const offer = created.offers.create({
+    source: { kind: 'terminal' },
+    qrCode: 'atomic-existing-offer',
+    apiBaseUrl: 'https://ilinkai.weixin.qq.com/',
+    candidateAccountKeys: [accountKey],
+  });
+  created.database.exec(`
+    CREATE TRIGGER reject_existing_authorization_audit
+    BEFORE INSERT ON ilink_enrollment_audit
+    WHEN NEW.offer_id = '${offer.offerId}'
+    BEGIN SELECT RAISE(ABORT, 'forced existing authorization audit failure'); END;
+  `);
+  assert.throws(() => created.accounts.confirmExistingEnrollment({
+    offerId: offer.offerId,
+    accountKey,
+    now: created.clock(),
+  }), /forced existing authorization audit failure/u);
+  assert.equal(created.accounts.getAccount(accountKey)?.agentAccess, 'restricted');
+  assert.equal(created.offers.isActive(offer.offerId), true);
+  created.database.exec('DROP TRIGGER reject_existing_authorization_audit');
+  assert.equal(created.accounts.confirmExistingEnrollment({
+    offerId: offer.offerId,
+    accountKey,
+    now: created.clock(),
+  }).agentAccess, 'host');
+  assert.equal(created.offers.isActive(offer.offerId), false);
+  assert.deepEqual({ ...(created.database.prepare(`
+    SELECT result, account_key FROM ilink_enrollment_audit WHERE offer_id = ?
+  `).get(offer.offerId) as Record<string, unknown>) }, {
+    result: 'already_connected',
+    account_key: accountKey,
+  });
+});
+
 test('atomic enrollment rechecks the active account limit', async (t) => {
   const created = await fixture(t);
   const existingBot = 'existing-limit-bot@im.bot';
@@ -236,7 +432,7 @@ test('atomic enrollment rechecks the active account limit', async (t) => {
     now: created.clock(),
   });
   const offer = created.offers.create({
-    sessionToken: created.session.token,
+    source: wechatSource(created),
     qrCode: 'limited-confirm-token',
     apiBaseUrl: 'https://ilinkai.weixin.qq.com/',
   });
@@ -279,7 +475,7 @@ test('already-connected QR status retires the offer without rotating credentials
   });
   t.onTestFinished(() => manager.close());
   await manager.start();
-  const offered = await manager.offer(created.session.token);
+  const offered = await manager.offer(wechatSource(created));
   await eventually(() => created.offers.listActive().length === 0);
   assert.deepEqual(info, ['[ilink-login] account is already connected']);
   assert.equal(created.accounts.listActiveAccounts().length, 0);
@@ -287,8 +483,100 @@ test('already-connected QR status retires the offer without rotating credentials
     (created.database.prepare(`
       SELECT result FROM ilink_enrollment_audit WHERE offer_id = ?
     `).get(offered.offerId) as { result: string }).result,
-    'cancelled',
+    'already_connected',
   );
+});
+
+test('terminal already-connected response fails closed without one attributable candidate', async (t) => {
+  const created = await fixture(t);
+  const warnings: string[] = [];
+  const manager = new IlinkLoginManager({
+    offers: created.offers,
+    accounts: created.accounts,
+    secretBox: created.secretBox,
+    client: {
+      async createQr() {
+        return { qrcode: 'unattributed-token', qrcode_img_content: 'weixin://unknown' };
+      },
+      async getQrStatus() { return { status: 'binded_redirect' as const }; },
+      resolveRedirectBaseUrl(host: string) { return `https://${host}/`; },
+    },
+    sleep: async () => undefined,
+    logger: { info() {}, warn(message) { warnings.push(message); }, error() {} },
+  });
+  t.onTestFinished(() => manager.close());
+  await manager.start();
+  const offered = await manager.offer({ kind: 'terminal' });
+  await eventually(() => manager.status(offered.offerId).status === 'failed');
+  assert.deepEqual(warnings, [
+    '[ilink-login] already-connected account could not be identified',
+  ]);
+  assert.equal(created.accounts.listActiveAccounts().length, 0);
+});
+
+test('terminal reauthorization upgrades one existing restricted account at the account limit', async (t) => {
+  const created = await fixture(t);
+  const otherProviderId = 'other-existing-bot@im.bot';
+  const otherOwnerId = 'other-existing-owner@im.wechat';
+  const otherAccountKey = createIlinkAccountKey(otherProviderId);
+  created.accounts.registerAccount({
+    providerAccountId: otherProviderId,
+    ownerPeerId: otherOwnerId,
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    encryptedBotToken: created.secretBox.seal('other-existing-token', {
+      secretKind: 'bot_token',
+      accountId: otherAccountKey,
+      peerId: otherOwnerId,
+      generation: 1,
+    }),
+    now: created.clock(),
+  });
+  const providerAccountId = 'restricted-existing-bot@im.bot';
+  const ownerPeerId = 'restricted-existing-owner@im.wechat';
+  const accountKey = createIlinkAccountKey(providerAccountId);
+  created.accounts.registerAccount({
+    providerAccountId,
+    ownerPeerId,
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    encryptedBotToken: created.secretBox.seal('restricted-existing-token', {
+      secretKind: 'bot_token',
+      accountId: accountKey,
+      peerId: ownerPeerId,
+      generation: 1,
+    }),
+    now: created.clock() + 1,
+  });
+  const localTokens: string[][] = [];
+  const manager = new IlinkLoginManager({
+    offers: created.offers,
+    accounts: created.accounts,
+    secretBox: created.secretBox,
+    maxAccounts: 2,
+    client: {
+      async createQr(request = {}) {
+        localTokens.push([...(request.local_token_list || [])]);
+        return { qrcode: 'existing-terminal-token', qrcode_img_content: 'weixin://existing' };
+      },
+      async getQrStatus() { return { status: 'binded_redirect' as const }; },
+      resolveRedirectBaseUrl(host: string) { return `https://${host}/`; },
+    },
+    sleep: async () => undefined,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  t.onTestFinished(() => manager.close());
+  await manager.start();
+  const offered = await manager.offer({ kind: 'terminal' });
+  await eventually(() => manager.status(offered.offerId).status === 'already_connected');
+  assert.deepEqual(localTokens, [['restricted-existing-token']]);
+  assert.equal(created.accounts.getAccount(accountKey)?.agentAccess, 'host');
+  assert.equal(created.accounts.getAccount(otherAccountKey)?.agentAccess, 'restricted');
+  assert.equal(created.accounts.getAccount(accountKey)?.generation, 1);
+  assert.deepEqual({ ...(created.database.prepare(`
+    SELECT result, account_key FROM ilink_enrollment_audit WHERE offer_id = ?
+  `).get(offered.offerId) as Record<string, unknown>) }, {
+    result: 'already_connected',
+    account_key: accountKey,
+  });
 });
 
 test('pending QR offer resumes after manager restart and confirms once', async (t) => {
@@ -313,7 +601,7 @@ test('pending QR offer resumes after manager restart and confirms once', async (
     logger: { info() {}, warn() {}, error() {} },
   });
   await first.start();
-  const offered = await first.offer(created.session.token);
+  const offered = await first.offer(wechatSource(created));
   assert.equal(created.offers.listActive().length, 1);
   await first.close();
   assert.equal(created.offers.listActive().length, 1);
@@ -371,11 +659,20 @@ test('only one pending QR offer is allowed for a bound WeChat conversation', asy
   });
   t.onTestFinished(() => manager.close());
   await manager.start();
-  const first = await manager.offer(created.session.token);
-  await assert.rejects(() => manager.offer(created.session.token), /already pending/u);
+  const first = await manager.offer(wechatSource(created));
+  await assert.rejects(() => manager.offer(wechatSource(created)), /already pending/u);
+  assert.throws(() => created.offers.create({
+    source: { kind: 'terminal' },
+    qrCode: 'too-many-candidates',
+    apiBaseUrl: 'https://ilinkai.weixin.qq.com/',
+    candidateAccountKeys: Array.from(
+      { length: 11 },
+      (_value, index) => createIlinkAccountKey(`candidate-${index}@im.bot`),
+    ),
+  }), /Too many iLink login candidate accounts/u);
   assert.throws(
     () => created.offers.create({
-      sessionToken: created.session.token,
+      source: wechatSource(created),
       qrCode: 'duplicate-token',
       apiBaseUrl: 'https://ilinkai.weixin.qq.com/',
     }),
@@ -389,7 +686,7 @@ test('only one pending QR offer is allowed for a bound WeChat conversation', asy
   assert.equal(scanned.apiBaseUrl, 'https://edge.weixin.qq.com/');
   assert.throws(
     () => created.offers.create({
-      sessionToken: created.session.token,
+      source: wechatSource(created),
       qrCode: '',
       apiBaseUrl: 'https://ilinkai.weixin.qq.com/',
     }),
@@ -406,6 +703,29 @@ test('only one pending QR offer is allowed for a bound WeChat conversation', asy
     `).get(first.offerId) as { result: string }).result,
     'cancelled',
   );
+});
+
+test('persisted terminal candidate metadata fails closed when malformed', async (t) => {
+  const created = await fixture(t);
+  const invalidShapes = [
+    ['{}', /Invalid iLink login candidate accounts/u],
+    ['[1]', /Invalid iLink login candidate account/u],
+  ] as const;
+  for (const [candidateJson, expected] of invalidShapes) {
+    const offer = created.offers.create({
+      source: { kind: 'terminal' },
+      qrCode: `malformed-candidate-${candidateJson}`,
+      apiBaseUrl: 'https://ilinkai.weixin.qq.com/',
+    });
+    created.database.prepare(`
+      UPDATE ilink_login_offers SET candidate_account_keys_json = ?
+      WHERE offer_id = ?
+    `).run(candidateJson, offer.offerId);
+    assert.throws(() => created.offers.listActive(), expected);
+    created.database.prepare(`
+      DELETE FROM ilink_login_offers WHERE offer_id = ?
+    `).run(offer.offerId);
+  }
 });
 
 test('QR polling follows an allowlisted redirect and retires non-confirmed terminal states', async (t) => {
@@ -441,7 +761,7 @@ test('QR polling follows an allowlisted redirect and retires non-confirmed termi
   });
   t.onTestFinished(() => manager.close());
   await manager.start();
-  await manager.offer(created.session.token);
+  await manager.offer(wechatSource(created));
   await eventually(() => created.offers.listActive().length === 0);
   assert.deepEqual(bases, [
     'https://ilinkai.weixin.qq.com/',
@@ -452,7 +772,7 @@ test('QR polling follows an allowlisted redirect and retires non-confirmed termi
   await manager.close();
   await manager.close();
   await assert.rejects(() => manager.start(), /closed/u);
-  await assert.rejects(() => manager.offer(created.session.token), /closed/u);
+  await assert.rejects(() => manager.offer(wechatSource(created)), /closed/u);
 });
 
 test('login failures retire secret offers and account limits fail before QR creation', async (t) => {
@@ -473,9 +793,29 @@ test('login failures retire secret offers and account limits fail before QR crea
     },
   });
   await limited.start();
-  await assert.rejects(() => limited.offer(created.session.token), /limit reached/u);
+  await assert.rejects(() => limited.offer(wechatSource(created)), /limit reached/u);
   assert.equal(createCalls, 0);
   await limited.close();
+
+  const invalidQr = new IlinkLoginManager({
+    offers: created.offers,
+    accounts: created.accounts,
+    secretBox: created.secretBox,
+    client: {
+      async createQr() {
+        return { qrcode: 'invalid-render-token', qrcode_img_content: '' };
+      },
+      async getQrStatus() { return { status: 'wait' as const }; },
+      resolveRedirectBaseUrl(host: string) { return `https://${host}/`; },
+    },
+  });
+  await invalidQr.start();
+  await assert.rejects(
+    () => invalidQr.offer({ kind: 'terminal' }),
+    /Invalid iLink QR content/u,
+  );
+  assert.equal(created.offers.listActive().length, 0);
+  await invalidQr.close();
 
   const warnings: string[] = [];
   const invalidConfirmed = new IlinkLoginManager({
@@ -493,7 +833,7 @@ test('login failures retire secret offers and account limits fail before QR crea
     logger: { info() {}, warn(message) { warnings.push(message); }, error() {} },
   });
   await invalidConfirmed.start();
-  await invalidConfirmed.offer(created.session.token);
+  await invalidConfirmed.offer(wechatSource(created));
   await eventually(() => created.offers.listActive().length === 0);
   assert.deepEqual(warnings, ['[ilink-login] confirmed account activation failed']);
   await invalidConfirmed.close();
@@ -514,7 +854,7 @@ test('login failures retire secret offers and account limits fail before QR crea
     sleep: async () => undefined,
   });
   await configurationFailure.start();
-  await configurationFailure.offer(created.session.token);
+  await configurationFailure.offer(wechatSource(created));
   await eventually(() => created.offers.listActive().length === 0);
   await configurationFailure.close();
 
@@ -532,7 +872,7 @@ test('login failures retire secret offers and account limits fail before QR crea
     },
   });
   await expiredBeforePoll.start();
-  await expiredBeforePoll.offer(created.session.token);
+  await expiredBeforePoll.offer(wechatSource(created));
   await eventually(() => created.offers.listActive().length === 0);
   await expiredBeforePoll.close();
 });

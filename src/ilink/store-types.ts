@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 
+import type { AgentAccess } from '../agent/runtime.ts';
 import type { IlinkSealedSecret } from './secret-box.ts';
 
 export const ILINK_CHANNEL = 'weixin_ilink' as const;
@@ -10,6 +11,7 @@ export const ILINK_REPLY_WINDOW_MAX_SENDS = 10;
 
 export type IlinkAccountKey = `ia_${string}`;
 export type IlinkAccountStatus = 'active' | 'paused' | 'disabled' | 'revoked';
+export type IlinkAgentAccess = AgentAccess;
 type IlinkReplyWindowState = 'open' | 'superseded' | 'closed' | 'cancelled';
 export type IlinkEncryptedSecret = IlinkSealedSecret;
 
@@ -21,6 +23,7 @@ export interface IlinkAccountRecord {
   readonly baseUrl: string;
   readonly generation: number;
   readonly status: IlinkAccountStatus;
+  readonly agentAccess: IlinkAgentAccess;
   readonly pauseUntil: number;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -68,6 +71,7 @@ export interface RegisterIlinkAccountInput {
   readonly ownerPeerId: string;
   readonly baseUrl: string;
   readonly encryptedBotToken: IlinkEncryptedSecret;
+  readonly agentAccess?: IlinkAgentAccess;
   readonly now: number;
 }
 
@@ -78,6 +82,7 @@ export interface RotateIlinkAccountInput {
   readonly ownerPeerId: string;
   readonly baseUrl: string;
   readonly encryptedBotToken: IlinkEncryptedSecret;
+  readonly agentAccess?: IlinkAgentAccess;
   readonly now: number;
 }
 

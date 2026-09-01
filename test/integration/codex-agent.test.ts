@@ -54,6 +54,13 @@ function executedText(id: string, attemptId: string, startedSequence: number) {
   };
 }
 
+function executedIlinkText(id: string, attemptId: string, startedSequence: number) {
+  return {
+    ...executedText(id, attemptId, startedSequence),
+    server: 'weixin_ilink',
+  };
+}
+
 function message(messageKey = 'im-primary'): AgentMessage {
   return {
     messageKey,
@@ -167,6 +174,7 @@ test('does not override host model or effort and keeps customer observation inde
   assert.deepEqual(boundary.startOptions, [{
     workingDirectory: '/isolated-codex-workspace',
     approvalPolicy: 'never',
+    sandbox: 'read-only',
     developerInstructions: boundary.startOptions[0]?.developerInstructions,
   }]);
   assert.match(
@@ -177,6 +185,41 @@ test('does not override host model or effort and keeps customer observation inde
   assert.match(String(boundary.runCalls[0]?.input), /Follow \$wechat-kf-reply-sop/u);
   assert.match(String(boundary.runCalls[0]?.input), /participant explicitly commented/u);
   assert.equal(submission.threadId, 'thread-test');
+});
+
+test('host-authorized iLink uses a separate unrestricted Codex boundary', async (t) => {
+  const restricted = new FakeBoundary([]);
+  const trusted = new FakeBoundary([
+    { items: [executedIlinkText('trusted-answer', 'sa_trusted', 1)] },
+  ]);
+  const agent = new CodexAgent({
+    codex: restricted,
+    trustedCodex: trusted,
+    config: {
+      workingDirectory: '/host-agent-workspace',
+      imageTempDirectory: os.tmpdir(),
+      generatedImageDirectory: '',
+    },
+  });
+  t.onTestFinished(() => agent.close());
+
+  const submission = await agent.submit(agentInput('trusted-ilink', {
+    agentAccess: 'host',
+    channel: 'weixin_ilink',
+    contextText: 'Inspect the host project with all configured capabilities.',
+  }));
+  assert.equal(submission.kind, 'started');
+  if (submission.kind !== 'started') return;
+  assert.deepEqual((await submission.completion).executedAttemptIds, ['sa_trusted']);
+  assert.equal(restricted.startOptions.length, 0);
+  assert.deepEqual(trusted.startOptions, [{
+    workingDirectory: '/host-agent-workspace',
+    developerInstructions: trusted.startOptions[0]?.developerInstructions,
+  }]);
+  const instructions = trusted.startOptions[0]?.developerInstructions || '';
+  assert.match(instructions, /host owner.*full Agent authorization/su);
+  assert.doesNotMatch(instructions, /Never read|Never access localhost|Never use shell/u);
+  assert.match(String(trusted.runCalls[0]?.input), /weixin_ilink tools/u);
 });
 
 test('a live turn rejection stays observed after Harness-owned thread initialization', async (t) => {
