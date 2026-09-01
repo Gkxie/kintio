@@ -215,6 +215,7 @@ test('repository workflows preserve executable security boundaries', async () =>
 
   const cla = workflows.get('.github/workflows/cla.yml') || '';
   assert.match(cla, /contributor-assistant\/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08/u);
+  assert.doesNotMatch(cla, /lock-pullrequest-aftermerge:\s*true/u);
   assert.match(cla, /github\.event\.action == 'closed' && github\.event\.pull_request\.merged == true/u);
   assert.match(cla, /path-to-document: https:\/\/github\.com\/Gkxie\/kintio\/blob\/cla-v1\.1\/CLA\.md/u);
   assert.match(cla, /path-to-signatures: signatures\/v1\.1\/cla\.json/u);
