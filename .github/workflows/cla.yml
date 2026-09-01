@@ -109,3 +109,4 @@ jobs:
           branch: cla-signatures
           allowlist: dependabot[bot],kintio-release[bot]
           custom-pr-sign-comment: I have read the Kintio CLA v1.1 and I hereby sign it
+          lock-pullrequest-aftermerge: false
