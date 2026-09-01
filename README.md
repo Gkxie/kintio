@@ -67,45 +67,67 @@ Prerequisites:
 
 ```bash
 npm install --global @kin-tio/cli
-kintio setup
 codex login status
 ```
 
-`kintio setup` creates a private instance under `~/.kintio`, installs the bundled Agent
-skill, and writes the channel configuration template. POSIX systems use mode `0600`;
-Windows keeps the instance inside the current user's profile. No adapter is enabled
-by default. Follow the [setup guide](https://github.com/Gkxie/kintio/blob/master/docs/setup.md)
-and edit `~/.kintio/.env` to configure one adapter:
-
-- For WeChat KF API, set its callback token, EncodingAESKey, CorpID, and secret. A temporary
-  `WECOM_AUTH_TRIGGER` can authorize the first user without knowing their
-  `external_userid` in advance.
-- For Weixin iLink, set `ILINK_ENABLED=true`. A new binding can start either from the
-  local CLI or, when configured, from an authorized WeChat KF conversation.
-
-Start Kintio:
+For an iLink-only instance, no setup file or public HTTP listener is required:
 
 ```bash
+kintio ilink login
+kintio ilink start
+```
+
+`ilink login` performs one encrypted enrollment, starts no listener, and exits. `ilink start` then runs provider
+polling and the host Agent in the foreground without Hono or a TCP listener. Both commands
+use `~/.kintio` by default and accept `--home`. With multiple accounts, use `ilink list`
+and pass the displayed provider ID or account key through `--account`. Repeated `start`
+commands add accounts to the live runtime; `stop` removes one.
+
+For a callback-based adapter, create and edit the deployment configuration instead:
+
+```bash
+kintio setup
 kintio start
 kintio status
 kintio logs --lines 100
 ```
 
-To connect a new iLink identity, keep Kintio running and scan the terminal QR code:
+`kintio setup` creates a private instance under `~/.kintio`, installs the managed Agent
+skill, and writes the channel configuration template. Follow the
+[setup guide](https://github.com/Gkxie/kintio/blob/master/docs/setup.md):
+
+- For WeChat KF API, set its callback token, EncodingAESKey, CorpID, and secret. A temporary
+  `WECOM_AUTH_TRIGGER` can authorize the first user without knowing their
+  `external_userid` in advance.
+- A combined callback + iLink deployment may additionally set `ILINK_ENABLED=true`.
+
+For a graphical or non-terminal caller, select a temporary raw PNG instead of ANSI blocks:
 
 ```bash
-kintio ilink login
+kintio ilink login --qr-output ~/.kintio/ilink-login.png
 ```
 
-The command requires an interactive terminal and stops waiting when the QR code expires
-after five minutes. It never starts an Agent turn. The resulting iLink identity represents
+The target must be directly inside the selected Kintio instance directory and must not
+already exist. Kintio removes the PNG when login succeeds, expires, is cancelled, or fails;
+the QR payload is never printed. Without `--qr-output`, the command
+requires an interactive terminal. Both forms stop waiting after five minutes and never
+start an Agent turn. The resulting iLink identity represents
 the local operator and inherits the host Agent configuration without Kintio's untrusted-
 channel capability restrictions. Show this QR code only to someone authorized to control
-the host Agent.
+the host Agent. Run `kintio ilink start` after enrollment to process messages without Hono.
 
-After startup, confirm that `kintio logs` contains `Hono server is listening on port 8888`.
-Complete the callback or binding checks described in the setup guide before sending traffic.
-Use `kintio run` when a foreground process is preferable to the native daemon.
+To permanently remove an account and every Kintio record scoped to it, use:
+
+```bash
+kintio ilink delete --account <provider-id-or-account-key> --yes
+```
+
+The explicit confirmation is mandatory. Credentials, conversations, messages, media,
+delivery records, and enrollment audit rows for that account are deleted atomically.
+
+For callback deployments, confirm that `kintio logs` contains
+`Hono server is listening on port 8888`. Use `kintio run` when a foreground process is
+preferable to the native daemon.
 Existing source-based deployments can keep their current state after the one-time
 process-manager migration described in the setup guide.
 

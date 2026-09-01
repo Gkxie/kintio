@@ -100,6 +100,7 @@ test('confirmed QR creates a separate encrypted iLink identity and refreshes lis
   assert.ok(account);
   assert.equal(account.account.ownerPeerId, owner);
   assert.equal(account.account.agentAccess, 'restricted');
+  assert.equal(account.account.runtimeEnabled, true);
   assert.notEqual(account.account.ownerPeerId, 'wm-source');
   assert.equal(
     created.secretBox.open(account.secret.sealedBotToken, {
@@ -132,6 +133,66 @@ test('confirmed QR creates a separate encrypted iLink identity and refreshes lis
   assert.ok(audits.every((audit) =>
     audit.result === 'confirmed' && audit.account_key === accountKey));
   assert.deepEqual(localTokenLists, [[], ['new-bot-secret']]);
+});
+
+test('configured iLink login origin is preserved from QR creation through status polling', async (t) => {
+  const created = await fixture(t);
+  const baseUrl = 'https://login-edge.weixin.qq.com/';
+  const polledOrigins: string[] = [];
+  const manager = new IlinkLoginManager({
+    offers: created.offers,
+    accounts: created.accounts,
+    secretBox: created.secretBox,
+    baseUrl,
+    client: {
+      async createQr() {
+        return { qrcode: 'configured-origin', qrcode_img_content: 'weixin://configured' };
+      },
+      async getQrStatus(_request, options) {
+        polledOrigins.push(options.baseUrl);
+        return { status: 'expired' as const };
+      },
+      resolveRedirectBaseUrl(host: string) { return `https://${host}/`; },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  t.onTestFinished(() => manager.close());
+  await manager.start();
+  const offered = await manager.offer({ kind: 'terminal' });
+  await eventually(() => manager.status(offered.offerId).status === 'expired');
+  assert.deepEqual(polledOrigins, [baseUrl]);
+});
+
+test('cancelling QR creation leaves no login offer or account', async (t) => {
+  const created = await fixture(t);
+  const controller = new AbortController();
+  const manager = new IlinkLoginManager({
+    offers: created.offers,
+    accounts: created.accounts,
+    secretBox: created.secretBox,
+    client: {
+      async createQr(_request, options = {}) {
+        return await new Promise((_resolve, reject) => {
+          options.signal?.addEventListener(
+            'abort',
+            () => reject(options.signal?.reason),
+            { once: true },
+          );
+        });
+      },
+      async getQrStatus() { return { status: 'wait' as const }; },
+      resolveRedirectBaseUrl(host: string) { return `https://${host}/`; },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  t.onTestFinished(() => manager.close());
+  await manager.start();
+  const pending = manager.offer({ kind: 'terminal' }, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(() => pending, (error: unknown) =>
+    error instanceof Error && error.name === 'AbortError');
+  assert.equal(created.offers.listActive().length, 0);
+  assert.equal(created.accounts.listActiveAccounts().length, 0);
 });
 
 test('terminal source uses the same encrypted enrollment and five-minute state machine', async (t) => {
@@ -197,6 +258,7 @@ test('terminal source uses the same encrypted enrollment and five-minute state m
   const account = created.accounts.getAccountWithSecret(accountKey);
   assert.ok(account);
   assert.equal(account.account.agentAccess, 'host');
+  assert.equal(account.account.runtimeEnabled, false);
   assert.equal(
     created.secretBox.open(account.secret.sealedBotToken, {
       secretKind: 'bot_token',
@@ -209,6 +271,7 @@ test('terminal source uses the same encrypted enrollment and five-minute state m
   await manager.offer(wechatSource(created));
   await eventually(() => created.accounts.getAccount(accountKey)?.generation === 2);
   assert.equal(created.accounts.getAccount(accountKey)?.agentAccess, 'host');
+  assert.equal(created.accounts.getAccount(accountKey)?.runtimeEnabled, true);
 });
 
 test('terminal offers are released on runtime shutdown instead of resuming without a CLI', async (t) => {

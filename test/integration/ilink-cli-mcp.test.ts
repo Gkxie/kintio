@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import path from 'node:path';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { test } from 'vitest';
 
 import { createConfig } from '../../src/config.ts';
+import { runIlinkAccountCommand } from '../../src/ilink/cli-accounts.ts';
 import { runIlinkCliLogin } from '../../src/ilink/cli-login.ts';
 import { IlinkLoginManager } from '../../src/ilink/login-manager.ts';
 import type { IlinkQrStatusResponse } from '../../src/ilink/protocol/types.ts';
@@ -15,7 +17,7 @@ import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { operatorMcpInstanceKey } from '../../src/mcp/ipc-protocol.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
-test('terminal adapter reaches the running Worker through private local MCP only', async (t) => {
+test('non-TTY QR output reaches the Worker through private local MCP and cleans up', async (t) => {
   const temp = await createTempSqlite(t, { prefix: 'kintio-ilink-cli-mcp-' });
   const root = temp.directory;
   let now = 1_000_000;
@@ -85,6 +87,33 @@ test('terminal adapter reaches the running Worker through private local MCP only
         calls.cancel += 1;
         return manager.cancel(offerId);
       },
+      listAccounts: () => accounts.listActiveAccounts().map((account) => ({
+        accountKey: account.accountKey,
+        providerAccountId: account.providerAccountId,
+        runtimeEnabled: account.runtimeEnabled,
+      })),
+      async setAccountRuntime(accountKey, enabled) {
+        const account = accounts.setRuntimeEnabled(accountKey as `ia_${string}`, enabled);
+        return {
+          account: {
+            accountKey: account.accountKey,
+            providerAccountId: account.providerAccountId,
+            runtimeEnabled: account.runtimeEnabled,
+          },
+          runningCount: accounts.listRuntimeAccountsWithSecrets().length,
+        };
+      },
+      async deleteAccount(accountKey) {
+        const account = accounts.deleteAccountCompletely(accountKey as `ia_${string}`);
+        return {
+          account: {
+            accountKey: account.accountKey,
+            providerAccountId: account.providerAccountId,
+            runtimeEnabled: account.runtimeEnabled,
+          },
+          runningCount: accounts.listRuntimeAccountsWithSecrets().length,
+        };
+      },
     }),
   });
   t.onTestFinished(() => host.close(true));
@@ -92,12 +121,14 @@ test('terminal adapter reaches the running Worker through private local MCP only
   await host.start();
 
   const output: string[] = [];
+  const qrOutputPath = path.join(root, 'login-qr.png');
   const result = await runIlinkCliLogin({
     config,
     packageRoot: path.resolve('.'),
     stdout: (text) => output.push(text),
-    stdoutIsTTY: true,
-    stdoutColumns: 200,
+    stdoutIsTTY: false,
+    stdoutColumns: 0,
+    qrOutputPath,
     signal: new AbortController().signal,
     clock: () => now,
     sleep: async () => { await new Promise<void>((resolve) => setImmediate(resolve)); },
@@ -108,7 +139,9 @@ test('terminal adapter reaches the running Worker through private local MCP only
   assert.ok(calls.status >= 1);
   assert.equal(calls.cancel, 0);
   assert.match(output.join(''), /login succeeded/u);
+  assert.match(output.join(''), /Temporary QR image/u);
   assert.doesNotMatch(output.join(''), /through-local-mcp|weixin:\/\//u);
+  assert.equal(fs.existsSync(qrOutputPath), false);
   const accountKey = createIlinkAccountKey(providerAccountId);
   const stored = accounts.getAccountWithSecret(accountKey);
   assert.ok(stored);
@@ -129,6 +162,41 @@ test('terminal adapter reaches the running Worker through private local MCP only
     stdoutColumns: 200,
     signal: new AbortController().signal,
   }), /account limit has been reached/u);
+
+  const lifecycleOutput: string[] = [];
+  assert.equal((await runIlinkAccountCommand({
+    command: 'list',
+    config,
+    packageRoot: path.resolve('.'),
+    signal: new AbortController().signal,
+    stdout: (text) => lifecycleOutput.push(text),
+  })).startForeground, false);
+  assert.match(lifecycleOutput.join(''), /cli-mcp-bot@im\.bot.*\[stopped\]/u);
+  await runIlinkAccountCommand({
+    command: 'stop',
+    config,
+    packageRoot: path.resolve('.'),
+    signal: new AbortController().signal,
+    stdout() {},
+  });
+  assert.equal(accounts.getAccount(accountKey)?.runtimeEnabled, false);
+  await runIlinkAccountCommand({
+    command: 'start',
+    config,
+    packageRoot: path.resolve('.'),
+    signal: new AbortController().signal,
+    stdout() {},
+  });
+  assert.equal(accounts.getAccount(accountKey)?.runtimeEnabled, true);
+  await runIlinkAccountCommand({
+    command: 'delete',
+    confirmed: true,
+    config,
+    packageRoot: path.resolve('.'),
+    signal: new AbortController().signal,
+    stdout() {},
+  });
+  assert.equal(accounts.getAccount(accountKey), undefined);
   await host.close();
   await manager.close();
   persistence.close();

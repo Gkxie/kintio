@@ -2,6 +2,26 @@
 
 This guide takes a Kintio deployment from a clean machine to the first agent reply through a supported messaging adapter. For code structure and extension points, see [Architecture](architecture.md).
 
+## iLink-only path
+
+An iLink-only instance needs no setup file, public domain, reverse proxy, Hono listener, or
+callback credential:
+
+```bash
+npm install --global @kin-tio/cli
+codex login status
+kintio ilink login
+kintio ilink start
+```
+
+`ilink login` owns the canonical instance lock only while it enrolls and persists an
+account. If the same instance is already running, it delegates to that process through the
+private operator IPC instead of opening a second SQLite writer. `ilink start` owns the normal
+foreground runtime, provider polling, and Agent lifecycle without starting Hono.
+
+Continue with the sections below only for a configured callback deployment or optional
+overrides.
+
 ## 1. Prepare the runtime
 
 Requirements:
@@ -125,9 +145,9 @@ The root route handles both GET verification and POST message events. The revers
 
 Prepare the URL first, then save the callback configuration in the provider console after Kintio starts. The log entry `callback URL verification succeeded` confirms successful verification.
 
-## 4. Configure the iLink adapter
+## 4. Configure a combined iLink adapter
 
-Follow Tencent's [iLink upstream instructions](https://github.com/Tencent/openclaw-weixin/blob/main/README.zh_CN.md). To restore existing bindings, enable iLink in `.env`:
+Follow Tencent's [iLink upstream instructions](https://github.com/Tencent/openclaw-weixin/blob/main/README.zh_CN.md). A full callback runtime can additionally enable iLink in `.env`:
 
 ```dotenv
 ILINK_ENABLED=true
@@ -145,18 +165,56 @@ ILINK_STORAGE_KEY=paste_the_generated_value_here
 
 Without an explicit key, Kintio creates `ilink-storage.key` next to the SQLite database with `0600` permissions. Back up this key with the database; otherwise, restored iLink accounts cannot be decrypted.
 
-Existing accounts resume long polling at startup. With Kintio running, an operator can
-connect a new account directly from an interactive terminal:
+The standalone CLI does not require this setting. An operator can connect a new account
+whether or not another Kintio process is running:
 
 ```bash
 kintio ilink login
 ```
 
-The command prints the QR code itself, waits for at most five minutes, and does not start
-an Agent turn. A locally enrolled account is marked as host-authorized: its owner receives
+The default command prints the QR code itself. A graphical or non-terminal caller can
+explicitly select a temporary raw PNG instead:
+
+```bash
+kintio ilink login --qr-output ~/.kintio/ilink-login.png
+```
+
+The target must be directly inside the selected Kintio instance directory and must not
+exist. Kintio creates it exclusively and removes it on normal completion, cancellation,
+or error without printing the QR payload. Both forms wait
+for at most five minutes and do not start an Agent turn. A locally enrolled account is
+marked as host-authorized: its owner receives
 the capabilities exposed by the host Agent configuration, including any local, network,
 tool, approval, or multi-agent powers enabled there. Only show the terminal QR code to a
 person authorized to control that host Agent.
+
+The login command exits after persisting credentials and starts no listener. Run
+`kintio ilink start` to process
+iLink messages in the foreground without Hono, or use the combined `kintio start` runtime
+when the callback adapter is also configured.
+
+Account lifecycle is explicit:
+
+```bash
+kintio ilink list
+kintio ilink start [--account <provider-id-or-account-key>]
+kintio ilink stop [--account <provider-id-or-account-key>]
+kintio ilink delete [--account <provider-id-or-account-key>] --yes
+```
+
+One enrolled account is selected automatically. Multiple accounts require `--account`;
+the stable choices come from `list`. The first standalone `start` owns the foreground
+runtime. Further `start` and `stop` commands reach that owner over private operator IPC,
+so one process owns SQLite while independently reconciling account listeners. Stopping
+the last running account exits the standalone runtime.
+
+`delete` is intentionally stronger than logout. It atomically removes the selected
+account, credentials, conversations, messages, media, send records, reply windows, and
+enrollment audit rows from Kintio. It cannot be undone and therefore requires `--yes`.
+
+An uncatchable termination such as `SIGKILL` or power loss can leave the temporary PNG
+behind. Its provider-side QR still expires after five minutes; remove the stale file
+manually before reusing the same path.
 
 The same enrollment can still begin in an authorized WeChat KF conversation:
 after the user explicitly asks for a separate bot channel, the Agent calls

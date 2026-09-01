@@ -5,6 +5,13 @@ import {
   randomBytes,
   type KeyObject,
 } from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+
+import {
+  assertTrustedDirectory,
+  ensurePrivateDirectory,
+} from '../lib/private-directory.ts';
 
 const KEY_BYTES = 32;
 const NONCE_BYTES = 12;
@@ -64,6 +71,76 @@ function decodeConfiguredKey(configuredKey: string): Buffer {
     throw invalidKey();
   }
   return decoded;
+}
+
+export function readOrCreateIlinkStorageKey(
+  filePath: string,
+  { allowCreate }: { readonly allowCreate: boolean },
+): string {
+  const target = path.resolve(filePath);
+  const parent = ensurePrivateDirectory(path.dirname(target));
+  assertTrustedDirectory(parent, 'iLink storage key directory', true);
+  try {
+    const stat = fs.lstatSync(target);
+    if (!stat.isFile() || stat.isSymbolicLink()) {
+      throw new Error(`iLink storage key is not a regular file: ${target}`);
+    }
+    if (process.platform !== 'win32') {
+      const uid = process.getuid?.();
+      if ((uid !== undefined && stat.uid !== uid) || (stat.mode & 0o077) !== 0) {
+        throw new Error(`iLink storage key has unsafe permissions: ${target}`);
+      }
+    }
+    const configuredKey = fs.readFileSync(target, 'utf8').trim();
+    const decoded = decodeConfiguredKey(configuredKey);
+    decoded.fill(0);
+    return configuredKey;
+  } catch (error: unknown) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ENOENT')) {
+      throw error;
+    }
+  }
+  if (!allowCreate) {
+    throw new Error('iLink storage key is missing for existing encrypted state');
+  }
+  const configuredKey = randomBytes(KEY_BYTES).toString('base64url');
+  let descriptor: number | undefined;
+  let created = false;
+  try {
+    descriptor = fs.openSync(target, 'wx', 0o600);
+    created = true;
+    fs.writeFileSync(descriptor, `${configuredKey}\n`, 'utf8');
+    fs.fsyncSync(descriptor);
+    fs.closeSync(descriptor);
+    descriptor = undefined;
+    if (process.platform !== 'win32') {
+      const parentDescriptor = fs.openSync(parent, 'r');
+      try {
+        fs.fsyncSync(parentDescriptor);
+      } finally {
+        fs.closeSync(parentDescriptor);
+      }
+    }
+    return configuredKey;
+  } catch (error: unknown) {
+    if (descriptor !== undefined) {
+      try { fs.closeSync(descriptor); } catch {}
+    }
+    if (created) {
+      try {
+        fs.unlinkSync(target);
+      } catch (cleanupError: unknown) {
+        throw new AggregateError(
+          [error, cleanupError],
+          'iLink storage key creation and cleanup both failed',
+        );
+      }
+    }
+    if (error instanceof Error && 'code' in error && error.code === 'EEXIST') {
+      return readOrCreateIlinkStorageKey(target, { allowCreate });
+    }
+    throw error;
+  }
 }
 
 function boundedScopeText(value: string): boolean {

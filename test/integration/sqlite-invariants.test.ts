@@ -12,6 +12,7 @@ import {
 } from '../../src/state/sqlite-store.ts';
 import { StatePersistence } from '../../src/state/persistence.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
+import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import type { ImageAttachment, NormalizedMessage } from '../../src/types.ts';
 import { seedPendingAttempts } from '../support/pending-attempt.ts';
 import { withTestDatabase } from '../support/temp-sqlite.ts';
@@ -384,7 +385,7 @@ test('schema v11 removes retired state without losing durable facts', (t) => {
     withTestDatabase(filePath, (database) =>
       (database.prepare('PRAGMA user_version').get() as { user_version: number })
         .user_version),
-    23,
+    24,
   );
   assert.throws(() => upgraded.getAgentSession(sessionToken), /closed/u);
   const inboundSql = withTestDatabase(filePath, (database) => String((database.prepare(`
@@ -424,7 +425,7 @@ test('schema v12 adds durable deferred priority without losing inbox rows', (t) 
   });
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 23);
+  assert.equal(schemaVersion(filePath), 24);
   assert.equal(upgraded.getInbound(messageKey)?.deferred, false);
   assert.deepEqual(upgraded.integrityCheck().map(Object.values), [['ok']]);
 });
@@ -452,7 +453,7 @@ test('schema v13 adds durable archived-memory bindings', (t) => {
   });
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 23);
+  assert.equal(schemaVersion(filePath), 24);
   assert.equal(
     upgraded.getConversation('wechat_kf', 'wk-one', 'wm-one')?.memoryThreadId,
     '',
@@ -484,7 +485,7 @@ test('schema v17 adds iLink invariant triggers and enrollment audit without rewr
   v17.close();
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 23);
+  assert.equal(schemaVersion(filePath), 24);
   assert.ok(upgraded.getInbound(messageKey));
   withTestDatabase(filePath, (database) => {
     assert.equal(Number((database.prepare(`
@@ -517,7 +518,7 @@ test('schema v19 adds cleanup indexes without rewriting iLink tables', (t) => {
   `);
   v19.close();
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 23);
+  assert.equal(schemaVersion(filePath), 24);
   assert.equal(withTestDatabase(filePath, (database) => Number((database.prepare(`
       SELECT COUNT(*) AS count FROM sqlite_master
       WHERE type = 'index' AND name IN (
@@ -588,7 +589,7 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
   v20.close();
 
   const upgraded = reopen(t, filePath);
-  assert.equal(schemaVersion(filePath), 23);
+  assert.equal(schemaVersion(filePath), 24);
   assert.equal(withTestDatabase(filePath, (database) => Number((database.prepare(`
       SELECT COUNT(*) AS count FROM sqlite_master
       WHERE type = 'table' AND name = 'maintainer_binding'
@@ -613,7 +614,53 @@ test('schema v21 drops retired binding without rewriting historical sends', (t) 
   assert.deepEqual(upgraded.foreignKeyCheck(), []);
 });
 
-test('schema v23 generalizes a live v22 login source without re-encrypting its QR token', (t) => {
+test('schema v24 selects only an unambiguous legacy account for runtime', (t) => {
+  for (const accountCount of [1, 2]) {
+    const directory = fs.mkdtempSync(path.join(
+      os.tmpdir(),
+      `sqlite-v23-runtime-${accountCount}-`,
+    ));
+    t.onTestFinished(() => fs.rmSync(directory, { recursive: true, force: true }));
+    const filePath = path.join(directory, 'state.sqlite');
+    const persistence = new StatePersistence({ filePath });
+    const accounts = persistence.createIlinkStore();
+    const secretBox = new IlinkSecretBox(
+      Buffer.alloc(32, accountCount).toString('base64url'),
+    );
+    for (let index = 0; index < accountCount; index += 1) {
+      const providerAccountId = `legacy-${accountCount}-${index}@im.bot`;
+      const ownerPeerId = `legacy-${accountCount}-${index}@im.wechat`;
+      const accountKey = createIlinkAccountKey(providerAccountId);
+      accounts.registerAccount({
+        providerAccountId,
+        ownerPeerId,
+        baseUrl: 'https://ilinkai.weixin.qq.com/',
+        encryptedBotToken: secretBox.seal(`token-${index}`, {
+          secretKind: 'bot_token', accountId: accountKey,
+          peerId: ownerPeerId, generation: 1,
+        }),
+        now: 1_000 + index,
+      });
+    }
+    persistence.close();
+    const legacy = new DatabaseSync(filePath);
+    legacy.exec(`
+      ALTER TABLE ilink_accounts DROP COLUMN runtime_enabled;
+      PRAGMA user_version = 23;
+    `);
+    legacy.close();
+
+    const upgraded = new StatePersistence({ filePath });
+    const runtimeAccounts = upgraded.createIlinkStore()
+      .listRuntimeAccountsWithSecrets();
+    assert.equal(schemaVersion(filePath), 24);
+    assert.equal(runtimeAccounts.length, accountCount === 1 ? 1 : 0);
+    assert.deepEqual(upgraded.core.foreignKeyCheck(), []);
+    upgraded.close();
+  }
+});
+
+test('schema v24 preserves a live v22 login source while adding runtime selection', (t) => {
   const { persistence, filePath } = harness(t);
   persistence.close();
   const database = new DatabaseSync(filePath);
@@ -645,7 +692,7 @@ test('schema v23 generalizes a live v22 login source without re-encrypting its Q
   const upgraded = new StatePersistence({ filePath });
   t.onTestFinished(() => upgraded.close());
   const offers = upgraded.createIlinkLoginStore({ secretBox });
-  assert.equal(schemaVersion(filePath), 23);
+  assert.equal(schemaVersion(filePath), 24);
   assert.equal(offers.listActive()[0]?.qrCode, 'migrated-qr-status-token');
   const migratedSource = withTestDatabase(filePath, (reader) => reader.prepare(`
       SELECT initiator_kind, source_channel, source_message_key,

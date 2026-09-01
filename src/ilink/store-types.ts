@@ -24,6 +24,7 @@ export interface IlinkAccountRecord {
   readonly generation: number;
   readonly status: IlinkAccountStatus;
   readonly agentAccess: IlinkAgentAccess;
+  readonly runtimeEnabled: boolean;
   readonly pauseUntil: number;
   readonly createdAt: number;
   readonly updatedAt: number;

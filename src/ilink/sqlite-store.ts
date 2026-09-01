@@ -43,6 +43,7 @@ interface AccountRow {
   generation: number;
   status: IlinkAccountStatus;
   agent_access: IlinkAgentAccess;
+  runtime_enabled: number;
   pause_until: number;
   cursor: string;
   cursor_updated_at: number;
@@ -381,6 +382,7 @@ function mapAccount(row: AccountRow): IlinkAccountRecord {
     generation: Number(row.generation),
     status: row.status,
     agentAccess: row.agent_access,
+    runtimeEnabled: row.runtime_enabled === 1,
     pauseUntil: Number(row.pause_until),
     createdAt: Number(row.created_at),
     updatedAt: Number(row.updated_at),
@@ -668,15 +670,17 @@ export class IlinkSqliteStore {
       this.#database.prepare(`
         INSERT INTO ilink_accounts (
           account_key, provider_account_id, owner_peer_id, base_url,
-          generation, status, agent_access, pause_until, cursor, cursor_updated_at,
+          generation, status, agent_access, runtime_enabled,
+          pause_until, cursor, cursor_updated_at,
           created_at, updated_at
-        ) VALUES (?, ?, ?, ?, 1, 'active', ?, 0, '', 0, ?, ?)
+        ) VALUES (?, ?, ?, ?, 1, 'active', ?, ?, 0, '', 0, ?, ?)
       `).run(
         accountKey,
         input.providerAccountId,
         ownerPeerId,
         baseUrl,
         requestedAccess,
+        0,
         now,
         now,
       );
@@ -720,6 +724,9 @@ export class IlinkSqliteStore {
         fail('pair_mismatch', 'iLink account binding cannot change during rotation');
       }
       const nextGeneration = current.generation + 1;
+      const runtimeEnabled = current.status === 'active'
+        ? current.runtime_enabled
+        : 0;
       const agentAccess =
         current.agent_access === 'host' || requestedAccess === 'host'
           ? 'host'
@@ -729,13 +736,14 @@ export class IlinkSqliteStore {
       const updated = this.#database.prepare(`
         UPDATE ilink_accounts
         SET base_url = ?, generation = ?, status = 'active', agent_access = ?,
-            pause_until = 0,
+            runtime_enabled = ?, pause_until = 0,
             updated_at = ?
         WHERE account_key = ? AND generation = ?
       `).run(
         baseUrl,
         nextGeneration,
         agentAccess,
+        runtimeEnabled,
         now,
         input.accountKey,
         input.expectedGeneration,
@@ -801,7 +809,7 @@ export class IlinkSqliteStore {
       if (input.accountGeneration !== (existing?.generation || 0) + 1) {
         fail('generation_conflict', 'iLink enrollment generation changed');
       }
-      const account = existing
+      let account = existing
         ? this.rotateAccount({
             accountKey,
             expectedGeneration: existing.generation,
@@ -818,6 +826,9 @@ export class IlinkSqliteStore {
             agentAccess:
               offer.initiator_kind === 'local_operator' ? 'host' : 'restricted',
           });
+      if (offer.initiator_kind === 'remote_adapter' && !account.runtimeEnabled) {
+        account = this.setRuntimeEnabled(account.accountKey, true, input.now);
+      }
       this.#database.prepare(`
         INSERT INTO ilink_enrollment_audit (
           offer_id, initiator_kind, source_channel, source_message_key,
@@ -947,6 +958,17 @@ export class IlinkSqliteStore {
     `).all()).map(mapAccount);
   }
 
+  hasEncryptedState(): boolean {
+    return Boolean(this.#database.prepare(`
+      SELECT 1
+      FROM ilink_account_secrets
+      UNION ALL
+      SELECT 1
+      FROM ilink_login_offers
+      LIMIT 1
+    `).get());
+  }
+
   listActiveAccountsWithSecrets(): readonly IlinkAccountWithSecret[] {
     return rowsAs<AccountSecretRow>(this.#database.prepare(`
       SELECT account.*, secret.account_generation,
@@ -960,6 +982,133 @@ export class IlinkSqliteStore {
       account: mapAccount(row),
       secret: mapAccountSecret(row),
     }));
+  }
+
+  listRuntimeAccountsWithSecrets(): readonly IlinkAccountWithSecret[] {
+    return rowsAs<AccountSecretRow>(this.#database.prepare(`
+      SELECT account.*, secret.account_generation,
+             secret.nonce, secret.ciphertext, secret.auth_tag,
+             secret.updated_at AS secret_updated_at
+      FROM ilink_accounts AS account
+      JOIN ilink_account_secrets AS secret USING (account_key)
+      WHERE account.status = 'active' AND account.runtime_enabled = 1
+      ORDER BY account.created_at, account.account_key
+    `).all()).map((row) => ({
+      account: mapAccount(row),
+      secret: mapAccountSecret(row),
+    }));
+  }
+
+  setRuntimeEnabled(
+    accountKey: IlinkAccountKey,
+    enabled: boolean,
+    now = this.#now(),
+  ): IlinkAccountRecord {
+    assertIlinkAccountKey(accountKey);
+    return this.#transaction(() => {
+      const updated = this.#database.prepare(`
+        UPDATE ilink_accounts
+        SET runtime_enabled = ?, updated_at = ?
+        WHERE account_key = ? AND status = 'active'
+      `).run(enabled ? 1 : 0, this.#now(now), accountKey);
+      if (updated.changes !== 1) {
+        const account = this.#accountRow(accountKey);
+        if (!account) fail('account_not_found', 'Unknown iLink account');
+        fail('account_not_active', 'iLink account is not active');
+      }
+      return mapAccount(this.#accountRow(accountKey)!);
+    });
+  }
+
+  selectRuntimeAccount(
+    accountKey: IlinkAccountKey,
+    now = this.#now(),
+  ): IlinkAccountRecord {
+    assertIlinkAccountKey(accountKey);
+    return this.#transaction(() => {
+      const account = this.#accountRow(accountKey);
+      if (!account) fail('account_not_found', 'Unknown iLink account');
+      if (account.status !== 'active') {
+        fail('account_not_active', 'iLink account is not active');
+      }
+      const timestamp = this.#now(now);
+      this.#database.prepare(`
+        UPDATE ilink_accounts
+        SET runtime_enabled = CASE WHEN account_key = ? THEN 1 ELSE 0 END,
+            updated_at = CASE
+              WHEN runtime_enabled <> CASE WHEN account_key = ? THEN 1 ELSE 0 END
+              THEN ? ELSE updated_at END
+        WHERE status = 'active'
+      `).run(accountKey, accountKey, timestamp);
+      return mapAccount(this.#accountRow(accountKey)!);
+    });
+  }
+
+  deleteAccountCompletely(
+    accountKey: IlinkAccountKey,
+    now = this.#now(),
+  ): IlinkAccountRecord {
+    assertIlinkAccountKey(accountKey);
+    return this.#transaction(() => {
+      const account = this.#accountRow(accountKey);
+      if (!account) fail('account_not_found', 'Unknown iLink account');
+      const deletedAccount = mapAccount(account);
+      const timestamp = this.#now(now);
+      this.#cancelOpenWindows(accountKey, timestamp, 'account_deleted');
+      this.#database.prepare(`
+        UPDATE ilink_login_offers
+        SET candidate_account_keys_json = (
+          SELECT COALESCE(json_group_array(value), '[]')
+          FROM json_each(candidate_account_keys_json)
+          WHERE value <> ?
+        ), updated_at = ?
+        WHERE EXISTS (
+          SELECT 1 FROM json_each(candidate_account_keys_json) WHERE value = ?
+        )
+      `).run(accountKey, timestamp, accountKey);
+      this.#database.prepare(`
+        DELETE FROM ilink_enrollment_audit WHERE account_key = ?
+      `).run(accountKey);
+      this.#database.prepare(`
+        DELETE FROM delivery_failures
+        WHERE matched_attempt_key IN (
+          SELECT attempt_key FROM send_attempts
+          WHERE channel = 'weixin_ilink' AND open_kfid = ?
+        )
+      `).run(accountKey);
+      this.#database.prepare(`
+        DELETE FROM agent_sessions
+        WHERE channel = 'weixin_ilink' AND open_kfid = ?
+      `).run(accountKey);
+      this.#database.prepare(`
+        DELETE FROM send_attempts
+        WHERE channel = 'weixin_ilink' AND open_kfid = ?
+      `).run(accountKey);
+      this.#database.prepare(`
+        DELETE FROM ilink_reply_windows WHERE account_key = ?
+      `).run(accountKey);
+      this.#database.prepare(`
+        DELETE FROM inbound_messages
+        WHERE channel = 'weixin_ilink' AND open_kfid = ?
+      `).run(accountKey);
+      this.#database.prepare(`
+        DELETE FROM conversations
+        WHERE channel = 'weixin_ilink' AND open_kfid = ?
+      `).run(accountKey);
+      const deleted = this.#database.prepare(`
+        DELETE FROM ilink_accounts WHERE account_key = ?
+      `).run(accountKey);
+      if (deleted.changes !== 1) {
+        fail('attempt_conflict', 'iLink account changed during deletion');
+      }
+      return {
+        ...deletedAccount,
+        status: 'revoked',
+        runtimeEnabled: false,
+        pauseUntil: 0,
+        updatedAt: timestamp,
+      };
+    });
   }
 
   getCursor(accountKey: IlinkAccountKey): IlinkCursorRecord | undefined {

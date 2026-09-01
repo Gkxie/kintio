@@ -15,7 +15,7 @@ import type {
   NormalizedMessage,
 } from '../types.ts';
 
-const SCHEMA_VERSION = 23;
+const SCHEMA_VERSION = 24;
 const INBOUND_STATUSES = [
   'received',
   'processing',
@@ -615,10 +615,10 @@ export class SqliteStore {
       version !== 0 && version !== 11 && version !== 12 &&
       version !== 13 && version !== 14 && version !== 15 &&
       version !== 16 && version !== 17 && version !== 18 && version !== 19 &&
-      version !== 20 && version !== 21 && version !== 22
+      version !== 20 && version !== 21 && version !== 22 && version !== 23
     ) {
       throw new Error(
-        `SQLite schema version ${version} is no longer supported; migrate to version 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, or 22 first`,
+        `SQLite schema version ${version} is no longer supported; migrate to version 11 through 23 first`,
       );
     }
 
@@ -1776,6 +1776,34 @@ export class SqliteStore {
         this.#database.exec('ROLLBACK');
         throw error;
       }
+      version = 23;
+    }
+
+    if (version === 23) {
+      this.#database.exec('BEGIN IMMEDIATE');
+      try {
+        const accountColumns = this.#database.prepare(
+          'PRAGMA table_info(ilink_accounts)',
+        ).all() as unknown as Array<{ name: string }>;
+        if (!accountColumns.some(({ name }) => name === 'runtime_enabled')) {
+          this.#database.exec(`
+            ALTER TABLE ilink_accounts ADD COLUMN runtime_enabled INTEGER NOT NULL
+              DEFAULT 0 CHECK (runtime_enabled IN (0, 1));
+          `);
+        }
+        this.#database.exec(`
+          UPDATE ilink_accounts
+          SET runtime_enabled = 1
+          WHERE status = 'active' AND (
+            SELECT COUNT(*) FROM ilink_accounts WHERE status = 'active'
+          ) = 1;
+          PRAGMA user_version = 24;
+          COMMIT;
+        `);
+      } catch (error) {
+        this.#database.exec('ROLLBACK');
+        throw error;
+      }
       return;
     }
 
@@ -1820,6 +1848,8 @@ export class SqliteStore {
             CHECK (status IN ('active', 'paused', 'disabled', 'revoked')),
           agent_access TEXT NOT NULL DEFAULT 'restricted'
             CHECK (agent_access IN ('restricted', 'host')),
+          runtime_enabled INTEGER NOT NULL DEFAULT 0
+            CHECK (runtime_enabled IN (0, 1)),
           pause_until INTEGER NOT NULL DEFAULT 0,
           cursor TEXT NOT NULL DEFAULT '',
           cursor_updated_at INTEGER NOT NULL DEFAULT 0,

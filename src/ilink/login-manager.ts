@@ -6,6 +6,7 @@ import {
   type IlinkLoginStatus,
 } from './login-store.ts';
 import {
+  DEFAULT_ILINK_BASE_URL,
   IlinkClient,
   IlinkProtocolError,
   normalizeIlinkBaseUrl,
@@ -25,7 +26,10 @@ const MAX_EXPIRY_TIMER_MS = 10 * 60 * 1_000;
 interface LoginClient {
   createQr(request?: {
     readonly local_token_list?: readonly string[];
-  }): Promise<{ qrcode: string; qrcode_img_content: string }>;
+  }, options?: { readonly signal?: AbortSignal }): Promise<{
+    qrcode: string;
+    qrcode_img_content: string;
+  }>;
   getQrStatus(
     request: { qrcode: string },
     options: { signal: AbortSignal; baseUrl: string },
@@ -63,6 +67,7 @@ export class IlinkLoginManager {
   readonly #client: LoginClient;
   readonly #logger: Logger;
   readonly #maxAccounts: number;
+  readonly #baseUrl: string;
   readonly #clock: () => number;
   readonly #onAccountsChanged: () => void | Promise<void>;
   readonly #sleep: IlinkLoginSleep;
@@ -74,6 +79,7 @@ export class IlinkLoginManager {
     accounts,
     secretBox,
     client = new IlinkClient(),
+    baseUrl = DEFAULT_ILINK_BASE_URL,
     maxAccounts = 20,
     clock = Date.now,
     onAccountsChanged = () => undefined,
@@ -84,6 +90,7 @@ export class IlinkLoginManager {
     accounts: IlinkSqliteStore;
     secretBox: IlinkSecretBox;
     client?: LoginClient;
+    baseUrl?: string;
     maxAccounts?: number;
     clock?: () => number;
     onAccountsChanged?: () => void | Promise<void>;
@@ -94,6 +101,7 @@ export class IlinkLoginManager {
     this.#accounts = accounts;
     this.#secrets = secretBox;
     this.#client = client;
+    this.#baseUrl = normalizeIlinkBaseUrl(baseUrl);
     this.#maxAccounts = maxAccounts;
     this.#clock = clock;
     this.#onAccountsChanged = onAccountsChanged;
@@ -111,7 +119,10 @@ export class IlinkLoginManager {
     }
   }
 
-  async offer(source: IlinkLoginSource): Promise<{
+  async offer(
+    source: IlinkLoginSource,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<{
     offerId: string;
     qrContent: string;
     expiresAt: number;
@@ -137,7 +148,11 @@ export class IlinkLoginManager {
         peerId: account.ownerPeerId,
         generation: secret.accountGeneration,
       }));
-    const created = await this.#client.createQr({ local_token_list: localTokens });
+    const created = await this.#client.createQr(
+      { local_token_list: localTokens },
+      options.signal ? { signal: options.signal } : {},
+    );
+    if (options.signal?.aborted) throw options.signal.reason;
     assertIlinkQrContent(created.qrcode_img_content);
     if (
       source.kind !== 'terminal' &&
@@ -149,7 +164,7 @@ export class IlinkLoginManager {
     const offer = this.#offers.create({
       source,
       qrCode: created.qrcode,
-      apiBaseUrl: normalizeIlinkBaseUrl('https://ilinkai.weixin.qq.com/'),
+      apiBaseUrl: this.#baseUrl,
       candidateAccountKeys: source.kind === 'terminal'
         ? localAccounts.map(({ account }) => account.accountKey)
         : [],

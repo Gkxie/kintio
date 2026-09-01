@@ -135,6 +135,7 @@ async function fixture(t: TestContext) {
       now: now + 1,
     });
   }
+  ilink.setRuntimeEnabled(accounts[0]!.accountKey, true, now + 2);
   persistence.close();
   return { temp, config, accounts };
 }
@@ -335,8 +336,31 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   })));
   assert.deepEqual(
     (await operator.listTools()).tools.map((tool) => tool.name),
-    ['begin_login', 'login_status', 'cancel_login'],
+    [
+      'begin_login',
+      'login_status',
+      'cancel_login',
+      'list_accounts',
+      'start_account',
+      'stop_account',
+      'delete_account',
+    ],
   );
+  assert.deepEqual(
+    (await operator.callTool({ name: 'list_accounts', arguments: {} })).structuredContent,
+    {
+      accounts: accounts.map((value, index) => ({
+        accountKey: value.accountKey,
+        providerAccountId: value.providerAccountId,
+        runtimeEnabled: index === 0,
+      })),
+    },
+  );
+  const secondStarted = await operator.callTool({
+    name: 'start_account',
+    arguments: { accountKey: accounts[1]!.accountKey },
+  });
+  assert.equal((secondStarted.structuredContent as { runningCount: number }).runningCount, 2);
   await bounded('operator MCP close', operator.close());
   await bounded('second long poll', until(() => submissions.length === 2 &&
     accounts.every((value) => (pollCount.get(value.botToken) || 0) >= 2)));
@@ -478,6 +502,31 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   assert.ok(storedAttempts.every(
     (row) => row.status === 'accepted' && row.channel === 'weixin_ilink',
   ));
+
+  const lifecycle = new Client({ name: 'active-ilink-lifecycle-test', version: '1.0.0' });
+  await bounded('lifecycle MCP connect', lifecycle.connect(new StdioClientTransport({
+    command: operatorLaunch.command,
+    args: operatorLaunch.args,
+    stderr: 'pipe',
+  })));
+  const firstStopped = await lifecycle.callTool({
+    name: 'stop_account',
+    arguments: { accountKey: accounts[0]!.accountKey },
+  });
+  assert.equal((firstStopped.structuredContent as { runningCount: number }).runningCount, 1);
+  const secondDeleted = await lifecycle.callTool({
+    name: 'delete_account',
+    arguments: { accountKey: accounts[1]!.accountKey },
+  });
+  assert.equal((secondDeleted.structuredContent as { runningCount: number }).runningCount, 0);
+  await bounded('lifecycle MCP close', lifecycle.close());
+  assert.equal(Number((reader.prepare(`
+    SELECT COUNT(*) AS count FROM ilink_accounts WHERE account_key = ?
+  `).get(accounts[1]!.accountKey) as { count: number }).count), 0);
+  assert.equal(Number((reader.prepare(`
+    SELECT COUNT(*) AS count FROM inbound_messages
+    WHERE channel = 'weixin_ilink' AND open_kfid = ?
+  `).get(accounts[1]!.accountKey) as { count: number }).count), 0);
 
   closeReader();
   runtime.stopAccepting();

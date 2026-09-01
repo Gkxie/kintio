@@ -139,6 +139,24 @@ export interface AppConfig {
   readonly codex: CodexConfig;
 }
 
+export interface IlinkEnrollmentConfig {
+  readonly home: string;
+  readonly state: {
+    readonly databaseFile: string;
+    readonly lockFile: string;
+  };
+  readonly ilink: Omit<AppConfig['ilink'], 'enabled'>;
+}
+
+export type IlinkRuntimeConfig = Pick<AppConfig, 'state' | 'ilink' | 'codex'>;
+
+interface ConfigLoadOptions {
+  readonly envFile?: string;
+  readonly environment?: NodeJS.ProcessEnv;
+  readonly homeDirectory?: string;
+  readonly root?: string;
+}
+
 function loadEnvironmentFile(
   filePath: string,
   environment: NodeJS.ProcessEnv,
@@ -232,6 +250,63 @@ function parseBoundedText(
   return parsed;
 }
 
+function createIlinkEnrollmentConfig(
+  environment: NodeJS.ProcessEnv = process.env,
+  root?: string,
+  platform: NodeJS.Platform = process.platform,
+): IlinkEnrollmentConfig {
+  environment = copyEnvironment(environment);
+  const home = path.resolve(root || resolveInstanceRoot(environment));
+  const storageKey = String(environment.ILINK_STORAGE_KEY || '').trim();
+  if (storageKey && !/^[A-Za-z0-9_-]{43}$/u.test(storageKey)) {
+    throw new Error('ILINK_STORAGE_KEY must be a canonical 32-byte base64url value');
+  }
+  const state = resolveStateFiles(environment, home);
+  const storageKeyFile = path.resolve(
+    home,
+    environment.ILINK_STORAGE_KEY_FILE ||
+      path.join(path.dirname(state.databaseFile), 'ilink-storage.key'),
+  );
+  if (platform === 'win32') {
+    for (const [name, filePath] of [
+      ['KINTIO_DB_FILE', state.databaseFile],
+      ['Kintio state lock', state.lockFile],
+      ['ILINK_STORAGE_KEY_FILE', storageKeyFile],
+    ] as const) {
+      if (!isPathInside(home, filePath)) {
+        throw new Error(`${name} must stay inside KINTIO_HOME on Windows`);
+      }
+    }
+  }
+  return Object.freeze({
+    home,
+    state,
+    ilink: Object.freeze({
+      storageKey,
+      storageKeyFile,
+      baseUrl: environment.ILINK_BASE_URL || 'https://ilinkai.weixin.qq.com/',
+      apiTimeoutMs: parsePositiveInteger(
+        environment.ILINK_API_TIMEOUT_MS,
+        15_000,
+        'ILINK_API_TIMEOUT_MS',
+        120_000,
+      ),
+      longPollTimeoutMs: parsePositiveInteger(
+        environment.ILINK_LONG_POLL_TIMEOUT_MS,
+        35_000,
+        'ILINK_LONG_POLL_TIMEOUT_MS',
+        120_000,
+      ),
+      maxAccounts: parsePositiveInteger(
+        environment.ILINK_MAX_ACCOUNTS,
+        20,
+        'ILINK_MAX_ACCOUNTS',
+        1_000,
+      ),
+    }),
+  });
+}
+
 export function createConfig(
   environment: NodeJS.ProcessEnv = process.env,
   root?: string,
@@ -273,20 +348,12 @@ export function createConfig(
     environment.CODEX_ENABLED,
     apiEnabled || ilinkEnabled,
   );
-  const ilinkStorageKey = String(environment.ILINK_STORAGE_KEY || '').trim();
-  if (ilinkStorageKey && !/^[A-Za-z0-9_-]{43}$/u.test(ilinkStorageKey)) {
-    throw new Error('ILINK_STORAGE_KEY must be a canonical 32-byte base64url value');
-  }
-  const { databaseFile, lockFile } = resolveStateFiles(environment, instanceRoot);
+  const enrollment = createIlinkEnrollmentConfig(environment, instanceRoot, platform);
+  const { databaseFile, lockFile } = enrollment.state;
   const codexWorkingDirectory = path.resolve(
     instanceRoot,
     environment.CODEX_WORKING_DIRECTORY ||
       'codex-workspace',
-  );
-  const ilinkStorageKeyFile = path.resolve(
-    instanceRoot,
-    environment.ILINK_STORAGE_KEY_FILE ||
-      path.join(path.dirname(databaseFile), 'ilink-storage.key'),
   );
   const codexImageTempDirectory = path.resolve(
     instanceRoot,
@@ -295,9 +362,6 @@ export function createConfig(
   );
   if (platform === 'win32') {
     for (const [name, filePath] of [
-      ['KINTIO_DB_FILE', databaseFile],
-      ['Kintio state lock', lockFile],
-      ['ILINK_STORAGE_KEY_FILE', ilinkStorageKeyFile],
       ['CODEX_IMAGE_TMP_DIR', codexImageTempDirectory],
     ] as const) {
       if (!isPathInside(instanceRoot, filePath)) {
@@ -363,27 +427,7 @@ export function createConfig(
     }),
     ilink: Object.freeze({
       enabled: ilinkEnabled,
-      storageKey: ilinkStorageKey,
-      storageKeyFile: ilinkStorageKeyFile,
-      baseUrl: environment.ILINK_BASE_URL || 'https://ilinkai.weixin.qq.com/',
-      apiTimeoutMs: parsePositiveInteger(
-        environment.ILINK_API_TIMEOUT_MS,
-        15_000,
-        'ILINK_API_TIMEOUT_MS',
-        120_000,
-      ),
-      longPollTimeoutMs: parsePositiveInteger(
-        environment.ILINK_LONG_POLL_TIMEOUT_MS,
-        35_000,
-        'ILINK_LONG_POLL_TIMEOUT_MS',
-        120_000,
-      ),
-      maxAccounts: parsePositiveInteger(
-        environment.ILINK_MAX_ACCOUNTS,
-        20,
-        'ILINK_MAX_ACCOUNTS',
-        1_000,
-      ),
+      ...enrollment.ilink,
     }),
     state: Object.freeze({
       databaseFile,
@@ -400,13 +444,13 @@ export function createConfig(
 }
 
 export function loadConfig(
-  options: {
-    envFile?: string;
-    environment?: NodeJS.ProcessEnv;
-    homeDirectory?: string;
-    root?: string;
-  } = {},
+  options: ConfigLoadOptions = {},
 ): AppConfig {
+  const loaded = loadConfigurationEnvironment(options);
+  return createConfig(loaded.environment, loaded.root);
+}
+
+function loadConfigurationEnvironment(options: ConfigLoadOptions) {
   const environment = copyEnvironment(options.environment || process.env);
   const configuredEnvFile = options.envFile || environment.KINTIO_CONFIG_FILE;
   const defaultRoot = path.join(
@@ -425,5 +469,52 @@ export function loadConfig(
   );
   loadEnvironmentFile(envFile, environment);
   const root = path.resolve(options.root || environment.KINTIO_HOME || initialRoot);
-  return createConfig(environment, root);
+  return { environment, root };
+}
+
+export function loadIlinkEnrollmentConfig(
+  options: ConfigLoadOptions = {},
+): IlinkEnrollmentConfig {
+  const loaded = loadConfigurationEnvironment(options);
+  return createIlinkEnrollmentConfig(loaded.environment, loaded.root);
+}
+
+export function loadIlinkRuntimeConfig(
+  options: ConfigLoadOptions = {},
+): IlinkRuntimeConfig {
+  const { environment, root } = loadConfigurationEnvironment(options);
+  const enrollment = createIlinkEnrollmentConfig(environment, root);
+  const workingDirectory = path.resolve(
+    root,
+    environment.CODEX_WORKING_DIRECTORY || 'codex-workspace',
+  );
+  const imageTempDirectory = path.resolve(
+    root,
+    environment.CODEX_IMAGE_TMP_DIR || 'data/codex-input',
+  );
+  if (process.platform === 'win32' && !isPathInside(root, imageTempDirectory)) {
+    throw new Error('CODEX_IMAGE_TMP_DIR must stay inside KINTIO_HOME on Windows');
+  }
+  const shutdownTimeoutMs = parsePositiveInteger(
+    environment.SHUTDOWN_TIMEOUT_MS,
+    10_000,
+    'SHUTDOWN_TIMEOUT_MS',
+    MAX_SHUTDOWN_TIMEOUT_MS,
+  );
+  if (shutdownTimeoutMs < 1_000) {
+    throw new Error('SHUTDOWN_TIMEOUT_MS must be at least 1000');
+  }
+  return Object.freeze({
+    state: Object.freeze({
+      ...enrollment.state,
+      shutdownTimeoutMs,
+    }),
+    ilink: Object.freeze({ enabled: true, ...enrollment.ilink }),
+    codex: Object.freeze({
+      enabled: true,
+      imageTempDirectory,
+      workingDirectory,
+      generatedImageDirectory: path.join(workingDirectory, 'generated_images'),
+    }),
+  });
 }

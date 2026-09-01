@@ -86,7 +86,7 @@ function replayedWechatMessage(): NormalizedMessage {
   };
 }
 
-test('a frozen real v21 database migrates to v23 without rewriting durable identity', (t) => {
+test('a frozen real v21 database migrates to v24 without rewriting durable identity', (t) => {
   const filePath = createV21Database(t, 'kintio-real-v21');
   const before = new DatabaseSync(filePath, { readOnly: true });
   assert.equal(pragmaNumber(before, 'user_version'), 21);
@@ -117,7 +117,7 @@ test('a frozen real v21 database migrates to v23 without rewriting durable ident
   const migrated = new DatabaseSync(filePath, { readOnly: true });
   t.onTestFinished(() => migrated.close());
 
-  assert.equal(pragmaNumber(migrated, 'user_version'), 23);
+  assert.equal(pragmaNumber(migrated, 'user_version'), 24);
   assert.deepEqual(
     migrated.prepare('PRAGMA integrity_check').all().map(Object.values),
     [['ok']],
