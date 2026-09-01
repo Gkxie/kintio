@@ -54,7 +54,8 @@ kintio ilink start
 ```
 
 `ilink login` 完成一次扫码、加密保存凭据后退出，不会自行启动监听；`ilink start` 不启动 Hono 或 TCP 端口，
-只以前台方式运行 iLink 长轮询和宿主 Agent。两者默认使用 `~/.kintio`。
+而是通过后台守护进程运行 iLink 长轮询和宿主 Agent。由外部进程管理器托管时可显式使用
+`--foreground`。两者默认使用 `~/.kintio`。
 存在多个账号时，先用 `kintio ilink list` 查看账号，再通过 `--account` 指定
 `start`、`stop` 或 `delete` 的目标；正在运行时可继续执行 `start` 增加监听账号。
 

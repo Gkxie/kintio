@@ -4,6 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import { pathToFileURL } from 'node:url';
 import { test, vi } from 'vitest';
 
 import {
@@ -94,6 +95,7 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   });
   assert.notEqual(second.workerPid, first.workerPid);
   assert.equal(daemonRecord?.configFile, configFile);
+  assert.equal(daemonRecord?.mode, 'service');
   assert.equal(daemonRecord?.packageRoot, packageRoot);
   assert.equal(
     await fs.readFile(path.join(home, 'data/daemon.json'), 'utf8'),
@@ -119,6 +121,85 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
     /daemon started[\s\S]+fake worker ready[\s\S]+worker exited[\s\S]+daemon stopped/u,
   );
   assert.equal((await fs.stat(path.join(logDirectory, 'kintio.log.1'))).size, 10 * 1024 * 1024);
+});
+
+test('iLink daemon launches its worker and honors a last-account shutdown request', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-ilink-daemon-'));
+  const home = path.join(root, 'instance');
+  const packageRoot = path.join(root, 'package');
+  const configFile = path.join(home, '.env');
+  const workerFile = path.join(packageRoot, 'dist/ilink.js');
+  await fs.mkdir(path.dirname(workerFile), { recursive: true });
+  await fs.mkdir(home, { recursive: true });
+  await fs.writeFile(configFile, '');
+  await fs.writeFile(workerFile, [
+    "if (process.env.KINTIO_MANAGED_WORKER !== '1') process.exit(3);",
+    "process.send?.({ type: 'ready', pid: process.pid });",
+    "setTimeout(() => process.send?.({ type: 'shutdown-request', pid: process.pid }), 100);",
+    "process.on('message', (message) => { if (message === 'shutdown') process.exit(0); });",
+    "process.on('disconnect', () => process.exit(0));",
+  ].join('\n'));
+  const daemon = runNativeDaemon({
+    home,
+    configFile,
+    packageRoot,
+    mode: 'ilink',
+    environment: {},
+  });
+  t.onTestFinished(async () => {
+    await requestControl(home, 'stop').catch(() => undefined);
+    await daemon.catch(() => undefined);
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const running = await until(async () => {
+    const response = await requestControl(home, 'ping').catch(() => undefined);
+    return response?.phase === 'running' ? response : undefined;
+  });
+  assert.ok(running.workerPid);
+  assert.equal(readDaemonRecord(home)?.mode, 'ilink');
+  await daemon;
+  await assert.rejects(fs.access(daemonRecordPath(home)), { code: 'ENOENT' });
+  const log = await fs.readFile(path.join(home, 'data/logs/kintio.log'), 'utf8');
+  assert.match(log, /daemon started[\s\S]+daemon stopped/u);
+  assert.doesNotMatch(log, /worker exited|backoff|restart limit/u);
+});
+
+test('real iLink worker publishes readiness and drains after daemon shutdown', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-real-ilink-daemon-'));
+  const home = path.join(root, 'instance');
+  const packageRoot = path.join(root, 'package');
+  const workerFile = path.join(packageRoot, 'dist/ilink.js');
+  await fs.mkdir(path.dirname(workerFile), { recursive: true });
+  await fs.writeFile(
+    workerFile,
+    `await import(${JSON.stringify(pathToFileURL(path.resolve('ilink.ts')).href)});\n`,
+  );
+  const daemon = runNativeDaemon({
+    home,
+    configFile: path.join(home, '.env'),
+    packageRoot,
+    mode: 'ilink',
+    environment: {},
+  });
+  t.onTestFinished(async () => {
+    await requestControl(home, 'stop').catch(() => undefined);
+    await daemon.catch(() => undefined);
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const running = await until(async () => {
+    const response = await requestControl(home, 'ping').catch(() => undefined);
+    return response?.phase === 'running' ? response : undefined;
+  });
+  assert.ok(running.workerPid);
+  assert.equal((await requestControl(home, 'stop')).ok, true);
+  await daemon;
+  await assert.rejects(fs.access(daemonRecordPath(home)), { code: 'ENOENT' });
+  assert.match(
+    await fs.readFile(path.join(home, 'data/logs/kintio.log'), 'utf8'),
+    /Kintio iLink runtime is active[\s\S]+daemon stopped/u,
+  );
 });
 
 test('restart exhaustion remains observable until an explicit stop', async (t) => {

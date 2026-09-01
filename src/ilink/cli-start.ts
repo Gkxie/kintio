@@ -10,10 +10,12 @@ import {
 import type { Logger } from '../types.ts';
 
 export interface IlinkCliStartOptions {
+  readonly background?: boolean;
   readonly config: IlinkRuntimeConfig;
   readonly signal: AbortSignal;
   readonly stdout: (text: string) => void;
   readonly logger?: Logger;
+  readonly onStarted?: () => void | Promise<void>;
   readonly create?: (options: {
     readonly config: RuntimeConfig;
     readonly logger?: Logger;
@@ -66,7 +68,12 @@ export async function startIlinkCliRuntime(options: IlinkCliStartOptions): Promi
   });
   try {
     await runtime.start();
-    options.stdout('Kintio iLink runtime is active. Press Ctrl-C to stop.\n');
+    await options.onStarted?.();
+    options.stdout(
+      options.background
+        ? 'Kintio iLink runtime is active.\n'
+        : 'Kintio iLink runtime is active. Press Ctrl-C to stop.\n',
+    );
     const reason = await Promise.race([
       waitForAbort(options.signal).then(() => 'signal' as const),
       stopRequested.then(() => 'account-stop' as const),

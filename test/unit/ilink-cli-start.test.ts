@@ -40,6 +40,31 @@ test('iLink start runs and drains a foreground runtime without Hono', async () =
   assert.match(output.join(''), /iLink runtime is active/u);
 });
 
+test('background worker publishes readiness without terminal instructions', async () => {
+  const controller = new AbortController();
+  const output: string[] = [];
+  let started = false;
+  const running = startIlinkCliRuntime({
+    background: true,
+    config: config(),
+    signal: controller.signal,
+    stdout: (text) => output.push(text),
+    onStarted() { started = true; },
+    create: async () => ({
+      messageProcessor: null,
+      async start() {},
+      stopAccepting() {},
+      async close() {},
+      async abort() {},
+    }),
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(started, true);
+  controller.abort();
+  assert.equal(await running, 130);
+  assert.equal(output.join(''), 'Kintio iLink runtime is active.\n');
+});
+
 test('stopping the last account closes a foreground iLink runtime successfully', async () => {
   const events: string[] = [];
   let requestStop: (() => void) | undefined;

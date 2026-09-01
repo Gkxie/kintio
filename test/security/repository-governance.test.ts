@@ -63,7 +63,7 @@ test('English is canonical and Chinese is limited to the entry README', async ()
 });
 
 test('package, release version, and public entry points stay aligned', async () => {
-  const [packageSource, runtimeVersion, license, cla, gitignore, logo, avatar] =
+  const [packageSource, runtimeVersion, license, cla, gitignore, logo, avatar, bin] =
     await Promise.all([
       read('package.json'),
       read('src/version.ts'),
@@ -72,6 +72,7 @@ test('package, release version, and public entry points stay aligned', async () 
       read('.gitignore'),
       read('assets/logo.svg'),
       read('assets/avatar.svg'),
+      read('bin/kintio.js'),
     ]);
   const packageJson = JSON.parse(packageSource) as {
     name?: string;
@@ -80,6 +81,7 @@ test('package, release version, and public entry points stay aligned', async () 
     author?: string;
     license?: string;
     bin?: Record<string, string>;
+    engines?: Record<string, string>;
     files?: string[];
     scripts?: Record<string, string>;
     repository?: { url?: string };
@@ -95,6 +97,10 @@ test('package, release version, and public entry points stay aligned', async () 
   });
   assert.equal(packageJson.license, 'Apache-2.0');
   assert.equal(packageJson.bin?.kintio, 'bin/kintio.js');
+  assert.equal(packageJson.engines?.node, '>=24');
+  assert.match(bin, /nodeMajor < 24/u);
+  assert.match(bin, /requires Node\.js 24 or newer/u);
+  assert.ok(bin.indexOf('nodeMajor < 24') < bin.indexOf("import('../dist/cli.js')"));
   assert.equal(packageJson.scripts?.prepack, 'pnpm run build');
   assert.equal(packageJson.repository?.url, 'git+https://github.com/Gkxie/kintio.git');
   assert.equal(

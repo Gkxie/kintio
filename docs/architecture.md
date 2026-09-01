@@ -33,7 +33,7 @@ is not part of the readiness gate.
 Kintio CLI
 ├── ilink login → running owner IPC or temporary Enrollment Service
 ├── ilink list/start/stop/delete → running owner IPC or temporary account control
-├── ilink start → channel-neutral foreground Runtime without Hono
+├── ilink start → Native daemon → channel-neutral Runtime without Hono
 └── start       → Native daemon → Worker → KintioSupervisor
 ```
 
@@ -53,7 +53,8 @@ Kintio process
 
 The Supervisor is the callback deployment's process-level composition root;
 `createRuntime()` is the channel-neutral application composition root and can
-also run directly through `kintio ilink start`. WeChat synchronization is an
+also run without Hono through the iLink daemon or `kintio ilink start --foreground`.
+WeChat synchronization is an
 optional Runtime input rather than an iLink prerequisite. Removing that adapter
 in the future should remove its optional Runtime branch without changing the
 iLink enrollment, polling, Agent configuration, or persistence contracts.
