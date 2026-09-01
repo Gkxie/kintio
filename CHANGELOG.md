@@ -4,6 +4,8 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.7.0
+
 - Added `kintio ilink login`, which reuses the iLink enrollment state machine
   while rendering its five-minute QR code directly in an interactive terminal;
   no WeChat KF conversation or Agent turn is required. Accounts
