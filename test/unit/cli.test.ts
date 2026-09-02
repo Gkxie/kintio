@@ -8,6 +8,8 @@ import { test } from 'vitest';
 import crossSpawn from 'cross-spawn';
 
 import { runCli } from '../../src/cli.ts';
+import { IlinkPromptInterruptedError } from '../../src/ilink/account-picker.ts';
+import type { IlinkOperatorAccount } from '../../src/ilink/cli-login.ts';
 import { runNativeDaemon } from '../../src/runtime/native-daemon.ts';
 import {
   readDaemonRecord,
@@ -71,6 +73,19 @@ async function updatePackage(
     fs.writeFile(path.join(packageRoot, 'bin/kintio.js'), '#!/usr/bin/env node\n'),
   ]);
   return { packageRoot, prefix };
+}
+
+function operatorAccount(
+  id = 'bot-a@im.bot',
+  fill = 'a',
+): IlinkOperatorAccount {
+  return {
+    accountKey: `ia_${fill.repeat(40)}`,
+    generation: 1,
+    incarnation: `ii_${fill.repeat(64)}`,
+    providerAccountId: id,
+    runtimeEnabled: false,
+  };
 }
 
 test('global CLI exposes stable help, version, and argument failures', async (t) => {
@@ -414,7 +429,9 @@ test('iLink login and start need no setup, config file, or Hono lifecycle', asyn
   let loginCalls = 0;
   let accountCalls = 0;
   let startCalls = 0;
+  const account = operatorAccount();
   const runtime = cliRuntime(root, {
+    stdinIsTTY: true,
     stdoutIsTTY: true,
     ilinkLogin: async ({ config }) => {
       loginCalls += 1;
@@ -431,6 +448,7 @@ test('iLink login and start need no setup, config file, or Hono lifecycle', asyn
         selectedAccountKey: `ia_${'a'.repeat(40)}`,
       };
     },
+    ilinkSnapshot: async () => ({ accounts: [account], mode: 'standalone' }),
     ilinkStart: async ({ config }) => {
       startCalls += 1;
       assert.equal('wecom' in config, false);
@@ -462,15 +480,59 @@ test('iLink login and start need no setup, config file, or Hono lifecycle', asyn
   assert.match(runtime.stderr.join(''), /valid only for "kintio ilink login"/u);
 });
 
+test('automatic iLink login stops on failure and preserves a successful enrollment', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'automatic-login');
+  let mutations = 0;
+  let launched = false;
+  const failed = cliRuntime(root, {
+    stdinIsTTY: true,
+    stdoutIsTTY: true,
+    ilinkSnapshot: async () => ({ accounts: [], mode: 'standalone' }),
+    ilinkLogin: async () => 7,
+    ilinkAccount: async () => {
+      mutations += 1;
+      return { runtimeRequired: false, runningCount: 0 };
+    },
+    launchDaemon: () => {
+      launched = true;
+      return exitedDaemon();
+    },
+  });
+  assert.equal(await runCli(['ilink', 'start', '--home', home], failed.overrides), 7);
+  assert.equal(mutations, 0);
+  assert.equal(launched, false);
+
+  const enrolled = operatorAccount();
+  let snapshots = 0;
+  const startFailed = cliRuntime(root, {
+    stdinIsTTY: true,
+    stdoutIsTTY: true,
+    ilinkSnapshot: async () => ({
+      accounts: snapshots++ === 0 ? [] : [enrolled],
+      mode: 'standalone',
+    }),
+    ilinkLogin: async () => 0,
+    ilinkAccount: async () => { throw new Error('simulated account start failure'); },
+  });
+  assert.equal(await runCli([
+    'ilink', 'start', '--home', path.join(root, 'enrolled'),
+  ], startFailed.overrides), 1);
+  assert.match(startFailed.stderr.join(''), /simulated account start failure/u);
+  assert.match(startFailed.stderr.join(''), /login succeeded, retry/u);
+});
+
 test('CLI routes iLink account lifecycle selectors and destructive confirmation', async (t) => {
   const root = await temporaryRoot(t);
   const calls: Array<Record<string, unknown>> = [];
   let foregroundStarts = 0;
+  const account = operatorAccount();
   const runtime = cliRuntime(root, {
+    ilinkSnapshot: async () => ({ accounts: [account], mode: 'standalone' }),
     ilinkAccount: async (options) => {
       calls.push({
         command: options.command,
-        selector: options.selector,
+        account: options.expectedAccount?.providerAccountId,
         confirmed: options.confirmed,
       });
       return {
@@ -499,10 +561,10 @@ test('CLI routes iLink account lifecycle selectors and destructive confirmation'
     'ilink', 'delete', '--home', home, '--account', 'bot-a@im.bot', '--yes',
   ], runtime.overrides), 0);
   assert.deepEqual(calls, [
-    { command: 'list', selector: undefined, confirmed: false },
-    { command: 'start', selector: 'bot-a@im.bot', confirmed: false },
-    { command: 'stop', selector: `ia_${'a'.repeat(40)}`, confirmed: false },
-    { command: 'delete', selector: 'bot-a@im.bot', confirmed: true },
+    { command: 'list', account: undefined, confirmed: undefined },
+    { command: 'start', account: 'bot-a@im.bot', confirmed: false },
+    { command: 'stop', account: 'bot-a@im.bot', confirmed: false },
+    { command: 'delete', account: 'bot-a@im.bot', confirmed: true },
   ]);
   assert.equal(foregroundStarts, 1);
 
@@ -524,6 +586,148 @@ test('CLI routes iLink account lifecycle selectors and destructive confirmation'
     assert.equal(await runCli(['ilink', command, '--help'], runtime.overrides), 0);
   }
   assert.match(runtime.stdout.join(''), /cannot be undone/u);
+});
+
+test('interactive iLink lifecycle selects accounts while controls are closed', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'interactive-accounts');
+  const first = operatorAccount('bot-a@im.bot', 'a');
+  const second = operatorAccount('bot-b@im.bot', 'b');
+  let activeControls = 0;
+  let pickerCalls = 0;
+  let confirmationCalls = 0;
+  let confirm = false;
+  const mutations: Array<{ command: string; account: string; confirmed?: boolean }> = [];
+  const runtime = cliRuntime(root, {
+    stdinIsTTY: true,
+    stdoutIsTTY: true,
+    ilinkSnapshot: async () => {
+      activeControls += 1;
+      try {
+        return { accounts: [first, second], mode: 'standalone' as const };
+      } finally {
+        activeControls -= 1;
+      }
+    },
+    ilinkPickAccount: async () => {
+      assert.equal(activeControls, 0);
+      pickerCalls += 1;
+      return second;
+    },
+    ilinkConfirmDelete: async ({ account }) => {
+      assert.equal(activeControls, 0);
+      assert.equal(account.accountKey, second.accountKey);
+      confirmationCalls += 1;
+      return confirm;
+    },
+    ilinkAccount: async (options) => {
+      mutations.push({
+        command: options.command,
+        account: options.expectedAccount!.providerAccountId,
+        ...(options.confirmed === undefined ? {} : { confirmed: options.confirmed }),
+      });
+      return { runtimeRequired: false, runningCount: 1 };
+    },
+  });
+
+  assert.equal(await runCli(['ilink', 'stop', '--home', home], runtime.overrides), 0);
+  assert.deepEqual(mutations, [
+    { command: 'stop', account: 'bot-b@im.bot', confirmed: false },
+  ]);
+
+  assert.equal(await runCli(['ilink', 'delete', '--home', home], runtime.overrides), 0);
+  assert.equal(mutations.length, 1);
+  assert.match(runtime.stdout.join(''), /Cancelled; no changes made/u);
+
+  confirm = true;
+  assert.equal(await runCli(['ilink', 'delete', '--home', home], runtime.overrides), 0);
+  assert.deepEqual(mutations.at(-1), {
+    command: 'delete', account: 'bot-b@im.bot', confirmed: true,
+  });
+
+  assert.equal(await runCli([
+    'ilink', 'delete', '--home', home, '--account', first.providerAccountId, '--yes',
+  ], runtime.overrides), 0);
+  assert.deepEqual(mutations.at(-1), {
+    command: 'delete', account: 'bot-a@im.bot', confirmed: true,
+  });
+  assert.equal(pickerCalls, 3);
+  assert.equal(confirmationCalls, 2);
+
+  const nonInteractive = cliRuntime(root, {
+    ilinkSnapshot: async () => ({ accounts: [first, second], mode: 'standalone' }),
+    ilinkPickAccount: async () => { throw new Error('picker must not run'); },
+  });
+  assert.equal(await runCli([
+    'ilink', 'stop', '--home', path.join(root, 'non-interactive'),
+  ], nonInteractive.overrides), 1);
+  assert.match(nonInteractive.stderr.join(''), /Multiple iLink accounts.*--account/su);
+
+  const nonInteractiveDelete = cliRuntime(root, {
+    ilinkSnapshot: async () => ({ accounts: [first], mode: 'standalone' }),
+  });
+  assert.equal(await runCli([
+    'ilink', 'delete', '--home', path.join(root, 'non-interactive-delete'),
+  ], nonInteractiveDelete.overrides), 1);
+  assert.match(nonInteractiveDelete.stderr.join(''), /requires --account and --yes/u);
+  nonInteractiveDelete.stderr.length = 0;
+  assert.equal(await runCli([
+    'ilink', 'delete', '--home', path.join(root, 'non-interactive-delete'), '--yes',
+  ], nonInteractiveDelete.overrides), 1);
+  assert.match(nonInteractiveDelete.stderr.join(''), /requires --account and --yes/u);
+
+  const interrupted = cliRuntime(root, {
+    stdinIsTTY: true,
+    stdoutIsTTY: true,
+    ilinkSnapshot: async () => ({ accounts: [first, second], mode: 'standalone' }),
+    ilinkPickAccount: async () => { throw new IlinkPromptInterruptedError(); },
+  });
+  assert.equal(await runCli([
+    'ilink', 'stop', '--home', path.join(root, 'interrupted'),
+  ], interrupted.overrides), 130);
+
+  const previousSignals = [...process.listeners('SIGTERM')];
+  let signalMutations = 0;
+  const signalDuringConfirmation = cliRuntime(root, {
+    stdinIsTTY: true,
+    stdoutIsTTY: true,
+    ilinkSnapshot: async () => ({ accounts: [first], mode: 'standalone' }),
+    ilinkConfirmDelete: async () => {
+      const handler = process.listeners('SIGTERM').find(
+        (listener) => !previousSignals.includes(listener),
+      );
+      assert.ok(handler);
+      (handler as () => void)();
+      return true;
+    },
+    ilinkAccount: async () => {
+      signalMutations += 1;
+      return { runtimeRequired: false, runningCount: 0 };
+    },
+  });
+  assert.equal(await runCli([
+    'ilink', 'delete', '--home', path.join(root, 'signal-delete'),
+  ], signalDuringConfirmation.overrides), 143);
+  assert.equal(signalMutations, 0);
+  assert.deepEqual(process.listeners('SIGTERM'), previousSignals);
+
+  const inFlightSignals = [...process.listeners('SIGTERM')];
+  const inFlightFailure = cliRuntime(root, {
+    ilinkSnapshot: async () => ({ accounts: [first], mode: 'runtime' }),
+    ilinkAccount: async () => {
+      const handler = process.listeners('SIGTERM').find(
+        (listener) => !inFlightSignals.includes(listener),
+      );
+      assert.ok(handler);
+      (handler as () => void)();
+      throw new Error('mutation outcome is uncertain');
+    },
+  });
+  assert.equal(await runCli([
+    'ilink', 'stop', '--home', path.join(root, 'in-flight-failure'),
+  ], inFlightFailure.overrides), 1);
+  assert.match(inFlightFailure.stderr.join(''), /mutation outcome is uncertain/u);
+  assert.deepEqual(process.listeners('SIGTERM'), inFlightSignals);
 });
 
 test('standalone iLink start launches one managed background daemon before activation', async (t) => {
@@ -565,8 +769,14 @@ test('standalone iLink start launches one managed background daemon before activ
   const targetVersion = '9.8.7';
   const daemonRuns: Promise<void>[] = [];
   const accountKey = `ia_${'b'.repeat(40)}` as const;
-  const accountCalls: Array<{ command: string; defer?: boolean; selector?: string }> = [];
+  const account = operatorAccount('bot-b@im.bot', 'b');
+  const accountCalls: Array<{ command: string; defer?: boolean; account?: string }> = [];
+  let loginCalls = 0;
+  let snapshotCalls = 0;
+  let failSecondActivation = true;
   const runtime = cliRuntime(root, {
+    stdinIsTTY: true,
+    stdoutIsTTY: true,
     env: { ...process.env, KINTIO_TEST_WORKER_VERSION: workerVersionFile },
     packageRoot,
     updater: {
@@ -598,20 +808,30 @@ test('standalone iLink start launches one managed background daemon before activ
       },
       verify: verifyPreparedKintioUpdate,
     },
+    ilinkLogin: async () => { loginCalls += 1; return 0; },
+    ilinkSnapshot: async () => ({
+      accounts: snapshotCalls++ === 0 ? [] : [account],
+      mode: 'standalone',
+    }),
     ilinkAccount: async (options) => {
       accountCalls.push({
         command: options.command,
         ...(options.deferStandaloneStart === undefined
           ? {}
           : { defer: options.deferStandaloneStart }),
-        ...(options.selector ? { selector: options.selector } : {}),
+        ...(options.expectedAccount
+          ? { account: options.expectedAccount.accountKey }
+          : {}),
       });
       if (options.command === 'stop') {
+        await requestControl(home, 'stop');
         return { runtimeRequired: false, runningCount: 0 };
       }
-      return accountCalls.length === 1
-        ? { runtimeRequired: true, runningCount: 0, selectedAccountKey: accountKey }
-        : { runtimeRequired: false, runningCount: 1, selectedAccountKey: accountKey };
+      if (options.deferStandaloneStart) {
+        return { runtimeRequired: true, runningCount: 0, selectedAccountKey: accountKey };
+      }
+      if (failSecondActivation) throw new Error('simulated stale second activation');
+      return { runtimeRequired: false, runningCount: 1, selectedAccountKey: accountKey };
     },
     launchDaemon: (request) => {
       assert.equal(request.env.KINTIO_DAEMON_MODE, 'ilink');
@@ -635,11 +855,22 @@ test('standalone iLink start launches one managed background daemon before activ
     await Promise.allSettled(daemonRuns);
   });
 
+  assert.equal(await runCli(['ilink', 'start', '--home', home], runtime.overrides), 1);
+  assert.deepEqual(accountCalls, [
+    { command: 'start', defer: true, account: accountKey },
+    { command: 'start', account: accountKey },
+  ]);
+  assert.equal(readDaemonRecord(home), null);
+  assert.match(runtime.stderr.join(''), /simulated stale second activation/u);
+  failSecondActivation = false;
+  accountCalls.length = 0;
+  runtime.stderr.length = 0;
   assert.equal(await runCli(['ilink', 'start', '--home', home], runtime.overrides), 0);
   assert.deepEqual(accountCalls, [
-    { command: 'start', defer: true },
-    { command: 'start', selector: accountKey },
+    { command: 'start', defer: true, account: accountKey },
+    { command: 'start', account: accountKey },
   ]);
+  assert.equal(loginCalls, 1);
   assert.equal(readDaemonRecord(home)?.mode, 'ilink');
   const firstRunId = readDaemonRecord(home)?.runId;
   assert.ok(firstRunId);
@@ -664,14 +895,14 @@ test('standalone iLink start launches one managed background daemon before activ
   assert.equal(await runCli(['ilink', 'stop', '--home', home], runtime.overrides), 0);
   await Promise.all(daemonRuns);
   assert.equal(readDaemonRecord(home), null);
-  assert.deepEqual(accountCalls.at(-1), { command: 'stop' });
+  assert.deepEqual(accountCalls.at(-1), { command: 'stop', account: accountKey });
 });
 
-test('background iLink start refuses an unresolved account before daemon launch', async (t) => {
+test('non-interactive iLink start requires an explicit login before daemon launch', async (t) => {
   const root = await temporaryRoot(t);
   let launched = false;
   const runtime = cliRuntime(root, {
-    ilinkAccount: async () => ({ runtimeRequired: true, runningCount: 0 }),
+    ilinkSnapshot: async () => ({ accounts: [], mode: 'standalone' }),
     launchDaemon: () => {
       launched = true;
       return exitedDaemon();
@@ -681,7 +912,21 @@ test('background iLink start refuses an unresolved account before daemon launch'
     'ilink', 'start', '--home', path.join(root, 'instance'),
   ], runtime.overrides), 1);
   assert.equal(launched, false);
-  assert.match(runtime.stderr.join(''), /did not resolve an account identity/u);
+  assert.match(runtime.stderr.join(''), /run "kintio ilink login" first/u);
+
+  let loginCalls = 0;
+  const explicit = cliRuntime(root, {
+    stdinIsTTY: true,
+    stdoutIsTTY: true,
+    ilinkLogin: async () => { loginCalls += 1; return 0; },
+    ilinkSnapshot: async () => ({ accounts: [], mode: 'standalone' }),
+  });
+  assert.equal(await runCli([
+    'ilink', 'start', '--home', path.join(root, 'explicit-instance'),
+    '--account', 'missing@im.bot',
+  ], explicit.overrides), 1);
+  assert.equal(loginCalls, 0);
+  assert.match(explicit.stderr.join(''), /No iLink account is enrolled/u);
 });
 
 test('CLI drains an iLink login before honoring terminal signals', async (t) => {
@@ -1512,6 +1757,7 @@ test('a lifecycle lock rejects concurrent background mutation', async (t) => {
   let foregroundExecuted = false;
   let loginStarted = false;
   let accountChanged = false;
+  const account = operatorAccount();
   const runtime = cliRuntime(root, {
     launchDaemon: () => {
       launched = true;
@@ -1525,6 +1771,7 @@ test('a lifecycle lock rejects concurrent background mutation', async (t) => {
       loginStarted = true;
       return 0;
     },
+    ilinkSnapshot: async () => ({ accounts: [account], mode: 'standalone' }),
     ilinkAccount: async () => {
       accountChanged = true;
       return { runtimeRequired: false, runningCount: 0 };
@@ -1536,11 +1783,24 @@ test('a lifecycle lock rejects concurrent background mutation', async (t) => {
   assert.equal(await runCli([
     'ilink', 'start', '--foreground', '--home', home,
   ], runtime.overrides), 1);
+  assert.equal(await runCli(['ilink', 'stop', '--home', home], runtime.overrides), 1);
   assert.equal(launched, false);
   assert.equal(foregroundExecuted, false);
   assert.equal(loginStarted, false);
   assert.equal(accountChanged, false);
   assert.match(runtime.stderr.join(''), /lifecycle command is already running/u);
+
+  let onlineMutations = 0;
+  const online = cliRuntime(root, {
+    ilinkSnapshot: async () => ({ accounts: [account], mode: 'runtime' }),
+    ilinkAccount: async (options) => {
+      assert.equal(options.requiredMode, 'runtime');
+      onlineMutations += 1;
+      return { runtimeRequired: false, runningCount: 0 };
+    },
+  });
+  assert.equal(await runCli(['ilink', 'stop', '--home', home], online.overrides), 0);
+  assert.equal(onlineMutations, 1);
 });
 
 test('background startup policy and stale metadata fail safely', async (t) => {

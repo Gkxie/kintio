@@ -8,6 +8,10 @@ This file records important user-visible changes after the first public release.
   identified global npm or pnpm installation to one exact published version,
   refuse active Agent work, and restore an idle background instance in its
   original service or iLink mode ([#74](https://github.com/Gkxie/kintio/issues/74)).
+- Made `kintio ilink start` open login automatically when no account exists and
+  added searchable account selection plus default-No deletion confirmation;
+  explicit `--account` and `--yes` remain available for automation
+  ([#74](https://github.com/Gkxie/kintio/issues/74)).
 
 ## 0.7.2
 

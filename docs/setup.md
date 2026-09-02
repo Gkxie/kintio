@@ -199,12 +199,14 @@ Account lifecycle is explicit:
 kintio ilink list
 kintio ilink start [--account <provider-id-or-account-key>] [--foreground]
 kintio ilink stop [--account <provider-id-or-account-key>]
-kintio ilink delete [--account <provider-id-or-account-key>] --yes
+kintio ilink delete [--account <provider-id-or-account-key>] [--yes]
 ```
 
-One enrolled account is selected automatically. Multiple accounts require `--account`;
-the stable choices come from `list`. The first standalone `start` launches one managed
-daemon. Further `start` and `stop` commands reach that owner over private operator IPC,
+One enrolled account is selected automatically. With no account, interactive `start`
+opens the five-minute login flow and continues after enrollment. Multiple accounts open
+a searchable picker; non-interactive callers use `--account` with a provider ID from
+`list`. The first standalone `start` launches one managed daemon. Further `start` and
+`stop` commands reach that owner over private operator IPC,
 so one process owns SQLite while independently reconciling account listeners. Stopping
 the last running account stops the iLink-only daemon. `kintio status` and `kintio logs`
 expose its state and output.
@@ -212,9 +214,11 @@ expose its state and output.
 `kintio ilink list` prints one provider account ID per line. Pass that exact value to
 `--account`; Kintio's internal hashed account key is not needed for normal operation.
 
-`delete` is intentionally stronger than logout. It atomically removes the selected
+`delete` is intentionally stronger than logout. Interactive use selects an account and
+asks for confirmation with a default of No; scripts require `--account` and `--yes`.
+It atomically removes the selected
 account, credentials, conversations, messages, media, send records, reply windows, and
-enrollment audit rows from Kintio. It cannot be undone and therefore requires `--yes`.
+enrollment audit rows from Kintio. It cannot be undone.
 
 An uncatchable termination such as `SIGKILL` or power loss can leave the temporary PNG
 behind. Its provider-side QR still expires after five minutes; remove the stale file

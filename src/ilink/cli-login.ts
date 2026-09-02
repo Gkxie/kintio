@@ -24,7 +24,15 @@ import {
   renderIlinkRawQrPng,
 } from './qr.ts';
 import type { IlinkLoginStatus } from './login-store.ts';
-import type { IlinkSqliteStore } from './sqlite-store.ts';
+import type {
+  IlinkAccountWithSecret,
+  IlinkSqliteStore,
+} from './sqlite-store.ts';
+import {
+  assertIlinkAccountRevision,
+  createIlinkAccountIncarnation,
+  type IlinkAccountRevision,
+} from './store-types.ts';
 
 const STATUS_POLL_MS = 1_000;
 const OFFER_ID = /^qo_[A-Za-z0-9_-]{1,128}$/u;
@@ -43,6 +51,8 @@ const LOGIN_STATUSES = new Set<IlinkLoginStatus>([
 
 export interface IlinkOperatorAccount {
   readonly accountKey: `ia_${string}`;
+  readonly generation: number;
+  readonly incarnation: `ii_${string}`;
   readonly providerAccountId: string;
   readonly runtimeEnabled: boolean;
 }
@@ -62,9 +72,11 @@ export interface IlinkOperatorControl {
   setAccountRuntime(
     accountKey: `ia_${string}`,
     enabled: boolean,
+    expected: IlinkAccountRevision,
   ): Promise<{ readonly account: IlinkOperatorAccount; readonly runningCount: number }>;
   deleteAccount(
     accountKey: `ia_${string}`,
+    expected: IlinkAccountRevision,
   ): Promise<{ readonly account: IlinkOperatorAccount; readonly runningCount: number }>;
   close(): Promise<void>;
 }
@@ -203,9 +215,13 @@ function structured(result: unknown): Record<string, unknown> {
 function operatorAccount(value: unknown): IlinkOperatorAccount {
   const account = record(value);
   const accountKey = String(account.accountKey || '');
+  const generation = Number(account.generation);
+  const incarnation = String(account.incarnation || '');
   const providerAccountId = String(account.providerAccountId || '');
   if (
     !ACCOUNT_KEY.test(accountKey) ||
+    !Number.isSafeInteger(generation) || generation < 1 ||
+    !/^ii_[0-9a-f]{64}$/u.test(incarnation) ||
     !providerAccountId || Buffer.byteLength(providerAccountId, 'utf8') > 512 ||
     typeof account.runtimeEnabled !== 'boolean'
   ) {
@@ -213,8 +229,22 @@ function operatorAccount(value: unknown): IlinkOperatorAccount {
   }
   return Object.freeze({
     accountKey: accountKey as `ia_${string}`,
+    generation,
+    incarnation: incarnation as `ii_${string}`,
     providerAccountId,
     runtimeEnabled: account.runtimeEnabled,
+  });
+}
+
+function operatorAccountFromStored(
+  stored: IlinkAccountWithSecret,
+): IlinkOperatorAccount {
+  return Object.freeze({
+    accountKey: stored.account.accountKey,
+    generation: stored.account.generation,
+    incarnation: createIlinkAccountIncarnation(stored.account, stored.secret),
+    providerAccountId: stored.account.providerAccountId,
+    runtimeEnabled: stored.account.runtimeEnabled,
   });
 }
 
@@ -336,20 +366,35 @@ class McpIlinkOperatorControl implements IlinkOperatorControl {
   async setAccountRuntime(
     accountKey: `ia_${string}`,
     enabled: boolean,
+    expected: IlinkAccountRevision,
   ) {
     return accountMutation(structured(await this.#client.callTool(
       {
         name: enabled ? 'start_account' : 'stop_account',
-        arguments: { accountKey },
+        arguments: {
+          accountKey,
+          expectedGeneration: expected.generation,
+          expectedIncarnation: expected.incarnation,
+        },
       },
       undefined,
       { timeout: 10_000 },
     )));
   }
 
-  async deleteAccount(accountKey: `ia_${string}`) {
+  async deleteAccount(
+    accountKey: `ia_${string}`,
+    expected: IlinkAccountRevision,
+  ) {
     return accountMutation(structured(await this.#client.callTool(
-      { name: 'delete_account', arguments: { accountKey } },
+      {
+        name: 'delete_account',
+        arguments: {
+          accountKey,
+          expectedGeneration: expected.generation,
+          expectedIncarnation: expected.incarnation,
+        },
+      },
       undefined,
       { timeout: 10_000 },
     )));
@@ -447,21 +492,28 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
 
   listAccounts(): Promise<readonly IlinkOperatorAccount[]> {
     return Promise.resolve(Object.freeze(
-      this.#accounts.listActiveAccounts().map((account) => ({
-        accountKey: account.accountKey,
-        providerAccountId: account.providerAccountId,
-        runtimeEnabled: account.runtimeEnabled,
-      })),
+      this.#accounts.listActiveAccountsWithSecrets().map(operatorAccountFromStored),
     ));
   }
 
-  setAccountRuntime(accountKey: `ia_${string}`, enabled: boolean) {
+  setAccountRuntime(
+    accountKey: `ia_${string}`,
+    enabled: boolean,
+    expected: IlinkAccountRevision,
+  ) {
+    const stored = this.#accounts.getAccountWithSecret(accountKey);
+    assertIlinkAccountRevision(
+      stored ? operatorAccountFromStored(stored) : undefined,
+      expected,
+    );
     const account = enabled
       ? this.#accounts.selectRuntimeAccount(accountKey)
       : this.#accounts.setRuntimeEnabled(accountKey, false);
     return Promise.resolve({
       account: {
         accountKey: account.accountKey,
+        generation: account.generation,
+        incarnation: createIlinkAccountIncarnation(account, stored!.secret),
         providerAccountId: account.providerAccountId,
         runtimeEnabled: account.runtimeEnabled,
       },
@@ -469,11 +521,21 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
     });
   }
 
-  deleteAccount(accountKey: `ia_${string}`) {
+  deleteAccount(
+    accountKey: `ia_${string}`,
+    expected: IlinkAccountRevision,
+  ) {
+    const stored = this.#accounts.getAccountWithSecret(accountKey);
+    assertIlinkAccountRevision(
+      stored ? operatorAccountFromStored(stored) : undefined,
+      expected,
+    );
     const account = this.#accounts.deleteAccountCompletely(accountKey);
     return Promise.resolve({
       account: {
         accountKey: account.accountKey,
+        generation: account.generation,
+        incarnation: createIlinkAccountIncarnation(account, stored!.secret),
         providerAccountId: account.providerAccountId,
         runtimeEnabled: account.runtimeEnabled,
       },
@@ -515,7 +577,26 @@ export async function openIlinkOperatorControl(
   config: Pick<IlinkEnrollmentConfig, 'state' | 'ilink'>,
   packageRoot: string,
   signal: AbortSignal,
+  requiredMode?: 'runtime' | 'standalone',
 ): Promise<IlinkOperatorControl> {
+  if (requiredMode === 'runtime') {
+    try {
+      return await McpIlinkOperatorControl.connect(config, packageRoot);
+    } catch (error: unknown) {
+      throw new Error('The iLink Runtime changed; select the account again', {
+        cause: error,
+      });
+    }
+  }
+  if (requiredMode === 'standalone') {
+    try {
+      return await LocalIlinkOperatorControl.open(config);
+    } catch (error: unknown) {
+      throw new Error('The standalone iLink state changed; select the account again', {
+        cause: error,
+      });
+    }
+  }
   try {
     return await McpIlinkOperatorControl.connect(config, packageRoot);
   } catch (ipcError: unknown) {

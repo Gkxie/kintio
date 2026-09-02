@@ -88,12 +88,13 @@ kintio ilink login
 kintio ilink start
 ```
 
-`ilink login` performs one encrypted enrollment, starts no listener, and exits. `ilink start` then runs provider
-polling and the host Agent through the background daemon without Hono or a TCP listener.
+`ilink login` performs one encrypted enrollment, starts no listener, and exits. In an
+interactive terminal, `ilink start` opens the same login flow automatically when needed,
+then runs provider polling and the host Agent through the background daemon without Hono or a TCP listener.
 Use `--foreground` only when a service manager needs to own the process. Both commands
-use `~/.kintio` by default and accept `--home`. With multiple accounts, use `ilink list`
-and pass the displayed provider ID or account key through `--account`. Repeated `start`
-commands add accounts to the live runtime; `stop` removes one.
+use `~/.kintio` by default and accept `--home`. Multiple accounts open a searchable
+terminal picker. Scripts and non-interactive callers use the provider ID from `ilink list`
+through `--account`. Repeated `start` commands add accounts to the live runtime; `stop` removes one.
 
 For a callback-based adapter, create and edit the deployment configuration instead:
 
@@ -128,14 +129,16 @@ the local operator and inherits the host Agent configuration without Kintio's un
 channel capability restrictions. Show this QR code only to someone authorized to control
 the host Agent. Run `kintio ilink start` after enrollment to process messages without Hono.
 
-To permanently remove an account and every Kintio record scoped to it, use:
+To permanently remove an account and every Kintio record scoped to it, run:
 
 ```bash
-kintio ilink delete --account <provider-id-or-account-key> --yes
+kintio ilink delete
 ```
 
-The explicit confirmation is mandatory. Credentials, conversations, messages, media,
-delivery records, and enrollment audit rows for that account are deleted atomically.
+Interactive use selects the account and asks for confirmation with a default of No.
+Scripts retain `--account <provider-id-or-account-key> --yes`. Credentials,
+conversations, messages, media, delivery records, and enrollment audit rows for that
+account are deleted atomically.
 
 For callback deployments, confirm that `kintio logs` contains
 `Hono server is listening on port 8888`. Use `kintio run` when a foreground process is
