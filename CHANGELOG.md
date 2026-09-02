@@ -4,6 +4,8 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.8.0
+
 - Removed the redundant Owner PR/manual hosted Codex workflow so the protected,
   deterministic Release Bot check is the only hosted real-Codex validation path
   ([#80](https://github.com/Gkxie/kintio/issues/80)).
