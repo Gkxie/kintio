@@ -21,11 +21,16 @@ import { IlinkSendExecutor } from './ilink/executor.ts';
 import { createIlinkEnrollmentService } from './ilink/enrollment.ts';
 import { IlinkListenerManager } from './ilink/listener.ts';
 import { IlinkMediaGateway } from './ilink/media-gateway.ts';
+import type { IlinkAccountWithSecret } from './ilink/sqlite-store.ts';
 import { renderIlinkQrPng } from './ilink/qr.ts';
 import { DEFAULT_ILINK_MEDIA_TIMEOUT_MS } from './ilink/media.ts';
 import { DEFAULT_ILINK_IMAGE_TIMEOUT_MS } from './ilink/inbound-image.ts';
 import { IlinkClient } from './ilink/protocol/client.ts';
-import { assertIlinkAccountKey } from './ilink/store-types.ts';
+import {
+  assertIlinkAccountKey,
+  assertIlinkAccountRevision,
+  createIlinkAccountIncarnation,
+} from './ilink/store-types.ts';
 import {
   ConversationMemoryExecutor,
   createConversationMemoryMcpServer,
@@ -161,6 +166,40 @@ export async function createRuntime({
     const ilinkSecretBox = activeIlinkEnrollment?.secretBox;
     const ilinkStore = activeIlinkEnrollment?.accounts;
     let terminalLoginBegins = 0;
+    let accountMutationEpoch = 0;
+    let activeAccountMutations = 0;
+    const runAccountMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
+      if (toolsUnavailable) throw new Error('service unavailable');
+      activeAccountMutations += 1;
+      try {
+        return await operation();
+      } finally {
+        activeAccountMutations -= 1;
+      }
+    };
+    const operatorAccount = ({ account, secret }: IlinkAccountWithSecret) => ({
+      accountKey: account.accountKey,
+      generation: account.generation,
+      incarnation: createIlinkAccountIncarnation(account, secret),
+      providerAccountId: account.providerAccountId,
+      runtimeEnabled: account.runtimeEnabled,
+    });
+    const scheduleIlinkStop = (
+      enrollment: ReturnType<typeof ensureIlinkEnrollment>,
+      runningCount: number,
+    ): void => {
+      if (runningCount !== 0 || !onIlinkStopRequested) return;
+      const expectedEpoch = accountMutationEpoch;
+      setImmediate(() => {
+        if (
+          toolsUnavailable ||
+          expectedEpoch !== accountMutationEpoch ||
+          enrollment.accounts.listRuntimeAccountsWithSecrets().length !== 0
+        ) return;
+        toolsUnavailable = true;
+        onIlinkStopRequested();
+      });
+    };
     const terminalLoginActive = (): boolean =>
       terminalLoginBegins > 0 ||
       Boolean(ilinkEnrollment?.manager.hasActiveLocalOperatorLogin());
@@ -252,52 +291,44 @@ export async function createRuntime({
         cancel(offerId) {
           return ilinkEnrollment?.manager.cancel(offerId) || false;
         },
-        listAccounts: () => ensureIlinkEnrollment().accounts.listActiveAccounts()
-          .map((account) => ({
-            accountKey: account.accountKey,
-            providerAccountId: account.providerAccountId,
-            runtimeEnabled: account.runtimeEnabled,
-          })),
-        async setAccountRuntime(accountKey, enabled) {
-          const enrollment = ensureIlinkEnrollment();
-          assertIlinkAccountKey(accountKey);
-          const account = enrollment.accounts.setRuntimeEnabled(
-            accountKey,
-            enabled,
-          );
-          if (ilinkRuntimeStarted) await ilinkListener?.refresh();
-          const runningCount = enrollment.accounts
-            .listRuntimeAccountsWithSecrets().length;
-          if (!enabled && runningCount === 0 && onIlinkStopRequested) {
-            setImmediate(onIlinkStopRequested);
-          }
-          return {
-            account: {
-              accountKey: account.accountKey,
-              providerAccountId: account.providerAccountId,
-              runtimeEnabled: account.runtimeEnabled,
-            },
-            runningCount,
-          };
+        listAccounts: () => ensureIlinkEnrollment().accounts
+          .listActiveAccountsWithSecrets()
+          .map(operatorAccount),
+        setAccountRuntime(accountKey, enabled, expected) {
+          return runAccountMutation(async () => {
+            const enrollment = ensureIlinkEnrollment();
+            assertIlinkAccountKey(accountKey);
+            const stored = enrollment.accounts.getAccountWithSecret(accountKey);
+            assertIlinkAccountRevision(stored ? operatorAccount(stored) : undefined, expected);
+            const account = enrollment.accounts.setRuntimeEnabled(accountKey, enabled);
+            if (ilinkRuntimeStarted) await ilinkListener?.refresh();
+            const runningCount = enrollment.accounts
+              .listRuntimeAccountsWithSecrets().length;
+            accountMutationEpoch += 1;
+            if (!enabled) scheduleIlinkStop(enrollment, runningCount);
+            return {
+              account: operatorAccount({ account, secret: stored!.secret }),
+              runningCount,
+            };
+          });
         },
-        async deleteAccount(accountKey) {
-          const enrollment = ensureIlinkEnrollment();
-          assertIlinkAccountKey(accountKey);
-          const account = enrollment.accounts.deleteAccountCompletely(accountKey);
-          if (ilinkRuntimeStarted) await ilinkListener?.refresh();
-          const runningCount = enrollment.accounts
-            .listRuntimeAccountsWithSecrets().length;
-          if (runningCount === 0 && onIlinkStopRequested) {
-            setImmediate(onIlinkStopRequested);
-          }
-          return {
-            account: {
-              accountKey: account.accountKey,
-              providerAccountId: account.providerAccountId,
-              runtimeEnabled: account.runtimeEnabled,
-            },
-            runningCount,
-          };
+        deleteAccount(accountKey, expected) {
+          return runAccountMutation(async () => {
+            const enrollment = ensureIlinkEnrollment();
+            assertIlinkAccountKey(accountKey);
+            const stored = enrollment.accounts.getAccountWithSecret(accountKey);
+            assertIlinkAccountRevision(stored ? operatorAccount(stored) : undefined, expected);
+            const account = enrollment.accounts.deleteAccountCompletely(accountKey);
+            if (ilinkRuntimeStarted) await ilinkListener?.refresh();
+            const runningCount = enrollment.accounts
+              .listRuntimeAccountsWithSecrets().length;
+            accountMutationEpoch += 1;
+            scheduleIlinkStop(enrollment, runningCount);
+            return {
+              account: operatorAccount({ account, secret: stored!.secret }),
+              runningCount,
+            };
+          });
         },
       }),
       logger,
@@ -340,7 +371,7 @@ export async function createRuntime({
           return started;
         },
         stopAcceptingIfIdle() {
-          if (!accepting || terminalLoginActive()) return false;
+          if (!accepting || terminalLoginActive() || activeAccountMutations > 0) return false;
           accepting = false;
           toolsUnavailable = true;
           return true;
@@ -640,6 +671,7 @@ export async function createRuntime({
           !accepting || startupRecoveryActive || deferredDrainRequested ||
           deferredDrain !== undefined || !processor.isIdle() ||
           terminalLoginActive() ||
+          activeAccountMutations > 0 ||
           Boolean(ilinkTools && !ilinkTools.isIdle()) ||
           Boolean(wechatTools && !wechatTools.isIdle())
         ) return false;
@@ -649,6 +681,7 @@ export async function createRuntime({
       stopAccepting() {
         if (!accepting) return;
         accepting = false;
+        toolsUnavailable = true;
         sync?.stopAccepting();
         processor.stopAccepting();
         ilinkClosing ||= Promise.all([

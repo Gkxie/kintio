@@ -346,19 +346,35 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
       'delete_account',
     ],
   );
+  const listed = (await operator.callTool({
+    name: 'list_accounts', arguments: {},
+  })).structuredContent as {
+    accounts: Array<{
+      accountKey: string;
+      generation: number;
+      incarnation: string;
+      providerAccountId: string;
+      runtimeEnabled: boolean;
+    }>;
+  };
   assert.deepEqual(
-    (await operator.callTool({ name: 'list_accounts', arguments: {} })).structuredContent,
-    {
-      accounts: accounts.map((value, index) => ({
-        accountKey: value.accountKey,
-        providerAccountId: value.providerAccountId,
-        runtimeEnabled: index === 0,
-      })),
-    },
+    listed.accounts.map(({ generation, incarnation, ...account }) => account),
+    accounts.map((value, index) => ({
+      accountKey: value.accountKey,
+      providerAccountId: value.providerAccountId,
+      runtimeEnabled: index === 0,
+    })),
   );
+  assert.ok(listed.accounts.every((account) =>
+    account.generation === 1 && /^ii_[0-9a-f]{64}$/u.test(account.incarnation)));
+  const secondAccount = listed.accounts[1]!;
   const secondStarted = await operator.callTool({
     name: 'start_account',
-    arguments: { accountKey: accounts[1]!.accountKey },
+    arguments: {
+      accountKey: secondAccount.accountKey,
+      expectedGeneration: secondAccount.generation,
+      expectedIncarnation: secondAccount.incarnation,
+    },
   });
   assert.equal((secondStarted.structuredContent as { runningCount: number }).runningCount, 2);
   await bounded('operator MCP close', operator.close());
@@ -511,12 +527,20 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   })));
   const firstStopped = await lifecycle.callTool({
     name: 'stop_account',
-    arguments: { accountKey: accounts[0]!.accountKey },
+    arguments: {
+      accountKey: listed.accounts[0]!.accountKey,
+      expectedGeneration: listed.accounts[0]!.generation,
+      expectedIncarnation: listed.accounts[0]!.incarnation,
+    },
   });
   assert.equal((firstStopped.structuredContent as { runningCount: number }).runningCount, 1);
   const secondDeleted = await lifecycle.callTool({
     name: 'delete_account',
-    arguments: { accountKey: accounts[1]!.accountKey },
+    arguments: {
+      accountKey: secondAccount.accountKey,
+      expectedGeneration: secondAccount.generation,
+      expectedIncarnation: secondAccount.incarnation,
+    },
   });
   assert.equal((secondDeleted.structuredContent as { runningCount: number }).runningCount, 0);
   await bounded('lifecycle MCP close', lifecycle.close());

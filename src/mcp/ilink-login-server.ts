@@ -8,6 +8,8 @@ const OFFER_ID = z.string().regex(/^qo_[A-Za-z0-9_-]{1,128}$/u);
 const ACCOUNT_KEY = z.string().regex(/^ia_[0-9a-f]{40}$/u);
 const OPERATOR_ACCOUNT = z.object({
   accountKey: ACCOUNT_KEY,
+  generation: z.number().int().positive(),
+  incarnation: z.string().regex(/^ii_[0-9a-f]{64}$/u),
   providerAccountId: z.string().min(1).max(512),
   runtimeEnabled: z.boolean(),
 });
@@ -34,11 +36,18 @@ export interface IlinkLoginOperator {
   };
   cancel(offerId: string): boolean;
   listAccounts(): readonly z.infer<typeof OPERATOR_ACCOUNT>[];
-  setAccountRuntime(accountKey: string, enabled: boolean): Promise<{
+  setAccountRuntime(
+    accountKey: string,
+    enabled: boolean,
+    expected: { readonly generation: number; readonly incarnation: `ii_${string}` },
+  ): Promise<{
     readonly account: z.infer<typeof OPERATOR_ACCOUNT>;
     readonly runningCount: number;
   }>;
-  deleteAccount(accountKey: string): Promise<{
+  deleteAccount(
+    accountKey: string,
+    expected: { readonly generation: number; readonly incarnation: `ii_${string}` },
+  ): Promise<{
     readonly account: z.infer<typeof OPERATOR_ACCOUNT>;
     readonly runningCount: number;
   }>;
@@ -56,7 +65,12 @@ function textResult(
 
 function failure(error: unknown, operation: 'login' | 'account' = 'login') {
   const message = error instanceof Error ? error.message : '';
-  const code = /account limit reached/iu.test(message)
+  const errorCode = error && typeof error === 'object' && 'code' in error
+    ? String(error.code || '')
+    : '';
+  const code = errorCode === 'account_revision_changed'
+    ? 'account_changed'
+    : /account limit reached/iu.test(message)
     ? 'account_limit_reached'
     : /already pending/iu.test(message)
       ? 'login_pending'
@@ -65,7 +79,9 @@ function failure(error: unknown, operation: 'login' | 'account' = 'login') {
         : 'login_unavailable';
   const publicMessage = code === 'account_limit_reached'
     ? 'The iLink account limit has been reached.'
-    : code === 'login_pending'
+      : code === 'account_changed'
+        ? 'The selected iLink account changed; select it again.'
+        : code === 'login_pending'
       ? 'An iLink terminal login is already pending.'
       : code === 'account_operation_unavailable'
         ? 'The iLink account operation is unavailable.'
@@ -175,16 +191,23 @@ export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServ
       name,
       {
         description: `${enabled ? 'Start' : 'Stop'} one enrolled iLink account.`,
-        inputSchema: { accountKey: ACCOUNT_KEY },
+        inputSchema: {
+          accountKey: ACCOUNT_KEY,
+          expectedGeneration: z.number().int().positive(),
+          expectedIncarnation: z.string().regex(/^ii_[0-9a-f]{64}$/u),
+        },
         outputSchema: {
           account: OPERATOR_ACCOUNT,
           runningCount: z.number().int().nonnegative(),
         },
         annotations: { readOnlyHint: false, idempotentHint: true },
       },
-      async ({ accountKey }) => {
+      async ({ accountKey, expectedGeneration, expectedIncarnation }) => {
         try {
-          const result = await operator.setAccountRuntime(accountKey, enabled);
+          const result = await operator.setAccountRuntime(accountKey, enabled, {
+            generation: expectedGeneration,
+            incarnation: expectedIncarnation as `ii_${string}`,
+          });
           return textResult(`iLink account ${enabled ? 'started' : 'stopped'}.`, result);
         } catch (error: unknown) {
           return failure(error, 'account');
@@ -197,16 +220,23 @@ export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServ
     'delete_account',
     {
       description: 'Permanently delete one iLink account and all Kintio data scoped to it.',
-      inputSchema: { accountKey: ACCOUNT_KEY },
+      inputSchema: {
+        accountKey: ACCOUNT_KEY,
+        expectedGeneration: z.number().int().positive(),
+        expectedIncarnation: z.string().regex(/^ii_[0-9a-f]{64}$/u),
+      },
       outputSchema: {
         account: OPERATOR_ACCOUNT,
         runningCount: z.number().int().nonnegative(),
       },
       annotations: { readOnlyHint: false, idempotentHint: false, destructiveHint: true },
     },
-    async ({ accountKey }) => {
+    async ({ accountKey, expectedGeneration, expectedIncarnation }) => {
       try {
-        const result = await operator.deleteAccount(accountKey);
+        const result = await operator.deleteAccount(accountKey, {
+          generation: expectedGeneration,
+          incarnation: expectedIncarnation as `ii_${string}`,
+        });
         return textResult('iLink account and its Kintio data were deleted.', result);
       } catch (error: unknown) {
         return failure(error, 'account');

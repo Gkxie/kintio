@@ -62,11 +62,11 @@ kintio ilink login
 kintio ilink start
 ```
 
-`ilink login` 完成一次扫码、加密保存凭据后退出，不会自行启动监听；`ilink start` 不启动 Hono 或 TCP 端口，
-而是通过后台守护进程运行 iLink 长轮询和宿主 Agent。由外部进程管理器托管时可显式使用
+`ilink login` 完成一次扫码、加密保存凭据后退出，不会自行启动监听；交互终端中的 `ilink start`
+会在没有账号时自动进入同一登录流程，然后通过后台守护进程运行 iLink 长轮询和宿主 Agent，且不启动 Hono 或 TCP 端口。由外部进程管理器托管时可显式使用
 `--foreground`。两者默认使用 `~/.kintio`。
-存在多个账号时，先用 `kintio ilink list` 查看账号，再通过 `--account` 指定
-`start`、`stop` 或 `delete` 的目标；正在运行时可继续执行 `start` 增加监听账号。
+存在多个账号时会显示可搜索的交互选择面板；脚本或非交互调用方可用
+`kintio ilink list` 查看账号，再通过 `--account` 指定目标。正在运行时可继续执行 `start` 增加监听账号。
 
 需要部署公网回调渠道时，再使用：
 
@@ -91,8 +91,9 @@ kintio ilink login --qr-output ~/.kintio/ilink-login.png
 只应让获准控制宿主 Agent 的人扫描该二维码。登录后运行 `kintio ilink start` 即可在不
 启动 Hono 的情况下处理消息。
 
-`kintio ilink delete --account <账号> --yes` 会不可恢复地删除该账号及其在 Kintio
-中的凭据、会话、消息、媒体、发送记录和登录审计；`--yes` 为强制确认参数。
+`kintio ilink delete` 会在选择账号后进行默认 No 的确认，并不可恢复地删除该账号及其在 Kintio
+中的凭据、会话、消息、媒体、发送记录和登录审计；脚本调用保留
+`--account <账号> --yes` 作为非交互参数。
 
 公网回调部署启动后，应确认 `kintio logs` 包含
 `Hono server is listening on port 8888`。

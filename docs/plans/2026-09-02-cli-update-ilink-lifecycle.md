@@ -41,7 +41,7 @@ A second pull request adds:
 2. Multiple accounts are selected through a bounded searchable terminal picker.
 3. Interactive deletion uses an explicit default-deny confirmation.
 4. Account snapshots are closed before any human wait.
-5. The mutation revalidates the selected account generation.
+5. The mutation revalidates the selected account generation and incarnation.
 6. Existing `--account` and `--yes` inputs remain the automation contract.
 
 ### Priority 2 — release and physical verification
@@ -238,10 +238,11 @@ uses explicit command parameters instead of hidden prompts.
 
 ### Stale selection protection
 
-The account snapshot includes the account generation. Start, stop, and especially
-delete carry the expected generation through operator MCP/local control. A login
-rotation or delete/re-enroll that occurs while the picker or confirmation is open
-causes a generation conflict instead of mutating the new credentials.
+The account snapshot includes the account generation and an opaque incarnation
+derived from the encrypted credential instance. Start, stop, and especially delete
+carry both values through operator MCP/local control. A login rotation or
+delete/re-enroll that occurs while the picker or confirmation is open causes a
+revision conflict instead of mutating the new credentials.
 
 ## Test plan
 
