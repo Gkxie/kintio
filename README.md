@@ -70,6 +70,17 @@ npm install --global @kin-tio/cli
 codex login status
 ```
 
+An installed npm or pnpm copy can update itself without changing Agent or
+channel configuration:
+
+```bash
+kintio update
+```
+
+`kintio upgrade` is an exact alias. Kintio refuses unknown installation layouts
+and active Agent work; an idle background instance is restored in its existing
+service or iLink mode.
+
 For an iLink-only instance, no setup file or public HTTP listener is required:
 
 ```bash

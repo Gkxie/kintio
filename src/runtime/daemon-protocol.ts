@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
@@ -20,25 +20,53 @@ const positiveInteger = z.number().int().positive();
 const runId = z.string().regex(ID_PATTERN, 'runId is invalid');
 const token = z.string()
   .regex(/^[A-Za-z0-9_-]{32,128}$/u, 'control token is invalid');
+const fingerprint = z.string().regex(/^[a-f0-9]{64}$/u, 'config fingerprint is invalid');
+const updateRuntimeIdentitySchema = z.strictObject({
+  version: z.literal(1),
+  runtimeConfig: fingerprint,
+  hostEnvironment: fingerprint,
+});
 const phase = z.enum(['starting', 'running', 'backoff', 'stopping', 'failed']);
 const absolutePath = z.string().min(1).max(4_096).refine(
   (value) => path.isAbsolute(value) && !value.includes('\0'),
   'path must be absolute',
 ).transform((value) => path.normalize(value));
-const daemonRecordSchema = z.strictObject({
-  version: z.literal(1),
+const daemonRecordFields = {
   runId,
   daemonPid: positiveInteger,
   configFile: absolutePath,
   mode: z.enum(['service', 'ilink']).default('service'),
   packageRoot: absolutePath,
   token,
-});
+};
+const daemonRecordSchema = z.discriminatedUnion('version', [
+  z.strictObject({
+    version: z.literal(1),
+    ...daemonRecordFields,
+  }),
+  z.strictObject({
+    version: z.literal(2),
+    ...daemonRecordFields,
+    state: z.strictObject({
+      databaseFile: absolutePath,
+      lockFile: absolutePath,
+    }),
+  }),
+]);
 
 const controlRequestSchema = z.strictObject({
   version: z.literal(1),
   command: z.enum(['ping', 'stop', 'stop-if-idle']),
   token,
+  updateIdentity: updateRuntimeIdentitySchema.optional(),
+}).superRefine((value, context) => {
+  if (value.updateIdentity && value.command !== 'stop-if-idle') {
+    context.addIssue({
+      code: 'custom',
+      message: 'update identity is valid only for stop-if-idle',
+      path: ['updateIdentity'],
+    });
+  }
 });
 
 const controlResponseSchema = z.strictObject({
@@ -88,6 +116,7 @@ const workerStopIfIdleResponseSchema = z.strictObject({
 });
 
 export type DaemonRecord = Readonly<z.infer<typeof daemonRecordSchema>>;
+export type UpdateRuntimeIdentity = Readonly<z.infer<typeof updateRuntimeIdentitySchema>>;
 export type ControlRequest = Readonly<z.infer<typeof controlRequestSchema>>;
 export type ControlResponse = Readonly<z.infer<typeof controlResponseSchema>>;
 export type WorkerStopIfIdleRequest = Readonly<
@@ -103,6 +132,110 @@ export function parseDaemonRecord(value: unknown): DaemonRecord {
 
 export function parseControlRequest(value: unknown): ControlRequest {
   return Object.freeze(controlRequestSchema.parse(value));
+}
+
+const HOST_ENVIRONMENT_NOISE = new Set([
+  '_',
+  'COLORTERM',
+  'COLUMNS',
+  'DBUS_SESSION_BUS_ADDRESS',
+  'HARNESS_DB_FILE',
+  'INIT_CWD',
+  'KINTIO_CONFIG_FILE',
+  'KINTIO_DAEMON_MODE',
+  'KINTIO_DB_FILE',
+  'KINTIO_HOME',
+  'KINTIO_MANAGED_WORKER',
+  'LINES',
+  'NODE_ENV',
+  'OLDPWD',
+  'PWD',
+  'SHLVL',
+  'SSH_AGENT_PID',
+  'SSH_CLIENT',
+  'SSH_CONNECTION',
+  'SSH_TTY',
+  'STY',
+  'TALKFERRY_DB_FILE',
+  'TERM',
+  'TMUX',
+  'TMUX_PANE',
+  'WECOM_DB_FILE',
+  'WINDOW',
+  'XDG_SEAT',
+  'XDG_SESSION_CLASS',
+  'XDG_SESSION_ID',
+  'XDG_SESSION_TYPE',
+  'XDG_VTNR',
+]);
+
+function canonicalValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => [key, canonicalValue(item)]),
+  );
+}
+
+function fingerprintValue(value: unknown): string {
+  return createHash('sha256')
+    .update(JSON.stringify(canonicalValue(value)))
+    .digest('hex');
+}
+
+function hostEnvironmentNoise(name: string): boolean {
+  const normalized = name.toUpperCase();
+  const lower = name.toLowerCase();
+  return HOST_ENVIRONMENT_NOISE.has(normalized) ||
+    lower.startsWith('npm_config_') ||
+    lower.startsWith('npm_package_') ||
+    [
+      'npm_command',
+      'npm_execpath',
+      'npm_lifecycle_event',
+      'npm_lifecycle_script',
+      'npm_node_execpath',
+    ].includes(lower);
+}
+
+export function createUpdateRuntimeIdentity(
+  runtimeConfig: unknown,
+  environment: NodeJS.ProcessEnv,
+  platform: NodeJS.Platform = process.platform,
+): UpdateRuntimeIdentity {
+  const normalizedEnvironment = Object.fromEntries(
+    Object.entries(environment)
+      .filter(([name, value]) => {
+        return value !== undefined && !hostEnvironmentNoise(name);
+      })
+      .map(([name, value]) => [
+        platform === 'win32' ? name.toUpperCase() : name,
+        value!,
+      ] as const)
+      .sort((left, right) => left[0].localeCompare(right[0])),
+  );
+  return Object.freeze({
+    version: 1,
+    runtimeConfig: fingerprintValue(runtimeConfig),
+    hostEnvironment: fingerprintValue(normalizedEnvironment),
+  });
+}
+
+export function sameUpdateRuntimeIdentity(
+  left: UpdateRuntimeIdentity,
+  right: UpdateRuntimeIdentity,
+): boolean {
+  if (left.version !== right.version) return false;
+  return timingSafeEqual(
+    Buffer.from(left.runtimeConfig, 'hex'),
+    Buffer.from(right.runtimeConfig, 'hex'),
+  ) && timingSafeEqual(
+    Buffer.from(left.hostEnvironment, 'hex'),
+    Buffer.from(right.hostEnvironment, 'hex'),
+  );
 }
 
 export function parseControlResponse(value: unknown): ControlResponse {
@@ -223,6 +356,7 @@ export async function requestControl(
   home: string,
   command: ControlCommand,
   timeoutMs = CONTROL_TIMEOUT_MS,
+  updateIdentity?: UpdateRuntimeIdentity,
 ): Promise<ControlResponse> {
   if (command !== 'ping' && command !== 'stop' && command !== 'stop-if-idle') {
     throw new Error('control command is invalid');
@@ -230,12 +364,16 @@ export async function requestControl(
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new Error('control timeout must be a positive number');
   }
+  if (updateIdentity && command !== 'stop-if-idle') {
+    throw new Error('update identity is valid only for stop-if-idle');
+  }
   const record = readDaemonRecord(home);
   if (!record) throw new Error('Kintio daemon record does not exist');
   const source = `${JSON.stringify({
     version: 1,
     command,
     token: record.token,
+    ...(updateIdentity ? { updateIdentity } : {}),
   } satisfies ControlRequest)}\n`;
 
   return await new Promise<ControlResponse>((resolve, reject) => {

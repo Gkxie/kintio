@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Added equivalent `kintio update` and `kintio upgrade` commands that update an
+  identified global npm or pnpm installation to one exact published version,
+  refuse active Agent work, and restore an idle background instance in its
+  original service or iLink mode ([#74](https://github.com/Gkxie/kintio/issues/74)).
+
 ## 0.7.2
 
 - Prevented the background Agent process on Windows from opening a persistent

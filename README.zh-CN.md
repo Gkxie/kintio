@@ -46,6 +46,15 @@ npm install --global @kin-tio/cli
 codex login status
 ```
 
+通过 npm 或 pnpm 全局安装后，可直接升级当前安装：
+
+```bash
+kintio update
+```
+
+`kintio upgrade` 是完全等价的别名。Kintio 不会猜测无法识别的安装目录，也不会
+打断正在工作的 Agent；空闲的后台实例会按原来的 service 或 iLink 模式恢复。
+
 iLink 可以完全独立使用，不需要 `setup`、`.env` 或公网 HTTP：
 
 ```bash

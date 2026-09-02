@@ -146,9 +146,13 @@ If no daemon was running, the command updates only the CLI and does not start a
 new Runtime. A foreground Runtime or standalone login owns the instance lock but
 has no daemon control plane, so the updater refuses before installation.
 
-The daemon record supplies the pre-update mode and configuration. Restoration
-must use the new stable package root returned by installation ownership detection,
-not the old process's possibly versioned real path.
+The daemon record supplies the pre-update mode and normalized state paths. The
+running daemon keeps a versioned identity of its effective Runtime configuration
+and inherited host-Agent environment in memory; the atomic idle request must
+match it before shutdown. No credential digest is persisted. Restoration must
+use the new stable package root returned by installation ownership detection,
+not the old process's possibly versioned real path, and stable record identities
+are verified again before success is reported.
 
 ### Failure semantics
 
@@ -161,6 +165,8 @@ not the old process's possibly versioned real path.
 - Never downgrade automatically after a new Runtime may have opened or migrated
   state.
 - SIGINT/SIGTERM release owned locks and must not print a success result.
+- Package-manager interruption terminates and confirms the whole process tree;
+  if that cannot be proven, the Runtime remains stopped.
 
 ### Multi-instance scope
 

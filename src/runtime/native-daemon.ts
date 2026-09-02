@@ -6,6 +6,8 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
+  loadConfig,
+  loadIlinkRuntimeConfig,
   parseStartTimeout,
   WORKER_GRACEFUL_TIMEOUT_MS,
 } from '../config.ts';
@@ -15,9 +17,11 @@ import {
   controlAddress,
   CONTROL_MAX_BYTES,
   CONTROL_TIMEOUT_MS,
+  createUpdateRuntimeIdentity,
   daemonRecordPath,
   parseControlRequest,
   parseWorkerStopIfIdleResponse,
+  sameUpdateRuntimeIdentity,
   type ControlResponse,
   type DaemonMode,
   type DaemonPhase,
@@ -114,6 +118,13 @@ export async function runNativeDaemon({
   const token = randomBytes(32).toString('base64url');
   const address = controlAddress(instanceHome, process.platform, runId);
   const instancePackageRoot = path.resolve(packageRoot);
+  const effectiveConfig = (mode === 'ilink' ? loadIlinkRuntimeConfig : loadConfig)({
+    environment: { ...environment },
+    envFile: instanceConfig,
+    root: instanceHome,
+  });
+  const state = effectiveConfig.state;
+  const updateIdentity = createUpdateRuntimeIdentity(effectiveConfig, environment);
   let phase: DaemonPhase = 'starting';
   let lastError: string | undefined;
   let worker: ChildProcess | undefined;
@@ -405,6 +416,15 @@ export async function runNativeDaemon({
           return;
         }
         if (request.command === 'stop-if-idle') {
+          if (
+            request.updateIdentity &&
+            !sameUpdateRuntimeIdentity(request.updateIdentity, updateIdentity)
+          ) {
+            reject(
+              'The current environment does not match the running Kintio Runtime',
+            );
+            return;
+          }
           if ((phase === 'failed' || phase === 'backoff') && !worker) {
             phase = 'stopping';
             send(response(true, undefined, true), () => { void shutdown(); });
@@ -457,13 +477,17 @@ export async function runNativeDaemon({
     });
     if (process.platform !== 'win32') fs.chmodSync(address, 0o600);
     writeDaemonRecord(instanceHome, {
-      version: 1,
+      version: 2,
       runId,
       daemonPid: process.pid,
       configFile: instanceConfig,
       mode,
       packageRoot: instancePackageRoot,
       token,
+      state: {
+        databaseFile: state.databaseFile,
+        lockFile: state.lockFile,
+      },
     });
     log.line(`daemon started pid=${process.pid}`);
     startWorker();

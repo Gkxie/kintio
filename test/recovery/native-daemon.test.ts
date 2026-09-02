@@ -104,6 +104,11 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   assert.equal(daemonRecord?.configFile, configFile);
   assert.equal(daemonRecord?.mode, 'service');
   assert.equal(daemonRecord?.packageRoot, packageRoot);
+  assert.equal(daemonRecord?.version, 2);
+  assert.equal(
+    daemonRecord?.version === 2 ? daemonRecord.state.databaseFile : undefined,
+    path.join(home, 'data/kintio.sqlite'),
+  );
   assert.equal(
     await fs.readFile(path.join(home, 'data/daemon.json'), 'utf8'),
     daemonRecordSource,
