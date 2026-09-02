@@ -169,6 +169,7 @@ test('repository workflows preserve executable security boundaries', async () =>
     '.github/workflows/prepare-release.yml',
     '.github/workflows/pr-title.yml',
     '.github/workflows/real-codex.yml',
+    '.github/workflows/release-codex.yml',
     '.github/workflows/release-plan.yml',
     '.github/workflows/release-pr.yml',
     '.github/workflows/release.yml',
@@ -275,6 +276,54 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.doesNotMatch(realCodex, /^\s+CODEX_(?:MODEL|PATH|REASONING_EFFORT|WEB_SEARCH_MODE):/mu);
   assert.doesNotMatch(realCodex, /REAL_CODEX_CONCURRENCY|upload-artifact|download-artifact/u);
   assert.match(realCodex, /name: Remove isolated Codex state\n\s+if: always\(\)/u);
+
+  const releaseCodex = workflows.get('.github/workflows/release-codex.yml') || '';
+  assert.match(releaseCodex, /^  pull_request_target:\n    branches: \[master\]$/mu);
+  assert.doesNotMatch(releaseCodex, /^  (?:pull_request|push|workflow_dispatch|schedule):/mu);
+  assert.match(releaseCodex, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
+  for (const file of ['CHANGELOG.md', 'package.json', 'src/version.ts']) {
+    assert.match(
+      releaseCodex,
+      new RegExp(`^      - ${file.replaceAll('.', '\\.')}$`, 'mu'),
+    );
+  }
+  for (const identity of [
+    "github.event.pull_request.user.login == 'kintio-release[bot]'",
+    "github.actor == 'kintio-release[bot]'",
+    "github.triggering_actor == 'kintio-release[bot]'",
+    "github.actor == 'Gkxie'",
+    "github.triggering_actor == 'Gkxie'",
+  ]) assert.ok(releaseCodex.includes(identity), identity);
+  assert.match(releaseCodex, /github\.event_name == 'pull_request_target'/u);
+  assert.match(releaseCodex, /github\.event\.pull_request\.base\.repo\.full_name == github\.repository/u);
+  assert.match(releaseCodex, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/u);
+  assert.match(releaseCodex, /github\.event\.pull_request\.head\.ref == 'release\/next'/u);
+  assert.match(releaseCodex, /github\.event\.pull_request\.draft == false/u);
+  assert.match(releaseCodex, /github\.run_attempt == 1/u);
+  assert.match(releaseCodex, /group: release-codex-validation-/u);
+  assert.match(releaseCodex, /cancel-in-progress: true/u);
+  const authorizeJob = /^  authorize:\n([\s\S]*?)(?=^  validate:)/mu.exec(releaseCodex)?.[1] || '';
+  const validateJob = /^  validate:\n([\s\S]*)/mu.exec(releaseCodex)?.[1] || '';
+  assert.match(authorizeJob, /name: Authorize deterministic Release/u);
+  assert.doesNotMatch(authorizeJob, /environment: codex-eval|secrets\./u);
+  assert.match(authorizeJob, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u);
+  assert.match(authorizeJob, /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u);
+  assert.match(authorizeJob, /path: trusted/u);
+  assert.match(authorizeJob, /path: candidate/u);
+  assert.match(authorizeJob, /working-directory: candidate/u);
+  assert.match(authorizeJob, /test "\$\(git rev-parse HEAD\)" = "\$HEAD_SHA"/u);
+  assert.match(authorizeJob, /\.\.\/trusted\/\.github\/scripts\/reconcile-release\.ts verify/u);
+  assert.match(authorizeJob, /authorized=true\\nhead_sha=%s\\n/u);
+  assert.match(validateJob, /needs: authorize/u);
+  assert.match(validateJob, /if: needs\.authorize\.outputs\.authorized == 'true'/u);
+  assert.match(validateJob, /^    environment: codex-eval$/mu);
+  assert.match(validateJob, /ref: \$\{\{ needs\.authorize\.outputs\.head_sha \}\}/u);
+  assert.match(validateJob, /test "\$\(git rev-parse HEAD\)" = "\$AUTHORIZED_HEAD_SHA"/u);
+  assert.match(validateJob, /persist-credentials: false/u);
+  assert.match(validateJob, /pnpm install --frozen-lockfile --ignore-scripts/u);
+  assert.match(validateJob, /KINTIO_CI_API_KEY: \$\{\{ secrets\.KINTIO_CI_API_KEY \}\}/u);
+  assert.equal(releaseCodex.match(/secrets\.KINTIO_CI_API_KEY/gu)?.length, 1);
+  assert.match(validateJob, /name: Remove isolated Codex state\n\s+if: always\(\)/u);
 
   const prepareRelease = workflows.get('.github/workflows/prepare-release.yml') || '';
   assert.match(prepareRelease, /^  push:\n    branches: \[master\]$/mu);
