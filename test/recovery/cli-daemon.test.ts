@@ -141,7 +141,6 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     fs.copyFile('ilink.ts', path.join(packageRoot, 'ilink.ts')),
     fs.copyFile('tsconfig.json', path.join(packageRoot, 'tsconfig.json')),
     fs.copyFile('package.json', path.join(packageRoot, 'package.json')),
-    fs.copyFile('.env.example', path.join(packageRoot, '.env.example')),
     fs.symlink(
       path.resolve('node_modules'),
       path.join(packageRoot, 'node_modules'),
@@ -194,7 +193,6 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     'dist/ilink.js',
     'bin/kintio.js',
     'assets/ilink-login-card.png',
-    '.env.example',
   ]) assert.equal(packedFiles.includes(required), true, required);
   const tarball = path.join(root, manifest[0]?.filename || '');
   await fs.access(tarball);

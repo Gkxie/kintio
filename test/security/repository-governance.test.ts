@@ -43,7 +43,6 @@ test('English is canonical and Chinese is limited to the entry README', async ()
     .filter((file) => file !== 'README.zh-CN.md');
   const englishFiles = Array.from(new Set([
     ...rootMarkdown,
-    '.env.example',
     'LICENSE',
     'THIRD_PARTY_NOTICES',
     '.github/CODEOWNERS',
@@ -108,15 +107,9 @@ test('package, release version, and public entry points stay aligned', async () 
     packageJson.version,
   );
   assert.deepEqual(packageJson.files?.toSorted(), [
-    '.env.example',
     'CHANGELOG.md',
-    'LICENSE',
-    'README.md',
-    'README.zh-CN.md',
     'THIRD_PARTY_NOTICES',
-    'assets/avatar.svg',
     'assets/ilink-login-card.png',
-    'assets/logo.svg',
     'bin/kintio.js',
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
     'dist',
@@ -127,12 +120,12 @@ test('package, release version, and public entry points stay aligned', async () 
   for (const pattern of ['.env.*', '*.pem', '*.key', '*.sqlite', '*.db']) {
     assert.equal(ignored.has(pattern), true, `missing .gitignore pattern ${pattern}`);
   }
-  for (const file of ['README.md', 'README.zh-CN.md']) {
+  for (const [file, logoSource] of [
+    ['README.md', 'https://raw.githubusercontent.com/Gkxie/kintio/master/assets/logo.svg'],
+    ['README.zh-CN.md', 'assets/logo.svg'],
+  ] as const) {
     const readme = await read(file);
-    assert.match(
-      readme,
-      /<h1>\s+<img src="assets\/logo\.svg" alt="Kintio" width="320" \/>\s+<\/h1>/u,
-    );
+    assert.ok(readme.includes(`<img src="${logoSource}" alt="Kintio" width="320" />`));
     const installIndex = readme.indexOf('npm install --global @kin-tio/cli');
     const setupIndex = readme.indexOf('kintio setup');
     assert.notEqual(installIndex, -1);
@@ -188,16 +181,23 @@ test('repository workflows preserve executable security boundaries', async () =>
   }
 
   const ci = workflows.get('.github/workflows/ci.yml') || '';
+  const packagePreparation = await read('scripts/prepare-package.ts');
   assert.match(ci, /^  pull_request:$/mu);
   assert.doesNotMatch(ci, /^  (?:push|workflow_dispatch):/mu);
   for (const command of [
     'pnpm exec tsc -p tsconfig.test.json',
     'KNIP_DISABLE_RAW_TRANSFER=1 pnpm exec knip',
     'pnpm run build',
+    'scripts/prepare-package.ts',
     'npm pack --json --ignore-scripts',
     'npm install --global',
     'pnpm test',
   ]) assert.ok(ci.includes(command), command);
+  assert.match(ci, /packed Changelog does not start with the package version/u);
+  assert.match(ci, /packed Changelog contains repository-only headings/u);
+  assert.match(packagePreparation, /publishedChangelog/u);
+  assert.match(packagePreparation, /preparePackage/u);
+  assert.match(packagePreparation, /fs\.rm\('README\.zh-CN\.md'\)/u);
   for (const operatingSystem of [
     'ubuntu-latest',
     'macos-latest',
@@ -329,6 +329,7 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(release, /allowedReleaseFiles/u);
   assert.match(release, /Release tags must be annotated tags/u);
   assert.match(release, /contents: read[\s\S]+contents: write/u);
+  assert.match(release, /scripts\/prepare-package\.ts/u);
   assert.match(release, /npm pack --json --ignore-scripts/u);
   assert.match(release, /environment: npm-release/u);
   assert.equal(release.match(/id-token: write/gu)?.length, 1);
@@ -368,7 +369,7 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(verifyJob, /Release tags must be annotated tags/u);
   assert.ok(verifyJob.indexOf('tag_type=$(') < verifyJob.indexOf('npm pack'));
   assert.match(publishJob, /id-token: write/u);
-  assert.doesNotMatch(publishJob, /actions\/checkout|pnpm install/u);
+  assert.doesNotMatch(publishJob, /actions\/checkout|pnpm install|npm pack/u);
   assert.doesNotMatch(smokeJob, /id-token: write/u);
   assert.match(reportJob, /contents: read[\s\S]+pull-requests: write/u);
   assert.doesNotMatch(reportJob, /id-token: write|secrets\./u);
