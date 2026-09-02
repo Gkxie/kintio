@@ -27,6 +27,7 @@ test('iLink start runs and drains a foreground runtime without Hono', async () =
       return {
         messageProcessor: null,
         async start() { events.push('start'); },
+        stopAcceptingIfIdle() { return true; },
         stopAccepting() { events.push('stop'); },
         async close() { events.push('close'); },
         async abort() { events.push('abort'); },
@@ -53,6 +54,7 @@ test('background worker publishes readiness without terminal instructions', asyn
     create: async () => ({
       messageProcessor: null,
       async start() {},
+      stopAcceptingIfIdle() { return true; },
       stopAccepting() {},
       async close() {},
       async abort() {},
@@ -63,6 +65,42 @@ test('background worker publishes readiness without terminal instructions', asyn
   controller.abort();
   assert.equal(await running, 130);
   assert.equal(output.join(''), 'Kintio iLink runtime is active.\n');
+});
+
+test('iLink worker control exposes the Runtime atomic idle gate', async () => {
+  const controller = new AbortController();
+  const decisions = [false, true];
+  let stopIfIdle: (() => boolean) | undefined;
+  let calls = 0;
+  const running = startIlinkCliRuntime({
+    background: true,
+    config: config(),
+    signal: controller.signal,
+    stdout() {},
+    onStarted(control) {
+      stopIfIdle = control.stopIfIdleForUpdate;
+    },
+    create: async () => ({
+      messageProcessor: null,
+      async start() {},
+      stopAcceptingIfIdle() {
+        calls += 1;
+        return decisions.shift() ?? false;
+      },
+      stopAccepting() {},
+      async close() {},
+      async abort() {},
+    }),
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+
+  assert.ok(stopIfIdle);
+  assert.equal(stopIfIdle(), false);
+  assert.equal(stopIfIdle(), true);
+  assert.equal(calls, 2);
+
+  controller.abort();
+  assert.equal(await running, 130);
 });
 
 test('stopping the last account closes a foreground iLink runtime successfully', async () => {
@@ -77,6 +115,7 @@ test('stopping the last account closes a foreground iLink runtime successfully',
       return {
         messageProcessor: null,
         async start() { events.push('start'); },
+        stopAcceptingIfIdle() { return true; },
         stopAccepting() { events.push('stop'); },
         async close() { events.push('close'); },
         async abort() { events.push('abort'); },
@@ -102,6 +141,7 @@ test('iLink start closes a runtime whose startup fails', async () => {
         events.push('start');
         throw new Error('simulated iLink startup failure');
       },
+      stopAcceptingIfIdle() { return true; },
       stopAccepting() { events.push('stop'); },
       async close() { events.push('close'); },
       async abort() { events.push('abort'); },
@@ -140,6 +180,7 @@ test('iLink start force-aborts after its bounded graceful shutdown', async () =>
     create: async () => ({
       messageProcessor: null,
       async start() { events.push('start'); },
+      stopAcceptingIfIdle() { return true; },
       stopAccepting() { events.push('stop'); },
       close() {
         events.push('close');

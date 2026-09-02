@@ -17,9 +17,11 @@ import {
   CONTROL_TIMEOUT_MS,
   daemonRecordPath,
   parseControlRequest,
+  parseWorkerStopIfIdleResponse,
   type ControlResponse,
   type DaemonMode,
   type DaemonPhase,
+  type WorkerStopIfIdleRequest,
   writeDaemonRecord,
 } from './daemon-protocol.ts';
 
@@ -28,6 +30,7 @@ const RESTART_WINDOW_MS = 5 * 60_000;
 const RESTART_DELAYS_MS = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000] as const;
 const LOG_LIMIT_BYTES = 10 * 1024 * 1024;
 const LOG_GENERATIONS = 5;
+const DEFAULT_WORKER_CONTROL_TIMEOUT_MS = CONTROL_TIMEOUT_MS - 500;
 
 function sleep(milliseconds: number): Promise<void> {
   return delay(milliseconds, undefined, { ref: false });
@@ -83,13 +86,23 @@ export async function runNativeDaemon({
   packageRoot,
   mode = 'service',
   environment = process.env,
+  workerControlTimeoutMs = DEFAULT_WORKER_CONTROL_TIMEOUT_MS,
 }: {
   home: string;
   configFile: string;
   packageRoot: string;
   mode?: DaemonMode;
   environment?: NodeJS.ProcessEnv;
+  workerControlTimeoutMs?: number;
 }): Promise<void> {
+  if (
+    !Number.isInteger(workerControlTimeoutMs) || workerControlTimeoutMs < 1 ||
+    workerControlTimeoutMs >= CONTROL_TIMEOUT_MS
+  ) {
+    throw new Error(
+      `worker control timeout must be an integer below ${CONTROL_TIMEOUT_MS}ms`,
+    );
+  }
   const instanceHome = path.resolve(home);
   const instanceConfig = path.resolve(configFile);
   const dataDirectory = ensurePrivateDirectory(path.join(instanceHome, 'data'));
@@ -105,6 +118,7 @@ export async function runNativeDaemon({
   let lastError: string | undefined;
   let worker: ChildProcess | undefined;
   let workerExit: Promise<void> = Promise.resolve();
+  let workerIdleProbe: Promise<boolean> | undefined;
   let stopping: Promise<void> | undefined;
   let cleanup: Promise<void> | undefined;
   const sockets = new Set<net.Socket>();
@@ -114,16 +128,92 @@ export async function runNativeDaemon({
   const startupTimeoutMs = parseStartTimeout(environment.KINTIO_START_TIMEOUT_MS);
   const handleSignal = (): void => { void shutdown(); };
 
-  const response = (ok: boolean, message?: string): ControlResponse => ({
+  const response = (
+    ok: boolean,
+    message?: string,
+    idle?: boolean,
+  ): ControlResponse => ({
     ok,
     runId,
     daemonPid: process.pid,
     ...(worker?.pid ? { workerPid: worker.pid } : {}),
     phase,
+    ...(idle === undefined ? {} : { idle }),
     ...((message || (ok ? lastError : undefined))
       ? { message: (message || lastError)!.slice(0, 2_048) }
       : {}),
   });
+
+  function requestWorkerStopIfIdle(): Promise<boolean> {
+    if (workerIdleProbe) {
+      return Promise.reject(new Error('another Worker stop-if-idle check is active'));
+    }
+    const active = worker;
+    if (
+      phase !== 'running' || !active?.pid || !active.connected ||
+      active.exitCode !== null || active.signalCode !== null
+    ) {
+      return Promise.reject(new Error('Kintio Worker is not ready for an idle check'));
+    }
+    const requestId = `idle_${randomBytes(18).toString('base64url')}`;
+    const request: WorkerStopIfIdleRequest = {
+      type: 'stop-if-idle',
+      requestId,
+    };
+    const operation = new Promise<boolean>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error, idle?: boolean): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        active.off('message', onMessage);
+        active.off('close', onClose);
+        if (error) reject(error);
+        else resolve(Boolean(idle));
+      };
+      const onClose = (): void => {
+        finish(new Error('Kintio Worker exited during its idle check'));
+      };
+      const onMessage = (message: unknown): void => {
+        if (
+          !message || typeof message !== 'object' || !('type' in message) ||
+          message.type !== 'stop-if-idle-result' ||
+          !('requestId' in message) || message.requestId !== requestId
+        ) return;
+        try {
+          const result = parseWorkerStopIfIdleResponse(message);
+          if (result.pid !== active.pid) {
+            throw new Error('Worker idle response PID does not match the active Worker');
+          }
+          if (!result.ok) {
+            throw new Error(result.message || 'Worker idle check failed');
+          }
+          finish(undefined, result.idle);
+        } catch (error: unknown) {
+          finish(new Error(`Invalid Worker idle response: ${errorMessage(error)}`));
+        }
+      };
+      const timer = setTimeout(
+        () => finish(new Error('Kintio Worker idle check timed out')),
+        workerControlTimeoutMs,
+      );
+      timer.unref?.();
+      active.on('message', onMessage);
+      active.once('close', onClose);
+      try {
+        active.send(request, (error) => {
+          if (error) finish(new Error(`Unable to request Worker idle state: ${error.message}`));
+        });
+      } catch (error: unknown) {
+        finish(new Error(`Unable to request Worker idle state: ${errorMessage(error)}`));
+      }
+    });
+    const tracked = operation.finally(() => {
+      if (workerIdleProbe === tracked) workerIdleProbe = undefined;
+    });
+    workerIdleProbe = tracked;
+    return tracked;
+  }
 
   async function stopWorker(): Promise<void> {
     const active = worker;
@@ -279,14 +369,19 @@ export async function runNativeDaemon({
     socket.setTimeout(CONTROL_TIMEOUT_MS);
     const chunks: Buffer[] = [];
     let size = 0;
-    let handled = false;
+    let requestStarted = false;
+    let responded = false;
+    const send = (value: ControlResponse, onFlushed?: () => void): boolean => {
+      if (responded) return false;
+      responded = true;
+      socket.end(`${JSON.stringify(value)}\n`, onFlushed);
+      return true;
+    };
     const reject = (message: string): void => {
-      if (handled) return;
-      handled = true;
-      socket.end(`${JSON.stringify(response(false, message))}\n`);
+      send(response(false, message));
     };
     socket.on('data', (chunk: Buffer) => {
-      if (handled) return;
+      if (requestStarted || responded) return;
       size += chunk.length;
       if (size > CONTROL_MAX_BYTES) {
         reject('control request exceeds protocol limit');
@@ -304,13 +399,32 @@ export async function runNativeDaemon({
           reject('control authentication failed');
           return;
         }
-        handled = true;
-        const output = `${JSON.stringify(response(true))}\n`;
+        requestStarted = true;
         if (request.command === 'stop') {
-          socket.end(output, () => { void shutdown(); });
-        } else {
-          socket.end(output);
+          send(response(true), () => { void shutdown(); });
+          return;
         }
+        if (request.command === 'stop-if-idle') {
+          if ((phase === 'failed' || phase === 'backoff') && !worker) {
+            phase = 'stopping';
+            send(response(true, undefined, true), () => { void shutdown(); });
+            return;
+          }
+          if (phase !== 'running' || !worker) {
+            reject('Kintio Worker is not running; idle state cannot be proven');
+            return;
+          }
+          void requestWorkerStopIfIdle().then((idle) => {
+            if (responded) return;
+            if (idle) phase = 'stopping';
+            send(
+              response(true, undefined, idle),
+              idle ? () => { void shutdown(); } : undefined,
+            );
+          }).catch((error: unknown) => reject(errorMessage(error)));
+          return;
+        }
+        send(response(true));
       } catch (error: unknown) {
         reject(errorMessage(error));
       }

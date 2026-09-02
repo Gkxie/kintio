@@ -8,7 +8,7 @@ import * as z from 'zod/v4';
 import { canonicalPath } from '../lib/path-identity.ts';
 import { ensurePrivateDirectory } from '../lib/private-directory.ts';
 
-export type ControlCommand = 'ping' | 'stop';
+export type ControlCommand = 'ping' | 'stop' | 'stop-if-idle';
 export type DaemonPhase = 'starting' | 'running' | 'backoff' | 'stopping' | 'failed';
 export type DaemonMode = 'service' | 'ilink';
 
@@ -37,7 +37,7 @@ const daemonRecordSchema = z.strictObject({
 
 const controlRequestSchema = z.strictObject({
   version: z.literal(1),
-  command: z.enum(['ping', 'stop']),
+  command: z.enum(['ping', 'stop', 'stop-if-idle']),
   token,
 });
 
@@ -47,12 +47,55 @@ const controlResponseSchema = z.strictObject({
   daemonPid: positiveInteger,
   workerPid: positiveInteger.optional(),
   phase,
+  idle: z.boolean().optional(),
   message: z.string().min(1).max(2_048).optional(),
+});
+
+const workerStopIfIdleRequestSchema = z.strictObject({
+  type: z.literal('stop-if-idle'),
+  requestId: runId,
+});
+
+const workerStopIfIdleResponseSchema = z.strictObject({
+  type: z.literal('stop-if-idle-result'),
+  requestId: runId,
+  pid: positiveInteger,
+  ok: z.boolean(),
+  idle: z.boolean().optional(),
+  message: z.string().min(1).max(2_048).optional(),
+}).superRefine((value, context) => {
+  if (value.ok && value.idle === undefined) {
+    context.addIssue({
+      code: 'custom',
+      message: 'successful stop-if-idle response requires idle',
+      path: ['idle'],
+    });
+  }
+  if (!value.ok && !value.message) {
+    context.addIssue({
+      code: 'custom',
+      message: 'failed stop-if-idle response requires message',
+      path: ['message'],
+    });
+  }
+  if (!value.ok && value.idle !== undefined) {
+    context.addIssue({
+      code: 'custom',
+      message: 'failed stop-if-idle response cannot authorize an idle decision',
+      path: ['idle'],
+    });
+  }
 });
 
 export type DaemonRecord = Readonly<z.infer<typeof daemonRecordSchema>>;
 export type ControlRequest = Readonly<z.infer<typeof controlRequestSchema>>;
 export type ControlResponse = Readonly<z.infer<typeof controlResponseSchema>>;
+export type WorkerStopIfIdleRequest = Readonly<
+  z.infer<typeof workerStopIfIdleRequestSchema>
+>;
+export type WorkerStopIfIdleResponse = Readonly<
+  z.infer<typeof workerStopIfIdleResponseSchema>
+>;
 
 export function parseDaemonRecord(value: unknown): DaemonRecord {
   return Object.freeze(daemonRecordSchema.parse(value));
@@ -64,6 +107,18 @@ export function parseControlRequest(value: unknown): ControlRequest {
 
 export function parseControlResponse(value: unknown): ControlResponse {
   return Object.freeze(controlResponseSchema.parse(value));
+}
+
+export function parseWorkerStopIfIdleRequest(
+  value: unknown,
+): WorkerStopIfIdleRequest {
+  return Object.freeze(workerStopIfIdleRequestSchema.parse(value));
+}
+
+export function parseWorkerStopIfIdleResponse(
+  value: unknown,
+): WorkerStopIfIdleResponse {
+  return Object.freeze(workerStopIfIdleResponseSchema.parse(value));
 }
 
 export function daemonRecordPath(home: string): string {
@@ -169,7 +224,7 @@ export async function requestControl(
   command: ControlCommand,
   timeoutMs = CONTROL_TIMEOUT_MS,
 ): Promise<ControlResponse> {
-  if (command !== 'ping' && command !== 'stop') {
+  if (command !== 'ping' && command !== 'stop' && command !== 'stop-if-idle') {
     throw new Error('control command is invalid');
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -221,6 +276,16 @@ export async function requestControl(
         }
         if (!response.ok) {
           throw new Error(response.message || 'Kintio control request was rejected');
+        }
+        if (command === 'stop-if-idle') {
+          if (response.idle === undefined) {
+            throw new Error('stop-if-idle response omitted the idle decision');
+          }
+          if (response.idle && response.phase !== 'stopping') {
+            throw new Error('stop-if-idle acceptance did not enter the stopping phase');
+          }
+        } else if (response.idle !== undefined) {
+          throw new Error(`unexpected idle decision in ${command} response`);
         }
         if (finish()) resolve(response);
       } catch (error: unknown) {

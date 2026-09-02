@@ -41,6 +41,7 @@ import { KINTIO_VERSION } from './version.ts';
 export interface Runtime {
   readonly messageProcessor: WecomSync | null;
   start(): Promise<void>;
+  stopAcceptingIfIdle(): boolean;
   stopAccepting(): void;
   close(): Promise<void>;
   abort(): Promise<void>;
@@ -75,10 +76,18 @@ export async function createRuntime({
     (!config.codex.enabled && !config.ilink.enabled)
   ) {
     logger.info('[runtime] message processing is disabled');
+    let accepting = true;
     return {
       messageProcessor: null,
-      async start() {},
-      stopAccepting() {},
+      async start() {
+        if (!accepting) throw new Error('Kintio runtime is stopping');
+      },
+      stopAcceptingIfIdle() {
+        if (!accepting) return false;
+        accepting = false;
+        return true;
+      },
+      stopAccepting() { accepting = false; },
       async close() {},
       async abort() {},
     };
@@ -151,6 +160,10 @@ export async function createRuntime({
     const activeIlinkEnrollment = ensureIlinkEnrollment();
     const ilinkSecretBox = activeIlinkEnrollment?.secretBox;
     const ilinkStore = activeIlinkEnrollment?.accounts;
+    let terminalLoginBegins = 0;
+    const terminalLoginActive = (): boolean =>
+      terminalLoginBegins > 0 ||
+      Boolean(ilinkEnrollment?.manager.hasActiveLocalOperatorLogin());
     const wechatTools = apiClient && mediaGateway
       ? new WechatKfToolExecutor({
           store,
@@ -220,16 +233,25 @@ export async function createRuntime({
       operator: () => createIlinkLoginMcpServer({
         async begin(signal) {
           if (toolsUnavailable) throw new Error('service unavailable');
-          return (await startIlinkEnrollment()).manager.offer(
-            { kind: 'terminal' },
-            signal ? { signal } : {},
-          );
+          terminalLoginBegins += 1;
+          try {
+            const offer = await (await startIlinkEnrollment()).manager.offer(
+              { kind: 'terminal' },
+              signal ? { signal } : {},
+            );
+            return offer;
+          } finally {
+            terminalLoginBegins -= 1;
+          }
         },
         status(offerId) {
           if (toolsUnavailable) throw new Error('service unavailable');
-          return ensureIlinkEnrollment().manager.status(offerId);
+          const result = ensureIlinkEnrollment().manager.status(offerId);
+          return result;
         },
-        cancel: (offerId) => ilinkEnrollment?.manager.cancel(offerId) || false,
+        cancel(offerId) {
+          return ilinkEnrollment?.manager.cancel(offerId) || false;
+        },
         listAccounts: () => ensureIlinkEnrollment().accounts.listActiveAccounts()
           .map((account) => ({
             accountKey: account.accountKey,
@@ -316,6 +338,12 @@ export async function createRuntime({
           if (!accepting) return Promise.reject(new Error('Kintio runtime is stopping'));
           started ||= startIlinkEnrollment().then(() => undefined);
           return started;
+        },
+        stopAcceptingIfIdle() {
+          if (!accepting || terminalLoginActive()) return false;
+          accepting = false;
+          toolsUnavailable = true;
+          return true;
         },
         stopAccepting() {
           accepting = false;
@@ -537,13 +565,14 @@ export async function createRuntime({
       : undefined;
     let starting: Promise<void> | undefined;
     let startupRecovery: Promise<void> | undefined;
+    let startupRecoveryActive = false;
     let closing: Promise<void> | undefined;
     let accepting = true;
     let ilinkClosing: Promise<void> | undefined;
     let deferredDrain: Promise<void> | undefined;
     let deferredDrainRequested = false;
     const drainDeferred = async () => {
-      while (!closing) {
+      while (!closing && accepting) {
         await sync?.waitForIdle();
         await processor.waitForIdle();
         const records = activeStore.activateNextDeferredConversation(enabledChannels);
@@ -553,7 +582,7 @@ export async function createRuntime({
       }
     };
     requestDeferredDrain = () => {
-      if (closing) return;
+      if (closing || !accepting) return;
       deferredDrainRequested = true;
       if (deferredDrain) return;
       deferredDrain = (async () => {
@@ -569,7 +598,9 @@ export async function createRuntime({
         );
       }).finally(() => {
         deferredDrain = undefined;
-        if (deferredDrainRequested && !closing) queueMicrotask(requestDeferredDrain);
+        if (deferredDrainRequested && !closing && accepting) {
+          queueMicrotask(requestDeferredDrain);
+        }
       });
     };
     const runtime = {
@@ -586,6 +617,7 @@ export async function createRuntime({
           await ilinkListener?.start();
           ilinkRuntimeStarted = true;
           await startIlinkEnrollment();
+          startupRecoveryActive = true;
           startupRecovery = Promise.all([catchUp, recovery])
             .then(async () => {
               await channelDispatcher.kick();
@@ -595,11 +627,24 @@ export async function createRuntime({
               logger.error(
                 `[recovery] startup backlog failed: ${
                   error instanceof Error ? error.message : String(error)
-                }`,
+                  }`,
               );
+            }).finally(() => {
+              startupRecoveryActive = false;
             });
         })();
         return starting;
+      },
+      stopAcceptingIfIdle() {
+        if (
+          !accepting || startupRecoveryActive || deferredDrainRequested ||
+          deferredDrain !== undefined || !processor.isIdle() ||
+          terminalLoginActive() ||
+          Boolean(ilinkTools && !ilinkTools.isIdle()) ||
+          Boolean(wechatTools && !wechatTools.isIdle())
+        ) return false;
+        runtime.stopAccepting();
+        return true;
       },
       stopAccepting() {
         if (!accepting) return;

@@ -12,6 +12,8 @@ import {
   parseControlRequest,
   parseControlResponse,
   parseDaemonRecord,
+  parseWorkerStopIfIdleRequest,
+  parseWorkerStopIfIdleResponse,
   readDaemonRecord,
   requestControl,
   writeDaemonRecord,
@@ -88,6 +90,26 @@ test('protocol schemas are versioned, closed, and validate security-sensitive fi
     token: TOKEN,
   });
   assert.deepEqual(parseControlResponse(response()), response());
+  assert.deepEqual(parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle',
+    requestId: 'request_1',
+  }), {
+    type: 'stop-if-idle',
+    requestId: 'request_1',
+  });
+  assert.deepEqual(parseWorkerStopIfIdleResponse({
+    type: 'stop-if-idle-result',
+    requestId: 'request_1',
+    pid: 5678,
+    ok: true,
+    idle: false,
+  }), {
+    type: 'stop-if-idle-result',
+    requestId: 'request_1',
+    pid: 5678,
+    ok: true,
+    idle: false,
+  });
 
   assert.throws(() => parseDaemonRecord({ ...daemon(), extra: true }));
   assert.throws(() => parseDaemonRecord({ ...daemon(), configFile: 'relative.env' }));
@@ -95,6 +117,28 @@ test('protocol schemas are versioned, closed, and validate security-sensitive fi
   assert.throws(() => parseControlRequest({ version: 1, command: 'restart', token: TOKEN }));
   assert.throws(() => parseControlResponse({ ...response(), phase: 'online' }));
   assert.throws(() => parseControlResponse({ ...response(), message: '' }));
+  assert.throws(() => parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle', requestId: '',
+  }));
+  assert.throws(() => parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle', requestId: 'bad request',
+  }));
+  assert.throws(() => parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle', requestId: 'x'.repeat(129),
+  }));
+  assert.throws(() => parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle', requestId: 'request_1', extra: true,
+  }));
+  assert.throws(() => parseWorkerStopIfIdleResponse({
+    type: 'stop-if-idle-result', requestId: 'request_1', pid: 5678, ok: true,
+  }));
+  assert.throws(() => parseWorkerStopIfIdleResponse({
+    type: 'stop-if-idle-result', requestId: 'request_1', pid: 5678, ok: false,
+  }));
+  assert.throws(() => parseWorkerStopIfIdleResponse({
+    type: 'stop-if-idle-result', requestId: 'request_1', pid: 5678,
+    ok: false, idle: false, message: 'failed',
+  }));
 });
 
 test('daemon identity and control capability share one private static record', async (t) => {
@@ -154,7 +198,7 @@ async function listen(
   });
 }
 
-test('control client authenticates ping and stop over one local IPC message', async (t) => {
+test('control client authenticates lifecycle commands over one local IPC message', async (t) => {
   const home = await temporaryHome(t);
   writeDaemonRecord(home, daemon());
   const commands: string[] = [];
@@ -162,13 +206,46 @@ test('control client authenticates ping and stop over one local IPC message', as
     const parsed = parseControlRequest(value);
     commands.push(parsed.command);
     return `${JSON.stringify(response({
-      phase: parsed.command === 'stop' ? 'stopping' : 'running',
+      phase: parsed.command === 'stop' || parsed.command === 'stop-if-idle'
+        ? 'stopping'
+        : 'running',
+      ...(parsed.command === 'stop-if-idle' ? { idle: true } : {}),
     }))}\n`;
   });
 
   assert.deepEqual(await requestControl(home, 'ping'), response());
   assert.deepEqual(await requestControl(home, 'stop'), response({ phase: 'stopping' }));
-  assert.deepEqual(commands, ['ping', 'stop']);
+  assert.deepEqual(await requestControl(home, 'stop-if-idle'), response({
+    phase: 'stopping',
+    idle: true,
+  }));
+  assert.deepEqual(commands, ['ping', 'stop', 'stop-if-idle']);
+});
+
+test('stop-if-idle client fails closed on omitted or contradictory decisions', async (t) => {
+  const omittedHome = await temporaryHome(t);
+  writeDaemonRecord(omittedHome, daemon());
+  await listen(t, omittedHome, () => `${JSON.stringify(response())}\n`);
+  await assert.rejects(
+    requestControl(omittedHome, 'stop-if-idle'),
+    /omitted the idle decision/u,
+  );
+
+  const phaseHome = await temporaryHome(t);
+  writeDaemonRecord(phaseHome, daemon());
+  await listen(t, phaseHome, () => `${JSON.stringify(response({ idle: true }))}\n`);
+  await assert.rejects(
+    requestControl(phaseHome, 'stop-if-idle'),
+    /did not enter the stopping phase/u,
+  );
+
+  const unexpectedHome = await temporaryHome(t);
+  writeDaemonRecord(unexpectedHome, daemon());
+  await listen(t, unexpectedHome, () => `${JSON.stringify(response({ idle: false }))}\n`);
+  await assert.rejects(
+    requestControl(unexpectedHome, 'ping'),
+    /unexpected idle decision/u,
+  );
 });
 
 test('control client rejects server failures, stale identity, oversized output, and timeout', async (t) => {

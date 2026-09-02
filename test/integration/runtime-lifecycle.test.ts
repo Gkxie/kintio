@@ -46,7 +46,9 @@ test('disabled runtime exposes complete no-op lifecycle', async (t) => {
   const runtime = await createRuntime({ config, logger });
   assert.equal(runtime.messageProcessor, null);
   await runtime.start();
-  runtime.stopAccepting();
+  assert.equal(runtime.stopAcceptingIfIdle(), true);
+  assert.equal(runtime.stopAcceptingIfIdle(), false);
+  await assert.rejects(runtime.start(), /runtime is stopping/u);
   await runtime.abort();
   await runtime.close();
 });
@@ -212,6 +214,11 @@ test('runtime readiness does not wait for a blocked startup catch-up backlog', a
       throw new Error('runtime readiness waited for startup catch-up');
     }),
   ]);
+  assert.equal(runtime.stopAcceptingIfIdle(), false);
+  assert.equal(await runtime.start(), undefined);
   releaseSync();
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline && !runtime.stopAcceptingIfIdle()) await delay(10);
+  await assert.rejects(runtime.start(), /runtime is stopping/u);
   await runtime.close();
 });
