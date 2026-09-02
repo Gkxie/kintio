@@ -1176,7 +1176,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
   const home = path.join(root, 'instance');
   const idleFile = path.join(root, 'worker-idle');
   const mutateConfigFile = path.join(root, 'worker-mutate-config');
-  const stateFile = path.join(root, 'state', 'custom.sqlite');
+  const stateFile = path.join(home, 'custom-state', 'custom.sqlite');
   const { packageRoot, prefix } = await updatePackage(root);
   await Promise.all([
     fs.mkdir(path.join(packageRoot, 'dist'), { recursive: true }),

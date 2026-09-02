@@ -37,6 +37,12 @@ async function writeInstalledPackage(packageRoot: string, version = '1.2.3'): Pr
   ]);
 }
 
+function npmPackageRoot(prefix: string): string {
+  return process.platform === 'win32'
+    ? path.join(prefix, 'node_modules/@kin-tio/cli')
+    : path.join(prefix, 'lib/node_modules/@kin-tio/cli');
+}
+
 test('stable update versions compare without accepting aliases or prereleases', () => {
   assert.deepEqual(parseStableVersion('1.20.3'), [1, 20, 3]);
   assert.equal(compareStableVersions('1.10.0', '1.9.99'), 1);
@@ -261,7 +267,7 @@ test('an unresponsive package manager is killed at the update deadline', async (
 test('global installation probes bind update planning to the owning npm prefix', async (t) => {
   const root = await temporaryRoot(t);
   const prefix = path.join(root, 'npm prefix with spaces');
-  const packageRoot = path.join(prefix, 'lib/node_modules/@kin-tio/cli');
+  const packageRoot = npmPackageRoot(prefix);
   await writeInstalledPackage(packageRoot);
   const calls: string[] = [];
   const installation = await probeGlobalInstallation({

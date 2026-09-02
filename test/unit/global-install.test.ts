@@ -32,6 +32,12 @@ async function writePackage(packageRoot: string, version = '1.2.3'): Promise<voi
   ]);
 }
 
+function npmPackageRoot(prefix: string): string {
+  return process.platform === 'win32'
+    ? path.join(prefix, 'node_modules/@kin-tio/cli')
+    : path.join(prefix, 'lib/node_modules/@kin-tio/cli');
+}
+
 function windowsIdentity(
   packageRoot: string,
   realPackageRoot = packageRoot,
@@ -157,10 +163,10 @@ test('rejects missing, redirected, oversized, or malformed package metadata', as
   );
 });
 
-test('detects an npm-owned POSIX installation and pins its spaced prefix', async (t) => {
+test('detects an npm-owned installation and pins its spaced prefix', async (t) => {
   const root = await temporaryRoot(t, 'kintio-global-npm-');
   const prefix = path.join(root, 'Node Prefix With Spaces');
-  const packageRoot = path.join(prefix, 'lib/node_modules/@kin-tio/cli');
+  const packageRoot = npmPackageRoot(prefix);
   await writePackage(packageRoot);
 
   const installation = detectGlobalInstallation({
@@ -191,7 +197,7 @@ test('rejects npm links and package-manager probes that do not own the package',
   const root = await temporaryRoot(t, 'kintio-global-link-');
   const source = path.join(root, 'source');
   const prefix = path.join(root, 'global');
-  const linked = path.join(prefix, 'lib/node_modules/@kin-tio/cli');
+  const linked = npmPackageRoot(prefix);
   await writePackage(source);
   await fs.mkdir(path.dirname(linked), { recursive: true });
   await fs.symlink(source, linked, process.platform === 'win32' ? 'junction' : 'dir');
