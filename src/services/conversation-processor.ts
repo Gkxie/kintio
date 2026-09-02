@@ -979,6 +979,14 @@ export class ConversationProcessor {
     }
   }
 
+  isIdle(): boolean {
+    return !(
+      this.#recoveries.size || this.#queues.size || this.#background.size ||
+      this.#activeConversations.size || this.#highWaiters.length ||
+      this.#lowWaiters.length
+    );
+  }
+
   stopAccepting(): void {
     this.#accepting = false;
   }

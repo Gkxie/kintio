@@ -355,6 +355,18 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   assert.equal(logs.code, 0, logs.output);
   assert.match(logs.output, /Hono server is listening/u);
 
+  const idleStopped = await requestControl(instanceRoot, 'stop-if-idle');
+  assert.equal(idleStopped.idle, true);
+  assert.equal(idleStopped.phase, 'stopping');
+  await waitForPortRelease(port);
+  await waitForRemoval(path.join(instanceRoot, 'data/daemon.lock'));
+  const resumed = await kintio(
+    ['start', '--home', instanceRoot],
+    explicitEnvironment,
+  );
+  assert.equal(resumed.code, 0, resumed.output);
+  assert.equal((await waitForResponse(port)).status, 200);
+
   const restarted = await kintio(
     ['restart', '--home', instanceRoot],
     explicitEnvironment,

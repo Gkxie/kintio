@@ -134,6 +134,17 @@ export class KintioSupervisor {
     return this.#closing;
   }
 
+  stopIfIdleForUpdate(): boolean {
+    if (this.#state !== 'running' || !this.#runtime) {
+      throw new Error(`Kintio supervisor cannot enter update shutdown from ${this.#state}`);
+    }
+    if (!this.#runtime.stopAcceptingIfIdle()) return false;
+    this.#ingressOpen = false;
+    this.#runtimeIngressStopped = true;
+    this.#state = 'closing';
+    return true;
+  }
+
   abortForExit(): Promise<void> {
     if (this.#aborting) return this.#aborting;
     if (this.#state === 'closed') return Promise.resolve();

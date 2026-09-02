@@ -15,7 +15,9 @@ export interface IlinkCliStartOptions {
   readonly signal: AbortSignal;
   readonly stdout: (text: string) => void;
   readonly logger?: Logger;
-  readonly onStarted?: () => void | Promise<void>;
+  readonly onStarted?: (control: {
+    readonly stopIfIdleForUpdate: () => boolean;
+  }) => void | Promise<void>;
   readonly create?: (options: {
     readonly config: RuntimeConfig;
     readonly logger?: Logger;
@@ -68,7 +70,9 @@ export async function startIlinkCliRuntime(options: IlinkCliStartOptions): Promi
   });
   try {
     await runtime.start();
-    await options.onStarted?.();
+    await options.onStarted?.({
+      stopIfIdleForUpdate: () => runtime.stopAcceptingIfIdle(),
+    });
     options.stdout(
       options.background
         ? 'Kintio iLink runtime is active.\n'

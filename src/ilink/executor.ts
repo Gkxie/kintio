@@ -430,4 +430,8 @@ export class IlinkSendExecutor implements IlinkToolExecutor {
   async waitForIdle(): Promise<void> {
     await Promise.allSettled([...this.#queues.values()]);
   }
+
+  isIdle(): boolean {
+    return this.#queues.size === 0;
+  }
 }

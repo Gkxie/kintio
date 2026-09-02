@@ -8,12 +8,16 @@ import { test } from 'vitest';
 
 import {
   controlAddress,
+  createUpdateRuntimeIdentity,
   daemonRecordPath,
   parseControlRequest,
   parseControlResponse,
   parseDaemonRecord,
+  parseWorkerStopIfIdleRequest,
+  parseWorkerStopIfIdleResponse,
   readDaemonRecord,
   requestControl,
+  sameUpdateRuntimeIdentity,
   writeDaemonRecord,
   type ControlResponse,
   type DaemonRecord,
@@ -29,15 +33,21 @@ async function temporaryHome(t: TestContext): Promise<string> {
   return home;
 }
 
-function daemon(overrides: Partial<DaemonRecord> = {}): DaemonRecord {
+type CurrentDaemonRecord = Extract<DaemonRecord, { readonly version: 2 }>;
+
+function daemon(overrides: Partial<CurrentDaemonRecord> = {}): CurrentDaemonRecord {
   return {
-    version: 1,
+    version: 2,
     runId: 'run_1',
     daemonPid: 1234,
     configFile: CONFIG_FILE,
     mode: 'service',
     packageRoot: PACKAGE_ROOT,
     token: TOKEN,
+    state: {
+      databaseFile: path.resolve('/tmp/kintio-state/kintio.sqlite'),
+      lockFile: path.resolve('/tmp/kintio-state/kintio.lock'),
+    },
     ...overrides,
   };
 }
@@ -79,22 +89,160 @@ test('control address identity follows filesystem aliases', async (t) => {
 
 test('protocol schemas are versioned, closed, and validate security-sensitive fields', () => {
   assert.deepEqual(parseDaemonRecord(daemon()), daemon());
-  const legacy: Record<string, unknown> = { ...daemon() };
-  delete legacy.mode;
-  assert.deepEqual(parseDaemonRecord(legacy), daemon());
+  const current = daemon();
+  const legacy = {
+    version: 1,
+    runId: current.runId,
+    daemonPid: current.daemonPid,
+    configFile: current.configFile,
+    packageRoot: current.packageRoot,
+    token: current.token,
+  };
+  assert.deepEqual(parseDaemonRecord(legacy), {
+    version: 1,
+    runId: current.runId,
+    daemonPid: current.daemonPid,
+    configFile: current.configFile,
+    mode: 'service',
+    packageRoot: current.packageRoot,
+    token: current.token,
+  });
   assert.deepEqual(parseControlRequest({ version: 1, command: 'stop', token: TOKEN }), {
     version: 1,
     command: 'stop',
     token: TOKEN,
   });
+  const updateIdentity = createUpdateRuntimeIdentity(
+    { mode: 'service' },
+    { PATH: '/tools', CODEX_HOME: '/agent' },
+  );
+  assert.deepEqual(parseControlRequest({
+    version: 1,
+    command: 'stop-if-idle',
+    token: TOKEN,
+    updateIdentity,
+  }), {
+    version: 1,
+    command: 'stop-if-idle',
+    token: TOKEN,
+    updateIdentity,
+  });
   assert.deepEqual(parseControlResponse(response()), response());
+  assert.deepEqual(parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle',
+    requestId: 'request_1',
+  }), {
+    type: 'stop-if-idle',
+    requestId: 'request_1',
+  });
+  assert.deepEqual(parseWorkerStopIfIdleResponse({
+    type: 'stop-if-idle-result',
+    requestId: 'request_1',
+    pid: 5678,
+    ok: true,
+    idle: false,
+  }), {
+    type: 'stop-if-idle-result',
+    requestId: 'request_1',
+    pid: 5678,
+    ok: true,
+    idle: false,
+  });
 
   assert.throws(() => parseDaemonRecord({ ...daemon(), extra: true }));
   assert.throws(() => parseDaemonRecord({ ...daemon(), configFile: 'relative.env' }));
+  assert.throws(() => parseDaemonRecord({
+    ...daemon(), state: { ...daemon().state, databaseFile: 'relative.sqlite' },
+  }));
   assert.throws(() => parseDaemonRecord({ ...daemon(), token: 'short' }));
   assert.throws(() => parseControlRequest({ version: 1, command: 'restart', token: TOKEN }));
+  assert.throws(() => parseControlRequest({
+    version: 1,
+    command: 'ping',
+    token: TOKEN,
+    updateIdentity,
+  }));
   assert.throws(() => parseControlResponse({ ...response(), phase: 'online' }));
   assert.throws(() => parseControlResponse({ ...response(), message: '' }));
+  assert.throws(() => parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle', requestId: '',
+  }));
+  assert.throws(() => parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle', requestId: 'bad request',
+  }));
+  assert.throws(() => parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle', requestId: 'x'.repeat(129),
+  }));
+  assert.throws(() => parseWorkerStopIfIdleRequest({
+    type: 'stop-if-idle', requestId: 'request_1', extra: true,
+  }));
+  assert.throws(() => parseWorkerStopIfIdleResponse({
+    type: 'stop-if-idle-result', requestId: 'request_1', pid: 5678, ok: true,
+  }));
+  assert.throws(() => parseWorkerStopIfIdleResponse({
+    type: 'stop-if-idle-result', requestId: 'request_1', pid: 5678, ok: false,
+  }));
+  assert.throws(() => parseWorkerStopIfIdleResponse({
+    type: 'stop-if-idle-result', requestId: 'request_1', pid: 5678,
+    ok: false, idle: false, message: 'failed',
+  }));
+});
+
+test('update identity is canonical, ignores shell noise, and covers arbitrary host variables', () => {
+  const first = createUpdateRuntimeIdentity(
+    { z: 1, nested: { b: 2, a: 1 } },
+    {
+      PATH: '/tools',
+      CODEX_HOME: '/agent-a',
+      CUSTOM_PROVIDER_KEY: 'secret-a',
+      PWD: '/first',
+      SSH_AUTH_SOCK: '/agent.sock',
+      SSH_CONNECTION: '192.0.2.1 41000 192.0.2.2 22',
+      XDG_SESSION_ID: '10',
+      npm_config_cache: '/cache-a',
+    },
+  );
+  const equivalent = createUpdateRuntimeIdentity(
+    { nested: { a: 1, b: 2 }, z: 1 },
+    {
+      CUSTOM_PROVIDER_KEY: 'secret-a',
+      CODEX_HOME: '/agent-a',
+      PATH: '/tools',
+      PWD: '/second',
+      SSH_AUTH_SOCK: '/agent.sock',
+      SSH_CONNECTION: '192.0.2.1 52000 192.0.2.2 22',
+      XDG_SESSION_ID: '11',
+      npm_config_cache: '/cache-b',
+    },
+  );
+  assert.equal(sameUpdateRuntimeIdentity(first, equivalent), true);
+  assert.equal(sameUpdateRuntimeIdentity(first, createUpdateRuntimeIdentity(
+    { nested: { a: 1, b: 2 }, z: 1 },
+    {
+      PATH: '/tools',
+      CODEX_HOME: '/agent-b',
+      CUSTOM_PROVIDER_KEY: 'secret-a',
+      SSH_AUTH_SOCK: '/agent.sock',
+    },
+  )), false);
+  assert.equal(sameUpdateRuntimeIdentity(first, createUpdateRuntimeIdentity(
+    { nested: { a: 1, b: 2 }, z: 1 },
+    {
+      PATH: '/tools',
+      CODEX_HOME: '/agent-a',
+      CUSTOM_PROVIDER_KEY: 'secret-b',
+      SSH_AUTH_SOCK: '/agent.sock',
+    },
+  )), false);
+  assert.equal(sameUpdateRuntimeIdentity(first, createUpdateRuntimeIdentity(
+    { nested: { a: 1, b: 2 }, z: 1 },
+    {
+      PATH: '/tools',
+      CODEX_HOME: '/agent-a',
+      CUSTOM_PROVIDER_KEY: 'secret-a',
+      SSH_AUTH_SOCK: '/different-agent.sock',
+    },
+  )), false);
 });
 
 test('daemon identity and control capability share one private static record', async (t) => {
@@ -154,7 +302,7 @@ async function listen(
   });
 }
 
-test('control client authenticates ping and stop over one local IPC message', async (t) => {
+test('control client authenticates lifecycle commands over one local IPC message', async (t) => {
   const home = await temporaryHome(t);
   writeDaemonRecord(home, daemon());
   const commands: string[] = [];
@@ -162,13 +310,46 @@ test('control client authenticates ping and stop over one local IPC message', as
     const parsed = parseControlRequest(value);
     commands.push(parsed.command);
     return `${JSON.stringify(response({
-      phase: parsed.command === 'stop' ? 'stopping' : 'running',
+      phase: parsed.command === 'stop' || parsed.command === 'stop-if-idle'
+        ? 'stopping'
+        : 'running',
+      ...(parsed.command === 'stop-if-idle' ? { idle: true } : {}),
     }))}\n`;
   });
 
   assert.deepEqual(await requestControl(home, 'ping'), response());
   assert.deepEqual(await requestControl(home, 'stop'), response({ phase: 'stopping' }));
-  assert.deepEqual(commands, ['ping', 'stop']);
+  assert.deepEqual(await requestControl(home, 'stop-if-idle'), response({
+    phase: 'stopping',
+    idle: true,
+  }));
+  assert.deepEqual(commands, ['ping', 'stop', 'stop-if-idle']);
+});
+
+test('stop-if-idle client fails closed on omitted or contradictory decisions', async (t) => {
+  const omittedHome = await temporaryHome(t);
+  writeDaemonRecord(omittedHome, daemon());
+  await listen(t, omittedHome, () => `${JSON.stringify(response())}\n`);
+  await assert.rejects(
+    requestControl(omittedHome, 'stop-if-idle'),
+    /omitted the idle decision/u,
+  );
+
+  const phaseHome = await temporaryHome(t);
+  writeDaemonRecord(phaseHome, daemon());
+  await listen(t, phaseHome, () => `${JSON.stringify(response({ idle: true }))}\n`);
+  await assert.rejects(
+    requestControl(phaseHome, 'stop-if-idle'),
+    /did not enter the stopping phase/u,
+  );
+
+  const unexpectedHome = await temporaryHome(t);
+  writeDaemonRecord(unexpectedHome, daemon());
+  await listen(t, unexpectedHome, () => `${JSON.stringify(response({ idle: false }))}\n`);
+  await assert.rejects(
+    requestControl(unexpectedHome, 'ping'),
+    /unexpected idle decision/u,
+  );
 });
 
 test('control client rejects server failures, stale identity, oversized output, and timeout', async (t) => {

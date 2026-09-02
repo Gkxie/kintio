@@ -46,6 +46,7 @@ function fakeRuntime(
   options: {
     readonly start?: () => Promise<void>;
     readonly close?: () => Promise<void>;
+    readonly idle?: () => boolean;
   } = {},
 ): Runtime {
   return {
@@ -53,6 +54,12 @@ function fakeRuntime(
     async start() {
       events.push('runtime:start');
       await options.start?.();
+    },
+    stopAcceptingIfIdle() {
+      events.push('runtime:stop-if-idle');
+      const idle = options.idle?.() ?? true;
+      if (idle) events.push('runtime:stop-accepting');
+      return idle;
     },
     stopAccepting() {
       events.push('runtime:stop-accepting');
@@ -113,6 +120,71 @@ test('WeChat callback ingress stays gated until all live listeners start', async
   const opened = await fetch(`http://127.0.0.1:${port}/`, { method: 'POST' });
   assert.notEqual(opened.status, 503);
   await supervisor.close();
+});
+
+test('busy update gate leaves runtime and public ingress unchanged', async () => {
+  const port = await availablePort();
+  const events: string[] = [];
+  const supervisor = new KintioSupervisor({
+    config: testConfig({
+      PORT: String(port),
+      WECOM_CALLBACK_TOKEN: 'SupervisorToken123',
+      WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
+      CODEX_ENABLED: 'false',
+    }),
+    logger,
+    runtime: fakeRuntime(events, { idle: () => false }),
+  });
+  await supervisor.start();
+
+  assert.equal(supervisor.stopIfIdleForUpdate(), false);
+  assert.equal(supervisor.state, 'running');
+  assert.deepEqual(events, ['runtime:start', 'runtime:stop-if-idle']);
+  const response = await fetch(`http://127.0.0.1:${port}/`, { method: 'POST' });
+  assert.notEqual(response.status, 503);
+
+  await supervisor.close();
+  assert.deepEqual(events, [
+    'runtime:start',
+    'runtime:stop-if-idle',
+    'runtime:stop-accepting',
+    'runtime:close',
+  ]);
+});
+
+test('idle update gate synchronously closes runtime and public admission', async () => {
+  const port = await availablePort();
+  const events: string[] = [];
+  const supervisor = new KintioSupervisor({
+    config: testConfig({
+      PORT: String(port),
+      WECOM_CALLBACK_TOKEN: 'SupervisorToken123',
+      WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
+      CODEX_ENABLED: 'false',
+    }),
+    logger,
+    runtime: fakeRuntime(events, { idle: () => true }),
+  });
+  await supervisor.start();
+
+  assert.equal(supervisor.stopIfIdleForUpdate(), true);
+  assert.equal(supervisor.state, 'closing');
+  assert.deepEqual(events, [
+    'runtime:start',
+    'runtime:stop-if-idle',
+    'runtime:stop-accepting',
+  ]);
+  const gated = await fetch(`http://127.0.0.1:${port}/`, { method: 'POST' });
+  assert.equal(gated.status, 503);
+
+  await supervisor.close();
+  assert.equal(supervisor.state, 'closed');
+  assert.deepEqual(events, [
+    'runtime:start',
+    'runtime:stop-if-idle',
+    'runtime:stop-accepting',
+    'runtime:close',
+  ]);
 });
 
 test('graceful close keeps the public listener online while runtime drains', async () => {

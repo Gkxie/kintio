@@ -286,26 +286,35 @@ kintio start
 kintio status
 kintio logs --lines 100
 kintio restart
+kintio update
 kintio stop
 ```
 
 `stop` uses an authenticated local Unix socket or Windows named pipe and waits
 for the worker's graceful shutdown path.
-`restart` reloads the current installed code and instance config. The CLI does
+`restart` reloads the current installed code while preserving a running
+service/iLink mode and its instance config. The CLI does
 not modify Nginx, provider consoles, shell profiles, or operating-system boot
 configuration. Configure launchd, systemd, Task Scheduler, a container runtime,
 or another boot mechanism separately with `kintio run` if the machine must start
 Kintio automatically after reboot.
 
-Stop the daemon before replacing or removing the global package so a running
-process never refers to files being changed in place:
+`update` (or its exact alias `upgrade`) recognizes the npm or pnpm global
+installation that owns the current CLI, resolves the Registry `latest` tag to
+one exact version, and restores an idle background instance after verification:
 
 ```bash
-kintio stop
-npm install --global @kin-tio/cli@latest
-kintio --version
-kintio start
+kintio update
 ```
+
+Active Agent work, a foreground Runtime, an active standalone login, an unknown
+installation layout, or an ambiguous package-manager root fails before the
+package is changed. The first version coordinates only the selected `--home`;
+stop any other instance homes using the same global installation first.
+Kintio also verifies the running Runtime's effective configuration before
+stopping it. If the Runtime was started with shell-only overrides, run the
+update with the same environment or persist those values in the instance
+configuration first.
 
 To remove the command, run `kintio stop` and then `npm uninstall --global
 @kin-tio/cli`. The instance under `~/.kintio` is retained by default so uninstalling

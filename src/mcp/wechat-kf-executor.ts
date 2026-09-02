@@ -394,6 +394,10 @@ export class WechatKfToolExecutor {
     while (this.#draining) await this.#draining;
   }
 
+  isIdle(): boolean {
+    return !this.#draining && !this.#rerun;
+  }
+
   async close(): Promise<void> {
     if (this.#closed) return;
     await this.kick();

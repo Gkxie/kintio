@@ -15,6 +15,11 @@ import {
   writeDaemonRecord,
 } from '../../src/runtime/daemon-protocol.ts';
 import { acquireSingleInstanceLock } from '../../src/runtime/single-instance-lock.ts';
+import { readInstalledPackageIdentity } from '../../src/update/global-install.ts';
+import {
+  ProcessTreeTerminationError,
+  verifyPreparedKintioUpdate,
+} from '../../src/update/self-update.ts';
 import { KINTIO_VERSION } from '../../src/version.ts';
 
 type CliOverrides = NonNullable<Parameters<typeof runCli>[1]>;
@@ -47,6 +52,27 @@ function exitedDaemon(pid = 2_147_483_647) {
   return { pid, exited: Promise.resolve(), kill: () => false };
 }
 
+async function updatePackage(
+  root: string,
+  version = KINTIO_VERSION,
+): Promise<{
+  readonly packageRoot: string;
+  readonly prefix: string;
+}> {
+  const prefix = path.join(root, 'npm prefix');
+  const packageRoot = path.join(prefix, 'lib/node_modules/@kin-tio/cli');
+  await fs.mkdir(path.join(packageRoot, 'bin'), { recursive: true });
+  await Promise.all([
+    fs.writeFile(path.join(packageRoot, 'package.json'), `${JSON.stringify({
+      name: '@kin-tio/cli',
+      version,
+      bin: { kintio: 'bin/kintio.js' },
+    })}\n`),
+    fs.writeFile(path.join(packageRoot, 'bin/kintio.js'), '#!/usr/bin/env node\n'),
+  ]);
+  return { packageRoot, prefix };
+}
+
 test('global CLI exposes stable help, version, and argument failures', async (t) => {
   const runtime = cliRuntime(await temporaryRoot(t));
   assert.equal(await runCli([], runtime.overrides), 0);
@@ -54,6 +80,8 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
   assert.match(runtime.stdout.join(''), /ilink login/u);
   assert.match(runtime.stdout.join(''), /ilink start/u);
   assert.match(runtime.stdout.join(''), /ilink delete/u);
+  assert.match(runtime.stdout.join(''), /update\s+Update Kintio/u);
+  assert.match(runtime.stdout.join(''), /upgrade\s+Alias for update/u);
   runtime.stdout.length = 0;
   assert.equal(await runCli(['help'], runtime.overrides), 0);
   assert.match(runtime.stdout.join(''), /Usage: kintio <command>/u);
@@ -93,6 +121,213 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
     'ilink', 'login', '--qr-output', '',
   ], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /requires a non-empty file path/u);
+});
+
+test('update and upgrade are exact aliases and need no configured instance', async (t) => {
+  const root = await temporaryRoot(t);
+  const { packageRoot, prefix } = await updatePackage(root);
+  const identity = readInstalledPackageIdentity(packageRoot);
+  const prepared = {
+    kind: 'update' as const,
+    currentVersion: KINTIO_VERSION,
+    targetVersion: '9.8.7',
+    installation: {
+      ...identity,
+      manager: 'npm' as const,
+      prefix,
+    },
+    command: {
+      file: 'npm' as const,
+      args: ['install', '--global', '@kin-tio/cli@9.8.7'],
+    },
+    cwd: root,
+    environment: { PATH: process.env.PATH },
+  };
+  const calls: string[] = [];
+  const runtime = cliRuntime(root, {
+    packageRoot,
+    updater: {
+      prepare: async () => {
+        calls.push('prepare');
+        return prepared;
+      },
+      install: async () => { calls.push('install'); },
+      verify: async () => { calls.push('verify'); },
+    },
+  });
+
+  assert.equal(await runCli(['update', '--help'], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /Usage: kintio <update\|upgrade>/u);
+  assert.doesNotMatch(runtime.stdout.join(''), /--lines/u);
+  assert.deepEqual(calls, []);
+  runtime.stdout.length = 0;
+  assert.equal(await runCli(['update'], runtime.overrides), 0);
+  assert.deepEqual(calls, ['prepare', 'install', 'verify']);
+  const updateOutput = runtime.stdout.join('');
+  assert.equal(runtime.stderr.join(''), '');
+  calls.length = 0;
+  runtime.stdout.length = 0;
+  assert.equal(await runCli(['upgrade'], runtime.overrides), 0);
+  assert.deepEqual(calls, ['prepare', 'install', 'verify']);
+  assert.equal(runtime.stdout.join(''), updateOutput);
+  assert.equal(runtime.stderr.join(''), '');
+  assert.match(runtime.stdout.join(''), /9\.8\.7 was installed successfully/u);
+  await assert.rejects(() => fs.stat(path.join(root, '.kintio/.env')), /ENOENT/u);
+});
+
+test('update-only arguments fail before Registry or package-manager work', async (t) => {
+  const root = await temporaryRoot(t);
+  let prepared = 0;
+  const runtime = cliRuntime(root, {
+    updater: {
+      prepare: async () => {
+        prepared += 1;
+        throw new Error('must not prepare');
+      },
+      install: async () => undefined,
+      verify: async () => undefined,
+    },
+  });
+  for (const args of [
+    ['update', '--force'],
+    ['update', '--check'],
+    ['update', 'extra'],
+    ['update', '--account', 'ia_test'],
+    ['update', '--foreground'],
+  ]) {
+    runtime.stderr.length = 0;
+    assert.equal(await runCli(args, runtime.overrides), 1);
+    assert.ok(runtime.stderr.length > 0);
+  }
+  assert.equal(prepared, 0);
+});
+
+test('an already-current update performs no lifecycle or install mutation', async (t) => {
+  const root = await temporaryRoot(t);
+  const { packageRoot, prefix } = await updatePackage(root);
+  const identity = readInstalledPackageIdentity(packageRoot);
+  let installed = false;
+  let launched = false;
+  const runtime = cliRuntime(root, {
+    packageRoot,
+    launchDaemon: () => {
+      launched = true;
+      return exitedDaemon();
+    },
+    updater: {
+      prepare: async () => ({
+        kind: 'current',
+        currentVersion: KINTIO_VERSION,
+        targetVersion: KINTIO_VERSION,
+        installation: {
+          ...identity,
+          manager: 'npm',
+          prefix,
+        },
+      }),
+      install: async () => { installed = true; },
+      verify: async () => { throw new Error('verify must not run'); },
+    },
+  });
+
+  assert.equal(await runCli(['update'], runtime.overrides), 0);
+  assert.equal(installed, false);
+  assert.equal(launched, false);
+  assert.equal(runtime.stdout.join(''),
+    `Checking for Kintio updates...\n` +
+    `No newer Kintio version is available (installed ${KINTIO_VERSION}, ` +
+    `Registry ${KINTIO_VERSION}).\n`);
+});
+
+test('update refuses a foreground instance before invoking its package manager', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const { packageRoot, prefix } = await updatePackage(root);
+  const identity = readInstalledPackageIdentity(packageRoot);
+  const foregroundLock = acquireSingleInstanceLock({
+    filePath: path.join(home, 'data/kintio.lock'),
+  });
+  t.onTestFinished(() => { foregroundLock.release(); });
+  let installed = false;
+  const runtime = cliRuntime(root, {
+    packageRoot,
+    updater: {
+      prepare: async () => ({
+        kind: 'update',
+        currentVersion: KINTIO_VERSION,
+        targetVersion: '9.8.7',
+        installation: {
+          ...identity,
+          manager: 'npm',
+          prefix,
+        },
+        command: { file: 'npm', args: ['install'] },
+        cwd: root,
+        environment: { PATH: process.env.PATH },
+      }),
+      install: async () => { installed = true; },
+      verify: async () => undefined,
+    },
+  });
+
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(installed, false);
+  assert.match(runtime.stderr.join(''), /foreground Kintio Runtime or iLink login/u);
+});
+
+test('one update excludes concurrent updates and lifecycle commands, then cleans every lock', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const { packageRoot, prefix } = await updatePackage(root);
+  const identity = readInstalledPackageIdentity(packageRoot);
+  const setupRuntime = cliRuntime(root);
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  let releaseInstall!: () => void;
+  const installing = new Promise<void>((resolve) => { releaseInstall = resolve; });
+  let notifyInstall!: () => void;
+  const installStarted = new Promise<void>((resolve) => { notifyInstall = resolve; });
+  const runtime = cliRuntime(root, {
+    packageRoot,
+    updater: {
+      prepare: async () => ({
+        kind: 'update',
+        currentVersion: KINTIO_VERSION,
+        targetVersion: '9.8.7',
+        installation: { ...identity, manager: 'npm', prefix },
+        command: { file: 'npm', args: ['install'] },
+        cwd: root,
+        environment: { PATH: process.env.PATH },
+      }),
+      install: async () => {
+        notifyInstall();
+        await installing;
+      },
+      verify: async () => undefined,
+    },
+    launchDaemon: () => exitedDaemon(),
+  });
+
+  const first = runCli(['update', '--home', home], runtime.overrides);
+  await installStarted;
+  const second = cliRuntime(root, {
+    updater: runtime.overrides.updater!,
+    launchDaemon: () => exitedDaemon(),
+  });
+  assert.equal(await runCli(['update', '--home', home], second.overrides), 1);
+  assert.match(second.stderr.join(''), /Another Kintio update is already running/u);
+  second.stderr.length = 0;
+  assert.equal(await runCli(['start', '--home', home], second.overrides), 1);
+  assert.match(second.stderr.join(''), /lifecycle command is already running/u);
+  releaseInstall();
+  assert.equal(await first, 0);
+
+  for (const lock of [
+    path.join(root, '.kintio/data/installation-update.lock'),
+    path.join(home, 'data/lifecycle.lock'),
+    path.join(home, 'data/kintio.lock'),
+  ]) {
+    await assert.rejects(fs.access(lock), /ENOENT/u);
+  }
 });
 
 test('CLI routes only the exact ilink login subcommand to an interactive adapter', async (t) => {
@@ -295,21 +530,74 @@ test('standalone iLink start launches one managed background daemon before activ
   const root = await temporaryRoot(t);
   const home = path.join(root, 'background-ilink');
   const packageRoot = path.join(root, 'package');
+  const workerVersionFile = path.join(root, 'worker-version');
   const workerFile = path.join(packageRoot, 'dist/ilink.js');
-  await fs.mkdir(path.dirname(workerFile), { recursive: true });
+  await Promise.all([
+    fs.mkdir(path.dirname(workerFile), { recursive: true }),
+    fs.mkdir(path.join(packageRoot, 'bin'), { recursive: true }),
+  ]);
   await fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), {
     recursive: true,
   });
-  await fs.writeFile(workerFile, [
-    "process.send?.({ type: 'ready', pid: process.pid });",
-    "process.on('message', (message) => { if (message === 'shutdown') process.exit(0); });",
-    "process.on('disconnect', () => process.exit(0));",
-  ].join('\n'));
+  await Promise.all([
+    fs.writeFile(path.join(packageRoot, 'package.json'), `${JSON.stringify({
+      name: '@kin-tio/cli',
+      version: KINTIO_VERSION,
+      bin: { kintio: 'bin/kintio.js' },
+    })}\n`),
+    fs.writeFile(path.join(packageRoot, 'bin/kintio.js'), '#!/usr/bin/env node\n'),
+    fs.writeFile(workerFile, [
+      "import fs from 'node:fs';",
+      "const manifest = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));",
+      'fs.writeFileSync(process.env.KINTIO_TEST_WORKER_VERSION, manifest.version);',
+      "process.send?.({ type: 'ready', pid: process.pid });",
+      "process.on('message', (message) => {",
+      "  if (message === 'shutdown') process.exit(0);",
+      "  if (message?.type === 'stop-if-idle') process.send?.({",
+      "    type: 'stop-if-idle-result', requestId: message.requestId,",
+      "    pid: process.pid, ok: true, idle: true,",
+      "  });",
+      "});",
+      "process.on('disconnect', () => process.exit(0));",
+    ].join('\n')),
+  ]);
+  const identity = readInstalledPackageIdentity(packageRoot);
+  const targetVersion = '9.8.7';
   const daemonRuns: Promise<void>[] = [];
   const accountKey = `ia_${'b'.repeat(40)}` as const;
   const accountCalls: Array<{ command: string; defer?: boolean; selector?: string }> = [];
   const runtime = cliRuntime(root, {
+    env: { ...process.env, KINTIO_TEST_WORKER_VERSION: workerVersionFile },
     packageRoot,
+    updater: {
+      prepare: async () => ({
+        kind: 'update',
+        currentVersion: KINTIO_VERSION,
+        targetVersion,
+        installation: {
+          ...identity,
+          manager: 'npm',
+          prefix: root,
+        },
+        command: { file: 'npm', args: ['install'] },
+        cwd: root,
+        environment: { PATH: process.env.PATH },
+      }),
+      install: async () => {
+        await Promise.all([
+          fs.writeFile(path.join(packageRoot, 'package.json'), `${JSON.stringify({
+            name: '@kin-tio/cli',
+            version: targetVersion,
+            bin: { kintio: 'bin/kintio.js' },
+          })}\n`),
+          fs.writeFile(
+            path.join(packageRoot, 'bin/kintio.js'),
+            `process.stdout.write(${JSON.stringify(`${targetVersion}\n`)});\n`,
+          ),
+        ]);
+      },
+      verify: verifyPreparedKintioUpdate,
+    },
     ilinkAccount: async (options) => {
       accountCalls.push({
         command: options.command,
@@ -353,7 +641,18 @@ test('standalone iLink start launches one managed background daemon before activ
     { command: 'start', selector: accountKey },
   ]);
   assert.equal(readDaemonRecord(home)?.mode, 'ilink');
-  assert.match(runtime.stdout.join(''), /running in background/u);
+  const firstRunId = readDaemonRecord(home)?.runId;
+  assert.ok(firstRunId);
+  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 0);
+  assert.equal(readDaemonRecord(home)?.mode, 'ilink');
+  assert.notEqual(readDaemonRecord(home)?.runId, firstRunId);
+  const restartedRunId = readDaemonRecord(home)?.runId;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 0);
+  assert.equal(readDaemonRecord(home)?.mode, 'ilink');
+  assert.notEqual(readDaemonRecord(home)?.runId, restartedRunId);
+  assert.equal(await fs.readFile(workerVersionFile, 'utf8'), targetVersion);
+  assert.match(runtime.stdout.join(''), new RegExp(`Kintio ${targetVersion} was installed`));
+  assert.match(runtime.stdout.join(''), /iLink Runtime was restored/u);
   await fs.access(path.join(
     home,
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
@@ -678,6 +977,528 @@ test('source CLI starts, probes, logs, and stops one native daemon', async (t) =
   await Promise.all(daemons);
 });
 
+test('update verifies changed package contents before starting the new service Worker', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const workerVersionFile = path.join(root, 'service-worker-version');
+  const { packageRoot, prefix } = await updatePackage(root);
+  const workerFile = path.join(packageRoot, 'dist/index.js');
+  await Promise.all([
+    fs.mkdir(path.dirname(workerFile), { recursive: true }),
+    fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), {
+      recursive: true,
+    }),
+    fs.copyFile('.env.example', path.join(packageRoot, '.env.example')),
+  ]);
+  await fs.writeFile(workerFile, [
+    "import fs from 'node:fs';",
+    "const manifest = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));",
+    'fs.writeFileSync(process.env.KINTIO_TEST_WORKER_VERSION, manifest.version);',
+    "process.send?.({ type: 'ready', pid: process.pid });",
+    "process.on('message', (message) => {",
+    "  if (message === 'shutdown') process.exit(0);",
+    "  if (message?.type === 'stop-if-idle') process.send?.({",
+    "    type: 'stop-if-idle-result', requestId: message.requestId,",
+    "    pid: process.pid, ok: true, idle: true,",
+    "  });",
+    "});",
+    "process.on('disconnect', () => process.exit(0));",
+  ].join('\n'));
+  const setupRuntime = cliRuntime(root, { packageRoot });
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  const identity = readInstalledPackageIdentity(packageRoot);
+  const targetVersion = '9.8.7';
+  const daemons: Promise<void>[] = [];
+  const runtime = cliRuntime(root, {
+    env: { ...process.env, KINTIO_TEST_WORKER_VERSION: workerVersionFile },
+    packageRoot,
+    updater: {
+      prepare: async () => ({
+        kind: 'update',
+        currentVersion: KINTIO_VERSION,
+        targetVersion,
+        installation: { ...identity, manager: 'npm', prefix },
+        command: { file: 'npm', args: ['install'] },
+        cwd: root,
+        environment: { PATH: process.env.PATH },
+      }),
+      install: async () => {
+        await Promise.all([
+          fs.writeFile(path.join(packageRoot, 'package.json'), `${JSON.stringify({
+            name: '@kin-tio/cli',
+            version: targetVersion,
+            bin: { kintio: 'bin/kintio.js' },
+          })}\n`),
+          fs.writeFile(
+            path.join(packageRoot, 'bin/kintio.js'),
+            `process.stdout.write(${JSON.stringify(`${targetVersion}\n`)});\n`,
+          ),
+        ]);
+      },
+      verify: verifyPreparedKintioUpdate,
+    },
+    launchDaemon: (request) => {
+      const running = runNativeDaemon({
+        home,
+        configFile: path.join(home, '.env'),
+        packageRoot,
+        environment: request.env,
+      });
+      daemons.push(running);
+      return { pid: process.pid, exited: running, kill: () => false };
+    },
+  });
+  t.onTestFinished(async () => {
+    await requestControl(home, 'stop').catch(() => undefined);
+    await Promise.allSettled(daemons);
+  });
+
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await fs.readFile(workerVersionFile, 'utf8'), KINTIO_VERSION);
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 0);
+  assert.equal(await fs.readFile(workerVersionFile, 'utf8'), targetVersion);
+  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.match(runtime.stdout.join(''), /service Runtime was restored/u);
+  assert.match(runtime.stdout.join(''), new RegExp(`${targetVersion} was installed successfully`));
+});
+
+test('pnpm update restores from the stable link after it moves to a new store', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const markerFile = path.join(root, 'pnpm-worker-version');
+  const oldStore = path.join(root, 'pnpm/store/old/@kin-tio/cli');
+  const newStore = path.join(root, 'pnpm/store/new/@kin-tio/cli');
+  const stableRoot = path.join(root, 'pnpm/global/v10/node_modules/@kin-tio/cli');
+  const globalDir = path.join(root, 'pnpm/global');
+  const globalBinDir = path.join(root, 'pnpm/bin');
+  const targetVersion = '9.8.7';
+  const writeStore = async (store: string, version: string): Promise<void> => {
+    await Promise.all([
+      fs.mkdir(path.join(store, 'bin'), { recursive: true }),
+      fs.mkdir(path.join(store, 'dist'), { recursive: true }),
+      fs.cp('codex-workspace', path.join(store, 'codex-workspace'), { recursive: true }),
+    ]);
+    await Promise.all([
+      fs.writeFile(path.join(store, 'package.json'), `${JSON.stringify({
+        name: '@kin-tio/cli',
+        version,
+        bin: { kintio: 'bin/kintio.js' },
+      })}\n`),
+      fs.writeFile(
+        path.join(store, 'bin/kintio.js'),
+        `process.stdout.write(${JSON.stringify(`${version}\n`)});\n`,
+      ),
+      fs.writeFile(path.join(store, '.env.example'), ''),
+      fs.writeFile(path.join(store, 'dist/index.js'), [
+        "import fs from 'node:fs';",
+        `fs.writeFileSync(process.env.KINTIO_TEST_WORKER_VERSION, ${JSON.stringify(version)});`,
+        "process.send?.({ type: 'ready', pid: process.pid });",
+        "process.on('message', (message) => {",
+        "  if (message === 'shutdown') process.exit(0);",
+        "  if (message?.type === 'stop-if-idle') process.send?.({",
+        "    type: 'stop-if-idle-result', requestId: message.requestId,",
+        "    pid: process.pid, ok: true, idle: true,",
+        "  });",
+        "});",
+        "process.on('disconnect', () => process.exit(0));",
+      ].join('\n')),
+    ]);
+  };
+  await Promise.all([
+    writeStore(oldStore, KINTIO_VERSION),
+    writeStore(newStore, targetVersion),
+    fs.mkdir(path.dirname(stableRoot), { recursive: true }),
+    fs.mkdir(globalBinDir, { recursive: true }),
+  ]);
+  await fs.symlink(oldStore, stableRoot, process.platform === 'win32' ? 'junction' : 'dir');
+  const setupRuntime = cliRuntime(root, { packageRoot: oldStore });
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  const identity = readInstalledPackageIdentity(stableRoot);
+  const daemons: Promise<void>[] = [];
+  const runtime = cliRuntime(root, {
+    env: { ...process.env, KINTIO_TEST_WORKER_VERSION: markerFile },
+    packageRoot: oldStore,
+    updater: {
+      prepare: async () => ({
+        kind: 'update',
+        currentVersion: KINTIO_VERSION,
+        targetVersion,
+        installation: {
+          ...identity,
+          packageRoot: stableRoot,
+          binFile: path.join(stableRoot, 'bin/kintio.js'),
+          manager: 'pnpm',
+          globalDir,
+          globalBinDir,
+        },
+        command: { file: 'pnpm', args: ['add'] },
+        cwd: root,
+        environment: { PATH: process.env.PATH },
+      }),
+      install: async () => {
+        await fs.rm(stableRoot);
+        await fs.symlink(
+          newStore,
+          stableRoot,
+          process.platform === 'win32' ? 'junction' : 'dir',
+        );
+      },
+      verify: verifyPreparedKintioUpdate,
+    },
+    launchDaemon: (request) => {
+      const requestedPackageRoot = path.dirname(path.dirname(request.args[0]!));
+      const running = runNativeDaemon({
+        home,
+        configFile: path.join(home, '.env'),
+        packageRoot: requestedPackageRoot,
+        environment: request.env,
+      });
+      daemons.push(running);
+      return { pid: process.pid, exited: running, kill: () => false };
+    },
+  });
+  t.onTestFinished(async () => {
+    await requestControl(home, 'stop').catch(() => undefined);
+    await Promise.allSettled(daemons);
+  });
+
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await fs.readFile(markerFile, 'utf8'), KINTIO_VERSION);
+  assert.equal(readDaemonRecord(home)?.packageRoot, oldStore);
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 0);
+  assert.equal(await fs.readFile(markerFile, 'utf8'), targetVersion);
+  assert.equal(readDaemonRecord(home)?.packageRoot, stableRoot);
+  assert.equal(await fs.realpath(stableRoot), await fs.realpath(newStore));
+});
+
+test('update refuses active work and restores an idle service daemon', async (t) => {
+  const root = await temporaryRoot(t);
+  const home = path.join(root, 'instance');
+  const idleFile = path.join(root, 'worker-idle');
+  const mutateConfigFile = path.join(root, 'worker-mutate-config');
+  const stateFile = path.join(home, 'custom-state', 'custom.sqlite');
+  const { packageRoot, prefix } = await updatePackage(root);
+  await Promise.all([
+    fs.mkdir(path.join(packageRoot, 'dist'), { recursive: true }),
+    fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), {
+      recursive: true,
+    }),
+    fs.copyFile('.env.example', path.join(packageRoot, '.env.example')),
+    fs.writeFile(idleFile, '0'),
+    fs.writeFile(mutateConfigFile, '0'),
+  ]);
+  await fs.writeFile(path.join(packageRoot, 'dist/index.js'), [
+    "import fs from 'node:fs';",
+    "if (fs.readFileSync(process.env.KINTIO_TEST_MUTATE_CONFIG, 'utf8').trim() === '1') fs.appendFileSync(process.env.KINTIO_CONFIG_FILE, '\\nCODEX_WORKING_DIRECTORY=changed-during-restore\\n');",
+    "process.send?.({ type: 'ready', pid: process.pid });",
+    "process.on('message', (message) => {",
+    "  if (message === 'shutdown') process.exit(0);",
+    "  if (message?.type === 'stop-if-idle') process.send?.({",
+    "    type: 'stop-if-idle-result', requestId: message.requestId,",
+    "    pid: process.pid, ok: true,",
+    "    idle: fs.readFileSync(process.env.KINTIO_TEST_IDLE_FILE, 'utf8').trim() === '1',",
+    "  });",
+    "});",
+    "process.on('disconnect', () => process.exit(0));",
+  ].join('\n'));
+  const setupRuntime = cliRuntime(root, { packageRoot });
+  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  const identity = readInstalledPackageIdentity(packageRoot);
+  let installs = 0;
+  let failInstall = false;
+  let failProcessTreeTermination = false;
+  let failVerify = false;
+  let failRestore = false;
+  let changeConfigDuringInstall = false;
+  let interruptInstall = false;
+  let interruptedHandler: NodeJS.SignalsListener | undefined;
+  let loseIdleAck = false;
+  let originalSignalListeners: NodeJS.SignalsListener[] = [];
+  const daemons: Promise<void>[] = [];
+  const shellEnvironment: NodeJS.ProcessEnv = {
+    ...process.env,
+    KINTIO_DB_FILE: stateFile,
+    KINTIO_TEST_IDLE_FILE: idleFile,
+    KINTIO_TEST_MUTATE_CONFIG: mutateConfigFile,
+    PORT: '19999',
+    CODEX_HOME: path.join(root, 'agent-a'),
+  };
+  const runtime = cliRuntime(root, {
+    env: shellEnvironment,
+    packageRoot,
+    stopIfIdle: async (instanceHome, identity) => {
+      const response = await requestControl(
+        instanceHome,
+        'stop-if-idle',
+        undefined,
+        identity,
+      );
+      if (!loseIdleAck) return response;
+      const deadline = Date.now() + 5_000;
+      while (readDaemonRecord(instanceHome) && Date.now() < deadline) await delay(10);
+      throw new Error('simulated lost idle ACK');
+    },
+    updater: {
+      prepare: async () => ({
+        kind: 'update',
+        currentVersion: KINTIO_VERSION,
+        targetVersion: '9.8.7',
+        installation: {
+          ...identity,
+          manager: 'npm',
+          prefix,
+        },
+        command: { file: 'npm', args: ['install'] },
+        cwd: root,
+        environment: { PATH: process.env.PATH },
+      }),
+      install: async () => {
+        installs += 1;
+        if (failProcessTreeTermination) {
+          throw new ProcessTreeTerminationError('simulated process tree termination failure');
+        }
+        if (failInstall) throw new Error('simulated package-manager failure');
+        if (changeConfigDuringInstall) {
+          await fs.appendFile(
+            path.join(home, '.env'),
+            '\nCODEX_WORKING_DIRECTORY=changed-during-update\n',
+          );
+        }
+        if (interruptInstall) {
+          const handler = process.listeners('SIGTERM').find(
+            (listener) => !originalSignalListeners.includes(listener),
+          );
+          assert.ok(handler);
+          interruptedHandler = handler;
+          (handler as () => void)();
+        }
+      },
+      verify: async () => {
+        if (failVerify) throw new Error('simulated version verification failure');
+      },
+    },
+    launchDaemon: (request) => {
+      if (failRestore) throw new Error('simulated Runtime restore failure');
+      const running = runNativeDaemon({
+        home,
+        configFile: path.join(home, '.env'),
+        packageRoot,
+        mode: request.env.KINTIO_DAEMON_MODE as 'service',
+        environment: request.env,
+      });
+      daemons.push(running);
+      return { pid: process.pid, exited: running, kill: () => false };
+    },
+  });
+  t.onTestFinished(async () => {
+    await requestControl(home, 'stop').catch(() => undefined);
+    await Promise.allSettled(daemons);
+  });
+
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  const originalRecord = readDaemonRecord(home);
+  assert.equal(originalRecord?.version, 2);
+  assert.equal(
+    originalRecord?.version === 2 ? originalRecord.state.databaseFile : undefined,
+    stateFile,
+  );
+  assert.ok(originalRecord);
+  for (const lockFile of [
+    path.join(path.dirname(stateFile), 'unsupported.lock'),
+    path.join(root, 'other-state', 'kintio.lock'),
+  ]) {
+    writeDaemonRecord(home, {
+      ...originalRecord,
+      state: { databaseFile: stateFile, lockFile },
+    });
+    assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+    assert.equal(installs, 0);
+    assert.equal((await requestControl(home, 'ping')).phase, 'running');
+  }
+  assert.match(runtime.stderr.join(''), /Unsupported Kintio state lock identity/u);
+  assert.match(runtime.stderr.join(''), /could not preserve the running Runtime state identity/u);
+  writeDaemonRecord(home, originalRecord);
+  runtime.stderr.length = 0;
+  writeDaemonRecord(home, {
+    version: 1,
+    runId: originalRecord.runId,
+    daemonPid: originalRecord.daemonPid,
+    configFile: originalRecord.configFile,
+    mode: originalRecord.mode,
+    packageRoot: originalRecord.packageRoot,
+    token: originalRecord.token,
+  });
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(installs, 0);
+  assert.equal((await requestControl(home, 'ping')).phase, 'running');
+  assert.match(runtime.stderr.join(''), /predates safe update metadata/u);
+  writeDaemonRecord(home, originalRecord);
+  runtime.stderr.length = 0;
+  delete shellEnvironment.PORT;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(installs, 0);
+  assert.equal(readDaemonRecord(home)?.runId, originalRecord.runId);
+  assert.equal((await requestControl(home, 'ping')).phase, 'running');
+  assert.match(runtime.stderr.join(''), /current environment does not match/u);
+  shellEnvironment.PORT = '19999';
+  runtime.stderr.length = 0;
+  shellEnvironment.CODEX_HOME = path.join(root, 'agent-b');
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(installs, 0);
+  assert.equal(readDaemonRecord(home)?.runId, originalRecord.runId);
+  assert.match(runtime.stderr.join(''), /current environment does not match/u);
+  shellEnvironment.CODEX_HOME = path.join(root, 'agent-a');
+  runtime.stderr.length = 0;
+  delete shellEnvironment.KINTIO_DB_FILE;
+  originalSignalListeners = [...process.listeners('SIGTERM')];
+  const busyRunId = readDaemonRecord(home)?.runId;
+  const configFile = path.join(home, '.env');
+  const validConfig = await fs.readFile(configFile, 'utf8');
+  await fs.writeFile(
+    configFile,
+    `${validConfig}\nSHUTDOWN_TIMEOUT_MS=0\n`,
+  );
+  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 1);
+  assert.equal(readDaemonRecord(home)?.runId, busyRunId);
+  assert.equal((await requestControl(home, 'ping')).phase, 'running');
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(installs, 0);
+  assert.equal(readDaemonRecord(home)?.runId, busyRunId);
+  await fs.writeFile(configFile, validConfig);
+  runtime.stderr.length = 0;
+
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(installs, 0);
+  assert.equal(readDaemonRecord(home)?.runId, busyRunId);
+  assert.equal((await requestControl(home, 'ping')).phase, 'running');
+  assert.match(runtime.stderr.join(''), /active conversation work/u);
+
+  await fs.writeFile(idleFile, '1');
+  runtime.stderr.length = 0;
+  loseIdleAck = true;
+  const beforeLostAck = readDaemonRecord(home)?.runId;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(installs, 0);
+  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.notEqual(readDaemonRecord(home)?.runId, beforeLostAck);
+  assert.match(runtime.stderr.join(''), /simulated lost idle ACK/u);
+
+  loseIdleAck = false;
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['upgrade', '--home', home], runtime.overrides), 0);
+  assert.equal(installs, 1);
+  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  const upgradedRecord = readDaemonRecord(home);
+  assert.equal(
+    upgradedRecord?.version === 2 ? upgradedRecord.state.databaseFile : undefined,
+    stateFile,
+  );
+  assert.notEqual(readDaemonRecord(home)?.runId, busyRunId);
+  assert.match(runtime.stdout.join(''), /service Runtime was restored/u);
+
+  const beforeFailedUpdate = readDaemonRecord(home)?.runId;
+  failInstall = true;
+  runtime.stdout.length = 0;
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(installs, 2);
+  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.notEqual(readDaemonRecord(home)?.runId, beforeFailedUpdate);
+  assert.match(runtime.stderr.join(''), /simulated package-manager failure/u);
+  assert.doesNotMatch(runtime.stdout.join(''), /installed successfully/u);
+
+  failInstall = false;
+  failVerify = true;
+  runtime.stdout.length = 0;
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.match(runtime.stderr.join(''), /simulated version verification failure/u);
+  assert.match(runtime.stdout.join(''), /Runtime was restored after the failed update/u);
+  assert.doesNotMatch(runtime.stdout.join(''), /installed successfully/u);
+
+  const beforeInterruptedUpdate = readDaemonRecord(home)?.runId;
+  failVerify = false;
+  interruptInstall = true;
+  runtime.stdout.length = 0;
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(installs, 4);
+  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.notEqual(readDaemonRecord(home)?.runId, beforeInterruptedUpdate);
+  assert.match(runtime.stderr.join(''), /interrupted by SIGTERM/u);
+  assert.equal(process.listeners('SIGTERM').length, originalSignalListeners.length);
+  assert.ok(interruptedHandler);
+  assert.equal(process.listeners('SIGTERM').includes(interruptedHandler), false);
+  assert.doesNotMatch(runtime.stdout.join(''), /installed successfully/u);
+
+  interruptInstall = false;
+  changeConfigDuringInstall = true;
+  runtime.stdout.length = 0;
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(readDaemonRecord(home), null);
+  assert.match(runtime.stderr.join(''), /configuration changed during the package update/u);
+  assert.doesNotMatch(runtime.stdout.join(''), /Runtime was restored/u);
+  await fs.writeFile(configFile, validConfig);
+  shellEnvironment.KINTIO_DB_FILE = stateFile;
+  changeConfigDuringInstall = false;
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  delete shellEnvironment.KINTIO_DB_FILE;
+
+  await fs.writeFile(mutateConfigFile, '1');
+  runtime.stdout.length = 0;
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(readDaemonRecord(home), null);
+  assert.match(runtime.stderr.join(''), /configuration changed while restoring/u);
+  assert.doesNotMatch(runtime.stdout.join(''), /Runtime was restored/u);
+  await Promise.all([
+    fs.writeFile(mutateConfigFile, '0'),
+    fs.writeFile(configFile, validConfig),
+  ]);
+  shellEnvironment.KINTIO_DB_FILE = stateFile;
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  delete shellEnvironment.KINTIO_DB_FILE;
+
+  failProcessTreeTermination = true;
+  runtime.stdout.length = 0;
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(readDaemonRecord(home), null);
+  assert.match(runtime.stderr.join(''), /process tree termination failure/u);
+  assert.match(runtime.stderr.join(''), /Runtime remains stopped/u);
+  assert.doesNotMatch(runtime.stdout.join(''), /Runtime was restored/u);
+  assert.doesNotMatch(runtime.stdout.join(''), /installed successfully/u);
+
+  failProcessTreeTermination = false;
+  shellEnvironment.KINTIO_DB_FILE = stateFile;
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  delete shellEnvironment.KINTIO_DB_FILE;
+  failRestore = true;
+  runtime.stdout.length = 0;
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(readDaemonRecord(home), null);
+  assert.match(runtime.stderr.join(''), /was installed, but the service Runtime was not restored/u);
+  assert.doesNotMatch(runtime.stdout.join(''), /installed successfully/u);
+
+  failRestore = false;
+  shellEnvironment.KINTIO_DB_FILE = stateFile;
+  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  delete shellEnvironment.KINTIO_DB_FILE;
+  failInstall = true;
+  failRestore = true;
+  runtime.stdout.length = 0;
+  runtime.stderr.length = 0;
+  assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
+  assert.equal(readDaemonRecord(home), null);
+  assert.match(runtime.stderr.join(''), /simulated package-manager failure/u);
+  assert.match(runtime.stderr.join(''), /simulated Runtime restore failure/u);
+  assert.doesNotMatch(runtime.stdout.join(''), /installed successfully/u);
+});
+
 test('a lifecycle lock rejects concurrent background mutation', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
@@ -688,14 +1509,37 @@ test('a lifecycle lock rejects concurrent background mutation', async (t) => {
   });
   t.onTestFinished(() => { lock.release(); });
   let launched = false;
+  let foregroundExecuted = false;
+  let loginStarted = false;
+  let accountChanged = false;
   const runtime = cliRuntime(root, {
     launchDaemon: () => {
       launched = true;
       return exitedDaemon();
     },
+    execute: async () => {
+      foregroundExecuted = true;
+      return 0;
+    },
+    ilinkLogin: async () => {
+      loginStarted = true;
+      return 0;
+    },
+    ilinkAccount: async () => {
+      accountChanged = true;
+      return { runtimeRequired: false, runningCount: 0 };
+    },
   });
   assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
+  assert.equal(await runCli(['run', '--home', home], runtime.overrides), 1);
+  assert.equal(await runCli(['ilink', 'login', '--home', home], runtime.overrides), 1);
+  assert.equal(await runCli([
+    'ilink', 'start', '--foreground', '--home', home,
+  ], runtime.overrides), 1);
   assert.equal(launched, false);
+  assert.equal(foregroundExecuted, false);
+  assert.equal(loginStarted, false);
+  assert.equal(accountChanged, false);
   assert.match(runtime.stderr.join(''), /lifecycle command is already running/u);
 });
 
