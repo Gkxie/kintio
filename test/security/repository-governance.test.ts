@@ -168,7 +168,6 @@ test('repository workflows preserve executable security boundaries', async () =>
     '.github/workflows/dependency-review.yml',
     '.github/workflows/prepare-release.yml',
     '.github/workflows/pr-title.yml',
-    '.github/workflows/real-codex.yml',
     '.github/workflows/release-codex.yml',
     '.github/workflows/release-plan.yml',
     '.github/workflows/release-pr.yml',
@@ -236,46 +235,10 @@ test('repository workflows preserve executable security boundaries', async () =>
     'kintio-release',
   ]));
 
-  const realCodex = workflows.get('.github/workflows/real-codex.yml') || '';
-  assert.match(realCodex, /^  workflow_dispatch:$/mu);
-  assert.match(realCodex, /^  pull_request:\n    branches: \[master\]$/mu);
-  assert.match(realCodex, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
-  assert.match(realCodex, /^    paths:\n(?:      - .+\n){3,}/mu);
-  assert.doesNotMatch(realCodex, /^  (?:push|pull_request_target|schedule):/mu);
-  assert.match(realCodex, /github\.event_name == 'workflow_dispatch'/u);
-  assert.match(realCodex, /github\.event_name == 'pull_request'/u);
-  assert.match(realCodex, /github\.ref == 'refs\/heads\/master'/u);
-  assert.match(realCodex, /startsWith\(github\.ref, 'refs\/heads\/codex\/'\)/u);
-  assert.match(realCodex, /github\.event\.pull_request\.draft == false/u);
-  assert.match(realCodex, /github\.event\.pull_request\.base\.ref == 'master'/u);
-  assert.match(
-    realCodex,
-    /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/u,
+  await assert.rejects(
+    fs.access('.github/workflows/real-codex.yml'),
+    { code: 'ENOENT' },
   );
-  assert.match(realCodex, /github\.event\.pull_request\.user\.login == 'Gkxie'/u);
-  assert.match(realCodex, /github\.actor == 'Gkxie'/u);
-  assert.match(realCodex, /github\.triggering_actor == 'Gkxie'/u);
-  assert.match(realCodex, /github\.run_attempt == 1/u);
-  assert.match(
-    realCodex,
-    /group: real-codex-validation-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}/u,
-  );
-  assert.match(realCodex, /cancel-in-progress: true/u);
-  assert.match(realCodex, /^    environment: codex-eval$/mu);
-  assert.match(realCodex, /persist-credentials: false/u);
-  assert.match(realCodex, /pnpm install --frozen-lockfile --ignore-scripts/u);
-  assert.match(realCodex, /CODEX_SHA256: [0-9a-f]{64}/u);
-  assert.match(realCodex, /sha256sum --check --strict/u);
-  assert.match(realCodex, /KINTIO_CI_API_KEY: \$\{\{ secrets\.KINTIO_CI_API_KEY \}\}/u);
-  assert.equal(realCodex.match(/secrets\.KINTIO_CI_API_KEY/gu)?.length, 1);
-  assert.match(realCodex, /codex login --with-api-key/u);
-  assert.match(realCodex, /requires_openai_auth = true/u);
-  assert.doesNotMatch(realCodex, /env_key = "KINTIO_CI_API_KEY"/u);
-  assert.match(realCodex, /base_url = "\$KINTIO_CI_BASE_URL"/u);
-  assert.match(realCodex, /model_reasoning_effort = "none"/u);
-  assert.doesNotMatch(realCodex, /^\s+CODEX_(?:MODEL|PATH|REASONING_EFFORT|WEB_SEARCH_MODE):/mu);
-  assert.doesNotMatch(realCodex, /REAL_CODEX_CONCURRENCY|upload-artifact|download-artifact/u);
-  assert.match(realCodex, /name: Remove isolated Codex state\n\s+if: always\(\)/u);
 
   const releaseCodex = workflows.get('.github/workflows/release-codex.yml') || '';
   assert.match(releaseCodex, /^  pull_request_target:\n    branches: \[master\]$/mu);
