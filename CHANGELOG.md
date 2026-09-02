@@ -4,6 +4,10 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Allowed deterministic Release Bot pull requests to expose the optional,
+  maintainer-approved real Codex smoke test only after a secret-free validation
+  of the exact three-file release plan ([#78](https://github.com/Gkxie/kintio/issues/78)).
+
 - Added equivalent `kintio update` and `kintio upgrade` commands that update an
   identified global npm or pnpm installation to one exact published version,
   refuse active Agent work, and restore an idle background instance in its
