@@ -1,4 +1,4 @@
-import { createHash, randomBytes } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
@@ -14,6 +14,19 @@ import type {
   MediaCatalogEntry,
   NormalizedMessage,
 } from '../types.ts';
+import {
+  canonicalValue,
+  requiredText,
+  sha256,
+  stableAttemptKey,
+  stableClientMessageId,
+  stableMessageKey,
+  type JsonObject,
+  type JsonValue,
+} from './compat.ts';
+
+export { stableClientMessageId, stableMessageKey } from './compat.ts';
+export type { JsonObject } from './compat.ts';
 
 const SCHEMA_VERSION = 24;
 const INBOUND_STATUSES = [
@@ -39,12 +52,6 @@ const SEND_STATUSES = [
 
 export type InboundStatus = (typeof INBOUND_STATUSES)[number];
 type SendStatus = (typeof SEND_STATUSES)[number];
-type JsonPrimitive = null | boolean | number | string;
-type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
-export interface JsonObject {
-  [key: string]: JsonValue;
-}
-
 export interface InboundRecord {
   inboxSeq: number;
   messageKey: string;
@@ -268,41 +275,6 @@ function sqlList(values: readonly string[]): string {
   return values.map((value) => `'${value}'`).join(',');
 }
 
-function sha256(value: string | NodeJS.ArrayBufferView): string {
-  return createHash('sha256').update(value).digest('hex');
-}
-
-function requiredText(value: unknown, name: string): string {
-  const text = String(value || '');
-  if (!text) throw new Error(`${name} is required`);
-  return text;
-}
-
-function canonicalValue(value: unknown): JsonValue {
-  if (value === undefined) return null;
-  if (
-    value === null ||
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-  ) {
-    return value;
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) throw new Error('JSON numbers must be finite');
-    return value;
-  }
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (typeof value !== 'object' || Buffer.isBuffer(value)) {
-    throw new Error(`Unsupported JSON value: ${typeof value}`);
-  }
-  const source = value as Record<string, unknown>;
-  const output: JsonObject = {};
-  for (const key of Object.keys(source).sort()) {
-    if (source[key] !== undefined) output[key] = canonicalValue(source[key]);
-  }
-  return output;
-}
-
 function encodeJson(value: unknown): string | null {
   if (value === undefined || value === null) return null;
   return JSON.stringify(canonicalValue(value));
@@ -501,31 +473,6 @@ function inboundInsert(
     status: 'received',
     payload: message,
   };
-}
-
-export function stableMessageKey(
-  channel: ChatChannel,
-  accountKey: string,
-  providerMessageId: string,
-): string {
-  const selectedChannel = requiredText(channel, 'channel') as ChatChannel;
-  if (!['wechat_kf', 'weixin_ilink'].includes(selectedChannel)) {
-    throw new Error(`Unsupported chat channel: ${selectedChannel}`);
-  }
-  const service = requiredText(accountKey, 'accountKey');
-  const message = requiredText(providerMessageId, 'providerMessageId');
-  return `im_${sha256(`${selectedChannel}\0${service}\0${message}`).slice(0, 40)}`;
-}
-
-export function stableClientMessageId(
-  messageKey: string,
-  sendIndex: number,
-): string {
-  return `wb_${sha256(`${requiredText(messageKey, 'messageKey')}\0${sendIndex}`).slice(0, 29)}`;
-}
-
-function stableAttemptKey(messageKey: string, sendIndex: number): string {
-  return `sa_${sha256(`${messageKey}\0${sendIndex}`).slice(0, 29)}`;
 }
 
 export class CursorConflictError extends Error {

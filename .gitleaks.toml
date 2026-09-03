@@ -1,0 +1,8 @@
+title = "Kintio secret scanning"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Deterministic hashes and cryptographic bytes shared by compatibility tests"
+paths = ['''^test/fixtures/persistence-compat-v1\.json$''']
