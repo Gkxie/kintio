@@ -101,6 +101,7 @@ test('package, release version, and public entry points stay aligned', async () 
   assert.match(bin, /requires Node\.js 24 or newer/u);
   assert.ok(bin.indexOf('nodeMajor < 24') < bin.indexOf("import('../dist/cli.js')"));
   assert.equal(packageJson.scripts?.prepack, 'pnpm run build');
+  assert.equal(packageJson.scripts?.test, 'vitest run && cargo test --locked');
   assert.equal(packageJson.repository?.url, 'git+https://github.com/Gkxie/kintio.git');
   assert.equal(
     /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u.exec(runtimeVersion)?.[1],
@@ -137,6 +138,26 @@ test('package, release version, and public entry points stay aligned', async () 
   assert.match(logo, /fill="#211920"/u);
   assert.match(avatar, /<title id="kintio-avatar-title">Kintio TIO avatar<\/title>/u);
   assert.match(avatar, /clipPath id="kintio-kinetic-panels-circle"/u);
+});
+
+test('the native migration stays pinned, non-published, and separate from production', async () => {
+  const [cargo, toolchain, build, lock] = await Promise.all([
+    read('Cargo.toml'),
+    read('rust-toolchain.toml'),
+    read('rust/build.rs'),
+    read('Cargo.lock'),
+  ]);
+  assert.match(cargo, /^name = "kintio-native"$/mu);
+  assert.match(cargo, /^version = "0\.0\.0"$/mu);
+  assert.match(cargo, /^publish = false$/mu);
+  assert.match(cargo, /^name = "kintio-rs"$/mu);
+  assert.match(cargo, /^unsafe_code = "forbid"$/mu);
+  assert.match(toolchain, /^channel = "1\.98\.0"$/mu);
+  assert.match(toolchain, /^components = \["clippy", "rustfmt"\]$/mu);
+  assert.match(build, /cargo:rustc-env=KINTIO_VERSION/u);
+  assert.match(build, /trim_end_matches\(\['\\r', '\\n'\]\)/u);
+  assert.match(lock, /^version = 4$/mu);
+  assert.equal(JSON.parse(await read('package.json')).bin.kintio, 'bin/kintio.js');
 });
 
 test('Issue Forms expose stable input identifiers', async () => {
@@ -187,6 +208,8 @@ test('repository workflows preserve executable security boundaries', async () =>
   for (const command of [
     'pnpm exec tsc -p tsconfig.test.json',
     'KNIP_DISABLE_RAW_TRANSFER=1 pnpm exec knip',
+    'cargo fmt --check',
+    'cargo clippy --locked --all-targets -- -D warnings',
     'pnpm run build',
     'scripts/prepare-package.ts',
     'npm pack --json --ignore-scripts',
@@ -206,6 +229,9 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(ci, /name: Unit, integration, recovery, security/u);
   assert.match(ci, /needs: platform-tests/u);
   assert.doesNotMatch(ci, /pnpm audit|upload-artifact|download-artifact/u);
+
+  const dependabot = await read('.github/dependabot.yml');
+  assert.match(dependabot, /package-ecosystem: cargo/u);
 
   const secretScan = workflows.get('.github/workflows/secret-scan.yml') || '';
   assert.match(secretScan, /^  pull_request:$/mu);

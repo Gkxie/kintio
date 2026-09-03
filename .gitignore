@@ -2,6 +2,7 @@
 .env.*
 node_modules/
 dist/
+target/
 pnpm-debug.log*
 *.log
 *.pid

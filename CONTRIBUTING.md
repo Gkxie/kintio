@@ -82,7 +82,11 @@ credential. Report security problems privately through [SECURITY.md](SECURITY.md
 
 ## Develop locally
 
-You need Node.js 24 or newer and the pnpm version pinned in `package.json`:
+During the native-runtime migration you need Node.js 24 or newer, the pnpm
+version pinned in `package.json`, and the Rust toolchain pinned in
+`rust-toolchain.toml`. Install Rust through
+[rustup](https://www.rust-lang.org/tools/install); Cargo selects the pinned
+toolchain automatically.
 
 ```bash
 corepack enable pnpm
@@ -90,7 +94,8 @@ pnpm install --frozen-lockfile
 pnpm test
 ```
 
-The default test suite uses temporary SQLite databases and fake external
+`pnpm test` runs both the existing Vitest specifications and the Rust tests.
+The default suite uses temporary SQLite databases and fake external
 boundaries. It does not require an `.env` file, a Codex login, or live channel
 credentials, and it does not send real messages.
 
@@ -172,8 +177,9 @@ Before submitting, run:
 pnpm test
 ```
 
-CI checks TypeScript, unused code, the build, dependencies, security scanning,
-and the complete deterministic test suite. Live Codex or channel-adapter tests
+CI checks TypeScript, Rust formatting and Clippy, unused code, both builds,
+dependencies, security scanning, and the complete deterministic test suite.
+Live Codex or channel-adapter tests
 run only when a maintainer supplies a dedicated target and an explicit
 allowlist. Delete every test Thread after such a run.
 
