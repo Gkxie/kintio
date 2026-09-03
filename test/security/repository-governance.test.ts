@@ -152,6 +152,10 @@ test('the native migration stays pinned, non-published, and separate from produc
   assert.match(cargo, /^publish = false$/mu);
   assert.match(cargo, /^name = "kintio-rs"$/mu);
   assert.match(cargo, /^unsafe_code = "forbid"$/mu);
+  assert.match(
+    cargo,
+    /^rusqlite = \{ version = "[^"]+", default-features = false, features = \["bundled"\] \}$/mu,
+  );
   assert.match(toolchain, /^channel = "1\.98\.0"$/mu);
   assert.match(toolchain, /^components = \["clippy", "rustfmt"\]$/mu);
   assert.match(build, /cargo:rustc-env=KINTIO_VERSION/u);

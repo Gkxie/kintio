@@ -1,0 +1,410 @@
+CREATE TABLE sync_cursors (
+          open_kfid TEXT PRIMARY KEY,
+          cursor TEXT NOT NULL,
+          updated_at INTEGER NOT NULL
+        ) STRICT;
+
+CREATE TABLE conversations (
+          channel TEXT NOT NULL
+            CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+          open_kfid TEXT NOT NULL,
+          external_userid TEXT NOT NULL,
+          thread_id TEXT NOT NULL DEFAULT '',
+          memory_thread_id TEXT NOT NULL DEFAULT '',
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (channel, open_kfid, external_userid)
+        ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE authorizations (
+          external_userid TEXT PRIMARY KEY,
+          authorized INTEGER NOT NULL DEFAULT 0 CHECK (authorized IN (0, 1)),
+          consecutive_matches INTEGER NOT NULL DEFAULT 0
+            CHECK (consecutive_matches >= 0),
+          last_open_kfid TEXT NOT NULL DEFAULT '',
+          last_message_key TEXT NOT NULL DEFAULT '',
+          authorized_at INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL
+        ) STRICT;
+
+CREATE TABLE ilink_accounts (
+          account_key TEXT PRIMARY KEY,
+          provider_account_id TEXT NOT NULL UNIQUE,
+          owner_peer_id TEXT NOT NULL,
+          base_url TEXT NOT NULL,
+          generation INTEGER NOT NULL DEFAULT 1 CHECK (generation > 0),
+          status TEXT NOT NULL DEFAULT 'active'
+            CHECK (status IN ('active', 'paused', 'disabled', 'revoked')),
+          agent_access TEXT NOT NULL DEFAULT 'restricted'
+            CHECK (agent_access IN ('restricted', 'host')),
+          runtime_enabled INTEGER NOT NULL DEFAULT 0
+            CHECK (runtime_enabled IN (0, 1)),
+          pause_until INTEGER NOT NULL DEFAULT 0,
+          cursor TEXT NOT NULL DEFAULT '',
+          cursor_updated_at INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        ) STRICT, WITHOUT ROWID;
+
+CREATE UNIQUE INDEX ilink_active_owner_idx
+          ON ilink_accounts(owner_peer_id)
+          WHERE status IN ('active', 'paused');
+
+CREATE TABLE ilink_account_secrets (
+          account_key TEXT PRIMARY KEY,
+          account_generation INTEGER NOT NULL CHECK (account_generation > 0),
+          nonce TEXT NOT NULL,
+          ciphertext TEXT NOT NULL,
+          auth_tag TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (account_key) REFERENCES ilink_accounts(account_key)
+            ON DELETE CASCADE
+        ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE ilink_login_offers (
+          offer_id TEXT PRIMARY KEY,
+          initiator_kind TEXT NOT NULL
+            CHECK (initiator_kind IN ('local_operator', 'remote_adapter')),
+          source_channel TEXT NOT NULL,
+          source_message_key TEXT NOT NULL,
+          source_account_id TEXT NOT NULL,
+          source_peer_id TEXT NOT NULL,
+          candidate_account_keys_json TEXT NOT NULL DEFAULT '[]'
+            CHECK (json_valid(candidate_account_keys_json)),
+          secret_generation INTEGER NOT NULL CHECK (secret_generation >= 0),
+          nonce TEXT NOT NULL,
+          ciphertext TEXT NOT NULL,
+          auth_tag TEXT NOT NULL,
+          api_base_url TEXT NOT NULL,
+          status TEXT NOT NULL DEFAULT 'waiting'
+            CHECK (status IN (
+              'waiting', 'scanned', 'confirmed', 'expired', 'failed', 'cancelled'
+            )),
+          expires_at INTEGER NOT NULL,
+          last_polled_at INTEGER NOT NULL DEFAULT 0,
+          error_code TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        ) STRICT, WITHOUT ROWID;
+
+CREATE UNIQUE INDEX ilink_one_pending_offer_idx
+          ON ilink_login_offers(
+            source_channel, source_account_id, source_peer_id
+          )
+          WHERE status IN ('waiting', 'scanned');
+
+CREATE TABLE ilink_enrollment_audit (
+          offer_id TEXT PRIMARY KEY,
+          initiator_kind TEXT NOT NULL
+            CHECK (initiator_kind IN ('local_operator', 'remote_adapter')),
+          source_channel TEXT NOT NULL,
+          source_message_key TEXT NOT NULL,
+          source_account_id TEXT NOT NULL,
+          source_peer_id TEXT NOT NULL,
+          account_key TEXT NOT NULL DEFAULT '',
+          result TEXT NOT NULL CHECK (result IN (
+            'confirmed', 'expired', 'failed', 'cancelled',
+            'already_connected', 'verification_required'
+          )),
+          offered_at INTEGER NOT NULL,
+          completed_at INTEGER NOT NULL
+        ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE inbound_messages (
+          inbox_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          message_key TEXT NOT NULL UNIQUE,
+          open_kfid TEXT NOT NULL,
+          msgid TEXT NOT NULL,
+          external_userid TEXT NOT NULL DEFAULT '',
+          channel TEXT NOT NULL
+            CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+          origin TEXT NOT NULL,
+          msg_type TEXT NOT NULL,
+          sent_at INTEGER NOT NULL DEFAULT 0,
+          status TEXT NOT NULL CHECK (status IN ('received','processing','preparing','ready','completed','steering','steered','absorbed','failed','ignored','suppressed')),
+          deferred INTEGER NOT NULL DEFAULT 0 CHECK (deferred IN (0, 1)),
+          primary_message_key TEXT,
+          payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+          codex_turn_id TEXT NOT NULL DEFAULT '',
+          client_input_id TEXT NOT NULL DEFAULT '',
+          steering_boundary INTEGER NOT NULL DEFAULT 0,
+          error_message TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE (channel, open_kfid, msgid),
+          UNIQUE (message_key, open_kfid, external_userid),
+          UNIQUE (message_key, channel, open_kfid, external_userid),
+          FOREIGN KEY (
+            primary_message_key, channel, open_kfid, external_userid
+          ) REFERENCES inbound_messages(
+            message_key, channel, open_kfid, external_userid
+          )
+        ) STRICT;
+
+CREATE TABLE inbound_media (
+          media_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+          message_key TEXT NOT NULL,
+          channel TEXT NOT NULL
+            CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+          open_kfid TEXT NOT NULL,
+          external_userid TEXT NOT NULL,
+          position INTEGER NOT NULL CHECK (position >= 0),
+          kind TEXT NOT NULL,
+          media_id TEXT NOT NULL,
+          filename TEXT NOT NULL DEFAULT '',
+          sent_at INTEGER NOT NULL DEFAULT 0,
+          remembered_at INTEGER NOT NULL,
+          UNIQUE (message_key, position),
+          FOREIGN KEY (message_key, channel, open_kfid, external_userid)
+            REFERENCES inbound_messages(
+              message_key, channel, open_kfid, external_userid
+            ) ON DELETE CASCADE
+        ) STRICT;
+
+CREATE TABLE ilink_inbound_images (
+          message_key TEXT NOT NULL,
+          position INTEGER NOT NULL CHECK (position >= 0),
+          account_key TEXT NOT NULL,
+          peer_id TEXT NOT NULL,
+          secret_generation INTEGER NOT NULL CHECK (secret_generation >= 0),
+          nonce TEXT NOT NULL,
+          ciphertext TEXT NOT NULL,
+          auth_tag TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (message_key, position),
+          FOREIGN KEY (message_key, account_key, peer_id)
+            REFERENCES inbound_messages(message_key, open_kfid, external_userid)
+            ON DELETE CASCADE
+        ) STRICT, WITHOUT ROWID;
+
+CREATE INDEX ilink_inbound_images_created_idx
+          ON ilink_inbound_images(created_at);
+
+CREATE TABLE ilink_reply_windows (
+          reply_window_id INTEGER PRIMARY KEY AUTOINCREMENT,
+          account_key TEXT NOT NULL,
+          peer_id TEXT NOT NULL,
+          account_generation INTEGER NOT NULL CHECK (account_generation > 0),
+          source_message_key TEXT NOT NULL UNIQUE,
+          source_inbox_seq INTEGER NOT NULL CHECK (source_inbox_seq > 0),
+          provider_seq INTEGER,
+          issued_at INTEGER NOT NULL,
+          expires_at INTEGER NOT NULL CHECK (expires_at > issued_at),
+          max_sends INTEGER NOT NULL DEFAULT 10 CHECK (max_sends BETWEEN 1 AND 10),
+          next_send_index INTEGER NOT NULL DEFAULT 0 CHECK (next_send_index >= 0),
+          reserved_send_count INTEGER NOT NULL DEFAULT 0
+            CHECK (reserved_send_count >= 0),
+          transmitted_send_count INTEGER NOT NULL DEFAULT 0
+            CHECK (transmitted_send_count >= 0),
+          state TEXT NOT NULL DEFAULT 'open'
+            CHECK (state IN ('open', 'superseded', 'closed', 'cancelled')),
+          secret_generation INTEGER NOT NULL CHECK (secret_generation >= 0),
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (account_key) REFERENCES ilink_accounts(account_key),
+          FOREIGN KEY (source_message_key) REFERENCES inbound_messages(message_key),
+          CHECK (reserved_send_count + transmitted_send_count <= max_sends)
+        ) STRICT;
+
+CREATE UNIQUE INDEX ilink_one_open_window_idx
+          ON ilink_reply_windows(account_key, peer_id) WHERE state = 'open';
+
+CREATE INDEX ilink_reply_windows_expiry_idx
+          ON ilink_reply_windows(expires_at, state);
+
+CREATE INDEX ilink_reply_windows_updated_idx
+          ON ilink_reply_windows(updated_at, state);
+
+CREATE TABLE ilink_reply_window_secrets (
+          reply_window_id INTEGER PRIMARY KEY,
+          nonce TEXT NOT NULL,
+          ciphertext TEXT NOT NULL,
+          auth_tag TEXT NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (reply_window_id)
+            REFERENCES ilink_reply_windows(reply_window_id) ON DELETE CASCADE
+        ) STRICT, WITHOUT ROWID;
+
+CREATE TABLE send_attempts (
+          attempt_key TEXT PRIMARY KEY,
+          source_message_key TEXT NOT NULL,
+          open_kfid TEXT NOT NULL,
+          external_userid TEXT NOT NULL,
+          channel TEXT NOT NULL
+            CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+          reply_window_id INTEGER,
+          send_index INTEGER NOT NULL CHECK (send_index >= 0 AND send_index < 1000),
+          source TEXT NOT NULL,
+          sent_type TEXT NOT NULL,
+          payload_json TEXT CHECK (payload_json IS NULL OR json_valid(payload_json)),
+          metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+          fingerprint TEXT NOT NULL,
+          client_message_id TEXT NOT NULL UNIQUE,
+          status TEXT NOT NULL CHECK (status IN ('pending','sending','accepted','failed','uncertain')),
+          wecom_msgid TEXT NOT NULL DEFAULT '',
+          error_code TEXT NOT NULL DEFAULT '',
+          error_message TEXT NOT NULL DEFAULT '',
+          fail_type INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          UNIQUE (source_message_key, send_index),
+          FOREIGN KEY (
+            source_message_key, channel, open_kfid, external_userid
+          )
+            REFERENCES inbound_messages(
+              message_key, channel, open_kfid, external_userid
+            ),
+          FOREIGN KEY (reply_window_id)
+            REFERENCES ilink_reply_windows(reply_window_id)
+        ) STRICT;
+
+CREATE TABLE agent_sessions (
+          token_hash TEXT PRIMARY KEY,
+          source_message_key TEXT NOT NULL,
+          open_kfid TEXT NOT NULL,
+          external_userid TEXT NOT NULL,
+          channel TEXT NOT NULL
+            CHECK (channel IN ('wechat_kf', 'weixin_ilink')),
+          reply_window_id INTEGER,
+          boundary_inbox_seq INTEGER NOT NULL CHECK (boundary_inbox_seq >= 0),
+          memory_thread_id TEXT NOT NULL DEFAULT '',
+          media_json TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(media_json)),
+          expires_at INTEGER NOT NULL,
+          closed_at INTEGER NOT NULL DEFAULT 0,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY (
+            source_message_key, channel, open_kfid, external_userid
+          )
+            REFERENCES inbound_messages(
+              message_key, channel, open_kfid, external_userid
+            ) ON DELETE CASCADE
+        ) STRICT;
+
+CREATE TABLE delivery_failures (
+          wecom_msgid TEXT PRIMARY KEY,
+          fail_type INTEGER NOT NULL,
+          observed_at INTEGER NOT NULL,
+          matched_attempt_key TEXT NOT NULL DEFAULT '',
+          matched_at INTEGER NOT NULL DEFAULT 0
+        ) STRICT;
+
+CREATE TABLE agent_artifacts (
+          token_hash TEXT NOT NULL,
+          ref TEXT NOT NULL,
+          bytes BLOB NOT NULL,
+          filename TEXT NOT NULL,
+          content_type TEXT NOT NULL,
+          metadata_json TEXT CHECK (metadata_json IS NULL OR json_valid(metadata_json)),
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (token_hash, ref),
+          FOREIGN KEY (token_hash) REFERENCES agent_sessions(token_hash)
+            ON DELETE CASCADE
+        ) STRICT, WITHOUT ROWID;
+
+CREATE INDEX inbound_pending_idx
+          ON inbound_messages(
+            status, channel, open_kfid, external_userid, inbox_seq
+          );
+
+CREATE INDEX inbound_primary_idx
+          ON inbound_messages(primary_message_key, inbox_seq);
+
+CREATE INDEX inbound_deferred_idx
+          ON inbound_messages(deferred, status, inbox_seq);
+
+CREATE UNIQUE INDEX conversation_thread_idx
+          ON conversations(thread_id) WHERE thread_id <> '';
+
+CREATE INDEX send_status_idx
+          ON send_attempts(channel, status, created_at, send_index);
+
+CREATE UNIQUE INDEX send_wecom_msgid_idx
+          ON send_attempts(channel, wecom_msgid) WHERE wecom_msgid <> '';
+
+CREATE INDEX send_conversation_idx
+          ON send_attempts(
+            channel, open_kfid, external_userid, updated_at DESC
+          );
+
+CREATE INDEX media_conversation_idx
+          ON inbound_media(
+            channel, open_kfid, external_userid, remembered_at DESC
+          );
+
+CREATE INDEX agent_session_source_idx
+          ON agent_sessions(source_message_key, closed_at, expires_at);
+
+CREATE TRIGGER ilink_session_window_insert_guard
+        BEFORE INSERT ON agent_sessions WHEN (
+          (NEW.channel = 'wechat_kf' AND NEW.reply_window_id IS NOT NULL) OR
+          (NEW.channel = 'weixin_ilink' AND (NEW.reply_window_id IS NULL OR NOT EXISTS (
+            SELECT 1 FROM ilink_reply_windows AS window
+            WHERE window.reply_window_id = NEW.reply_window_id
+              AND window.account_key = NEW.open_kfid
+              AND window.peer_id = NEW.external_userid
+              AND window.source_inbox_seq = NEW.boundary_inbox_seq
+              AND window.state = 'open'
+          )))
+        ) BEGIN SELECT RAISE(ABORT, 'agent session channel/window mismatch'); END;
+
+CREATE TRIGGER ilink_session_window_update_guard
+        BEFORE UPDATE OF channel, reply_window_id, open_kfid,
+          external_userid, boundary_inbox_seq ON agent_sessions WHEN (
+          (NEW.channel = 'wechat_kf' AND NEW.reply_window_id IS NOT NULL) OR
+          (NEW.channel = 'weixin_ilink' AND (NEW.reply_window_id IS NULL OR NOT EXISTS (
+            SELECT 1 FROM ilink_reply_windows AS window
+            WHERE window.reply_window_id = NEW.reply_window_id
+              AND window.account_key = NEW.open_kfid
+              AND window.peer_id = NEW.external_userid
+              AND window.source_inbox_seq = NEW.boundary_inbox_seq
+              AND window.state = 'open'
+          )))
+        ) BEGIN SELECT RAISE(ABORT, 'agent session channel/window mismatch'); END;
+
+CREATE TRIGGER ilink_attempt_window_insert_guard
+        BEFORE INSERT ON send_attempts WHEN (
+          (NEW.channel = 'wechat_kf' AND NEW.reply_window_id IS NOT NULL) OR
+          (NEW.channel = 'weixin_ilink' AND (NEW.reply_window_id IS NULL OR NOT EXISTS (
+            SELECT 1 FROM ilink_reply_windows AS window
+            WHERE window.reply_window_id = NEW.reply_window_id
+              AND window.account_key = NEW.open_kfid
+              AND window.peer_id = NEW.external_userid
+          )))
+        ) BEGIN SELECT RAISE(ABORT, 'send attempt channel/window mismatch'); END;
+
+CREATE TRIGGER ilink_attempt_window_update_guard
+        BEFORE UPDATE OF channel, reply_window_id, open_kfid,
+          external_userid ON send_attempts WHEN (
+          (NEW.channel = 'wechat_kf' AND NEW.reply_window_id IS NOT NULL) OR
+          (NEW.channel = 'weixin_ilink' AND (NEW.reply_window_id IS NULL OR NOT EXISTS (
+            SELECT 1 FROM ilink_reply_windows AS window
+            WHERE window.reply_window_id = NEW.reply_window_id
+              AND window.account_key = NEW.open_kfid
+              AND window.peer_id = NEW.external_userid
+          )))
+        ) BEGIN SELECT RAISE(ABORT, 'send attempt channel/window mismatch'); END;
+
+CREATE TRIGGER ilink_window_source_insert_guard
+        BEFORE INSERT ON ilink_reply_windows WHEN NOT EXISTS (
+          SELECT 1 FROM inbound_messages AS inbound
+          WHERE inbound.message_key = NEW.source_message_key
+            AND inbound.open_kfid = NEW.account_key
+            AND inbound.external_userid = NEW.peer_id
+            AND inbound.channel = 'weixin_ilink'
+        ) BEGIN SELECT RAISE(ABORT, 'reply window source mismatch'); END;
+
+CREATE TRIGGER ilink_window_source_update_guard
+        BEFORE UPDATE OF source_message_key, account_key, peer_id
+          ON ilink_reply_windows WHEN NOT EXISTS (
+          SELECT 1 FROM inbound_messages AS inbound
+          WHERE inbound.message_key = NEW.source_message_key
+            AND inbound.open_kfid = NEW.account_key
+            AND inbound.external_userid = NEW.peer_id
+            AND inbound.channel = 'weixin_ilink'
+        ) BEGIN SELECT RAISE(ABORT, 'reply window source mismatch'); END;
+
+CREATE TRIGGER ilink_window_delete_guard
+        BEFORE DELETE ON ilink_reply_windows WHEN EXISTS (
+          SELECT 1 FROM agent_sessions WHERE reply_window_id = OLD.reply_window_id
+        ) BEGIN SELECT RAISE(ABORT, 'reply window still has agent sessions'); END;
+

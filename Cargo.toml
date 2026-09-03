@@ -24,6 +24,10 @@ path = "rust-tests/cli.rs"
 name = "persistence-compat"
 path = "rust-tests/persistence-compat.rs"
 
+[[test]]
+name = "state-database"
+path = "rust-tests/state-database.rs"
+
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
 anyhow = "1.0.104"
@@ -32,6 +36,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 dirs = "6.0.0"
 getrandom = "0.4.3"
 ryu-js = "1.0.3"
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.11.0"
@@ -39,6 +44,7 @@ zeroize = "1.9.0"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+wait-timeout = "0.2.1"
 
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1.4", features = ["process"] }
