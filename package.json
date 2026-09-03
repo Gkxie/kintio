@@ -40,7 +40,7 @@
     "build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
     "dev": "node --watch index.ts",
     "start": "pnpm run build && node dist/index.js",
-    "test": "vitest run",
+    "test": "vitest run && cargo test --locked",
     "prepack": "pnpm run build"
   },
   "engines": {

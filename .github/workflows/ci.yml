@@ -26,6 +26,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm exec tsc -p tsconfig.test.json
       - run: KNIP_DISABLE_RAW_TRANSFER=1 pnpm exec knip
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
       - run: pnpm run build
       - name: Install the exact npm tarball
         run: |
@@ -85,6 +87,7 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
+      - run: cargo clippy --locked --all-targets -- -D warnings
 
   test:
     name: Unit, integration, recovery, security
