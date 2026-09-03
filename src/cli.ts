@@ -8,6 +8,7 @@ import crossSpawn from 'cross-spawn';
 
 import {
   DAEMON_STOP_TIMEOUT_MS,
+  INSTANCE_CONFIG_TEMPLATE,
   loadConfig,
   loadIlinkEnrollmentConfig,
   loadIlinkRuntimeConfig,
@@ -539,12 +540,10 @@ function refreshManagedSkill(
 
 function setup(location: InstanceLocation, runtime: CliRuntime): number {
   prepareDirectories(location.home);
-  const templateFile = path.join(runtime.packageRoot, '.env.example');
-  const template = fs.readFileSync(templateFile, 'utf8');
   const configInsideHome = isPathInside(location.home, location.configFile);
   const configCreated = writeNewFile(
     location.configFile,
-    template,
+    INSTANCE_CONFIG_TEMPLATE,
     configInsideHome ? location.home : undefined,
   );
   const configStat = privateFile(location.configFile, 'Kintio config');

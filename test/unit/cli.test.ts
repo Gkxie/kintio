@@ -8,6 +8,7 @@ import { test } from 'vitest';
 import crossSpawn from 'cross-spawn';
 
 import { runCli } from '../../src/cli.ts';
+import { INSTANCE_CONFIG_TEMPLATE } from '../../src/config.ts';
 import { IlinkPromptInterruptedError } from '../../src/ilink/account-picker.ts';
 import type { IlinkOperatorAccount } from '../../src/ilink/cli-login.ts';
 import { runNativeDaemon } from '../../src/runtime/native-daemon.ts';
@@ -888,7 +889,7 @@ test('standalone iLink start launches one managed background daemon before activ
     home,
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
   ));
-  await fs.copyFile('.env.example', path.join(home, '.env'));
+  await fs.writeFile(path.join(home, '.env'), INSTANCE_CONFIG_TEMPLATE);
   if (process.platform !== 'win32') await fs.chmod(path.join(home, '.env'), 0o600);
   assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /already running in ilink mode/u);
@@ -973,12 +974,11 @@ test('setup creates one private config and refreshes the managed Agent skill', a
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
   );
   const firstConfig = await fs.readFile(configFile, 'utf8');
-  const configTemplate = await fs.readFile('.env.example', 'utf8');
   const bundledSkill = await fs.readFile(
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
     'utf8',
   );
-  assert.equal(firstConfig, configTemplate);
+  assert.equal(firstConfig, INSTANCE_CONFIG_TEMPLATE);
   assert.doesNotMatch(
     firstConfig,
     /^(?:KINTIO|TALKFERRY|HARNESS|WECOM)_MCP_(?:URL|BEARER_TOKEN)=/mu,
@@ -1233,7 +1233,6 @@ test('update verifies changed package contents before starting the new service W
     fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), {
       recursive: true,
     }),
-    fs.copyFile('.env.example', path.join(packageRoot, '.env.example')),
   ]);
   await fs.writeFile(workerFile, [
     "import fs from 'node:fs';",
@@ -1333,7 +1332,6 @@ test('pnpm update restores from the stable link after it moves to a new store', 
         path.join(store, 'bin/kintio.js'),
         `process.stdout.write(${JSON.stringify(`${version}\n`)});\n`,
       ),
-      fs.writeFile(path.join(store, '.env.example'), ''),
       fs.writeFile(path.join(store, 'dist/index.js'), [
         "import fs from 'node:fs';",
         `fs.writeFileSync(process.env.KINTIO_TEST_WORKER_VERSION, ${JSON.stringify(version)});`,
@@ -1428,7 +1426,6 @@ test('update refuses active work and restores an idle service daemon', async (t)
     fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), {
       recursive: true,
     }),
-    fs.copyFile('.env.example', path.join(packageRoot, '.env.example')),
     fs.writeFile(idleFile, '0'),
     fs.writeFile(mutateConfigFile, '0'),
   ]);

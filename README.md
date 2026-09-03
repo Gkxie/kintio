@@ -1,12 +1,12 @@
 <div align="center">
 
 <h1>
-  <img src="assets/logo.svg" alt="Kintio" width="320" />
+  <img src="https://raw.githubusercontent.com/Gkxie/kintio/master/assets/logo.svg" alt="Kintio" width="320" />
 </h1>
 
 **Connect chat channels to an Agent you control.**
 
-English | [简体中文](README.zh-CN.md)
+English | [简体中文](https://github.com/Gkxie/kintio/blob/master/README.zh-CN.md)
 
 [![CI](https://github.com/Gkxie/kintio/actions/workflows/ci.yml/badge.svg)](https://github.com/Gkxie/kintio/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/Gkxie/kintio/actions/workflows/codeql.yml/badge.svg)](https://github.com/Gkxie/kintio/actions/workflows/codeql.yml)

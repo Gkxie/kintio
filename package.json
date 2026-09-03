@@ -16,15 +16,9 @@
   "files": [
     "bin/kintio.js",
     "dist",
-    "assets/avatar.svg",
-    "assets/logo.svg",
     "assets/ilink-login-card.png",
     "codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md",
-    ".env.example",
-    "README.md",
-    "README.zh-CN.md",
     "CHANGELOG.md",
-    "LICENSE",
     "THIRD_PARTY_NOTICES"
   ],
   "repository": {

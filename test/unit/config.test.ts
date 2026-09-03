@@ -9,6 +9,7 @@ import { parseEnv } from 'node:util';
 
 import {
   createConfig,
+  INSTANCE_CONFIG_TEMPLATE,
   loadConfig,
   loadIlinkEnrollmentConfig,
   loadIlinkRuntimeConfig,
@@ -31,8 +32,8 @@ function testConfig(
   return createConfig(environment, root, platform);
 }
 
-test('.env.example is safe to copy before choosing a channel', async () => {
-  const environment = parseEnv(await fs.readFile('.env.example', 'utf8'));
+test('the generated instance config is safe before choosing a channel', () => {
+  const environment = parseEnv(INSTANCE_CONFIG_TEMPLATE);
   const config = testConfig(environment);
 
   assert.equal(config.wecom.callbackToken, '');

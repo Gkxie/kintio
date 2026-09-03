@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Reduced the npm artifact to runtime resources, generated new instance
+  configuration directly inside the Kintio home, and published a Changelog
+  that starts at the packaged version without repository-only headings
+  ([#84](https://github.com/Gkxie/kintio/issues/84)).
+
 ## 0.8.0
 
 - Removed the redundant Owner PR/manual hosted Codex workflow so the protected,

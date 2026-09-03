@@ -288,6 +288,7 @@ jobs:
         id: package
         run: |
           mkdir -p "$RUNNER_TEMP/npm-package"
+          node --experimental-strip-types scripts/prepare-package.ts
           npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP/npm-package" > "$RUNNER_TEMP/npm-pack.json"
           node --input-type=module <<'NODE'
           import { createHash } from 'node:crypto';

@@ -30,11 +30,40 @@ jobs:
       - name: Install the exact npm tarball
         run: |
           mkdir -p "$RUNNER_TEMP/npm-package"
+          node --experimental-strip-types scripts/prepare-package.ts
           npm pack --json --ignore-scripts --pack-destination "$RUNNER_TEMP/npm-package" > "$RUNNER_TEMP/npm-pack.json"
           package_file=$(node --input-type=module -e "import fs from 'node:fs'; const [packed]=JSON.parse(fs.readFileSync(process.argv[1],'utf8')); if (!packed?.filename) throw new Error('npm pack returned no file'); process.stdout.write(packed.filename)" "$RUNNER_TEMP/npm-pack.json")
           package_version=$(node --input-type=module -e "import fs from 'node:fs'; process.stdout.write(JSON.parse(fs.readFileSync('package.json','utf8')).version)")
           npm install --global --prefix "$RUNNER_TEMP/kintio-global" "$RUNNER_TEMP/npm-package/$package_file" --ignore-scripts --no-audit --no-fund --registry https://registry.npmjs.org/
           test "$("$RUNNER_TEMP/kintio-global/bin/kintio" --version)" = "$package_version"
+          package_root="$RUNNER_TEMP/kintio-global/lib/node_modules/@kin-tio/cli"
+          PACKAGE_ROOT="$package_root" PACKAGE_VERSION="$package_version" node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const changelog = fs.readFileSync(
+            path.join(process.env.PACKAGE_ROOT, 'CHANGELOG.md'),
+            'utf8',
+          );
+          if (!changelog.startsWith(`# Changelog\n\n## ${process.env.PACKAGE_VERSION}\n`)) {
+            throw new Error('packed Changelog does not start with the package version');
+          }
+          if (
+            changelog.includes('## Unreleased')
+            || changelog.includes('This file records important user-visible changes')
+          ) {
+            throw new Error('packed Changelog contains repository-only headings');
+          }
+          for (const file of [
+            '.env.example',
+            'README.zh-CN.md',
+            'assets/avatar.svg',
+            'assets/logo.svg',
+          ]) {
+            if (fs.existsSync(path.join(process.env.PACKAGE_ROOT, file))) {
+              throw new Error(`npm package contains repository-only file: ${file}`);
+            }
+          }
+          NODE
           HOME="$RUNNER_TEMP/kintio-profile" "$RUNNER_TEMP/kintio-global/bin/kintio" setup
           test -f "$RUNNER_TEMP/kintio-profile/.kintio/.env"
           test -f "$RUNNER_TEMP/kintio-profile/.kintio/codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md"
