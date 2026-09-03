@@ -182,6 +182,9 @@ Tests describe behavior and are migrated by contract, not translated mechanicall
 - Windows Job Objects may require a narrowly audited platform module or a safe crate. The
   initial global unsafe-code ban may only be relaxed for that concrete need, never as a
   general escape hatch.
+- JavaScript strings can contain lone UTF-16 surrogates while Rust strings cannot. Keep the
+  TypeScript compatibility Oracle unchanged during byte-level migration, then preflight
+  persisted JSON and introduce any Unicode rejection as a separately versioned contract.
 - The TypeScript baseline limits Windows state to the current profile but does not audit
   arbitrary DACLs or bind writes to verified directory handles. Before `kintio-rs` becomes
   public, config, key, database, descriptor, and Skill writes must use handle-relative

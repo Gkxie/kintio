@@ -425,6 +425,16 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.doesNotMatch(releasePr, /secrets\.|NPM_TOKEN|NODE_AUTH_TOKEN/u);
 });
 
+test('secret scanning exempts only the deterministic compatibility fixture', async () => {
+  const config = await read('.gitleaks.toml');
+  assert.match(config, /^useDefault = true$/mu);
+  assert.match(
+    config,
+    /\^test\/fixtures\/persistence-compat-v1\\\.json\$/u,
+  );
+  assert.doesNotMatch(config, /src\/|rust-tests\/|\.env/u);
+});
+
 test('release workflow inline modules remain syntactically executable', async () => {
   for (const [file, expected] of [
     ['.github/workflows/release.yml', 4],

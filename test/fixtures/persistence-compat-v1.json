@@ -1,0 +1,109 @@
+{
+  "stableIds": [
+    {
+      "channel": "wechat_kf",
+      "accountKey": "wk-alpha",
+      "providerMessageId": "provider-001",
+      "sendIndex": 0,
+      "messageKey": "im_c5afd863eff15160229b649cd760ae87e5bd721b",
+      "clientMessageId": "wb_3d865a1a103289ee7c67b326313be",
+      "attemptId": "sa_3d865a1a103289ee7c67b326313be"
+    },
+    {
+      "channel": "weixin_ilink",
+      "accountKey": "ia_a618904ea37444a5aa2447703c2e5e666d8ce567",
+      "providerMessageId": "消息-😀",
+      "sendIndex": 9,
+      "messageKey": "im_a3b5c1e0ceecc55e29bc764807bea8c0c5742452",
+      "clientMessageId": "wb_e826efb21807880488d7090c775b5",
+      "attemptId": "sa_e826efb21807880488d7090c775b5"
+    },
+    {
+      "channel": "wechat_kf",
+      "accountKey": "wk-alpha",
+      "providerMessageId": "provider-001",
+      "sendIndex": 4294967295,
+      "messageKey": "im_c5afd863eff15160229b649cd760ae87e5bd721b",
+      "clientMessageId": "wb_24c80e4850d9e350d2d157ba1c374",
+      "attemptId": "sa_24c80e4850d9e350d2d157ba1c374"
+    }
+  ],
+  "canonicalJson": [
+    {
+      "input": {
+        "10": "ten",
+        "2": "two",
+        "01": "leading",
+        "4294967294": "max-index",
+        "4294967295": "not-index",
+        "00": "double-zero",
+        "-0": "minus-zero",
+        "__proto__": "kept",
+        "z": 1,
+        "a": {
+          "\ue000": 2,
+          "😀": 1
+        },
+        "array": [
+          3,
+          0,
+          1e+21,
+          1e-7,
+          0.000001,
+          100000000000000000000,
+          9007199254740993
+        ]
+      },
+      "encoded": "{\"2\":\"two\",\"10\":\"ten\",\"4294967294\":\"max-index\",\"-0\":\"minus-zero\",\"00\":\"double-zero\",\"01\":\"leading\",\"4294967295\":\"not-index\",\"a\":{\"😀\":1,\"\":2},\"array\":[3,0,1e+21,1e-7,0.000001,100000000000000000000,9007199254740992],\"z\":1}"
+    },
+    {
+      "input": {
+        "text": "line\nquote\" slash/ emoji😀 separator\u2028",
+        "controls": "\b\f\r\t",
+        "nested": [
+          {
+            "b": true,
+            "a": null
+          }
+        ]
+      },
+      "encoded": "{\"controls\":\"\\b\\f\\r\\t\",\"nested\":[{\"a\":null,\"b\":true}],\"text\":\"line\\nquote\\\" slash/ emoji😀 separator\u2028\"}"
+    },
+    {
+      "input": [
+        null,
+        true,
+        false,
+        "机密",
+        333333333.3333333,
+        9007199254740991
+      ],
+      "encoded": "[null,true,false,\"机密\",333333333.3333333,9007199254740991]"
+    }
+  ],
+  "canonicalNumbers": [
+    { "input": "-0", "encoded": "0" },
+    { "input": "1e21", "encoded": "1e+21" },
+    { "input": "1e20", "encoded": "100000000000000000000" },
+    { "input": "1e-7", "encoded": "1e-7" },
+    { "input": "1e-6", "encoded": "0.000001" },
+    { "input": "333333333.33333329", "encoded": "333333333.3333333" }
+  ],
+  "secretBox": {
+    "key": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8",
+    "scope": {
+      "secretKind": "context_token",
+      "accountId": "ia_a618904ea37444a5aa2447703c2e5e666d8ce567",
+      "peerId": "user-乙@im.wechat",
+      "generation": 7
+    },
+    "secret": "opaque-token-机密-123",
+    "nonce": "ICEiIyQlJicoKSor",
+    "envelope": {
+      "nonce": "ICEiIyQlJicoKSor",
+      "ciphertext": "vUrHARn9N3p1Fyeg7P5oQzXmarG2slA",
+      "authTag": "x169ivLjCrC3Q2HZpUJtJA"
+    },
+    "aad": "[1,\"context_token\",\"ia_a618904ea37444a5aa2447703c2e5e666d8ce567\",\"user-乙@im.wechat\",7]"
+  }
+}

@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
 
 import {
@@ -6,6 +5,13 @@ import {
   type CoreState,
   type JsonObject,
 } from '../state/sqlite-store.ts';
+import {
+  canonicalValue as canonicalPersistenceValue,
+  sha256,
+  stableAttemptKey,
+  stableClientMessageId,
+  type JsonValue,
+} from '../state/compat.ts';
 import type { NormalizedMessage } from '../types.ts';
 import { normalizeIlinkBaseUrl } from './protocol/client.ts';
 import type { IlinkSealedSecret } from './secret-box.ts';
@@ -31,9 +37,6 @@ import {
 
 const MAX_UPSTREAM_CLOCK_SKEW_MS = 5 * 60 * 1_000;
 const MAX_CURSOR_BYTES = 256 * 1024;
-
-type JsonPrimitive = null | boolean | number | string;
-type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
 
 interface AccountRow {
   account_key: string;
@@ -107,6 +110,17 @@ interface AttemptRow {
   fail_type: number;
   created_at: number;
   updated_at: number;
+}
+
+function canonicalValue(value: unknown): JsonValue {
+  try {
+    return canonicalPersistenceValue(value);
+  } catch (error: unknown) {
+    fail(
+      'invalid_input',
+      error instanceof Error ? error.message : 'Unsupported JSON value',
+    );
+  }
 }
 
 interface AgentSessionWindowRow extends ReplyWindowRow {
@@ -323,30 +337,6 @@ function sealedSecret(row: {
   return result;
 }
 
-function canonicalValue(value: unknown): JsonValue {
-  if (value === undefined || value === null) return null;
-  if (
-    typeof value === 'string' ||
-    typeof value === 'boolean'
-  ) {
-    return value;
-  }
-  if (typeof value === 'number') {
-    if (!Number.isFinite(value)) fail('invalid_input', 'JSON numbers must be finite');
-    return value;
-  }
-  if (Array.isArray(value)) return value.map(canonicalValue);
-  if (typeof value !== 'object' || Buffer.isBuffer(value)) {
-    fail('invalid_input', `Unsupported JSON value: ${typeof value}`);
-  }
-  const source = value as Record<string, unknown>;
-  const output: JsonObject = {};
-  for (const key of Object.keys(source).sort()) {
-    if (source[key] !== undefined) output[key] = canonicalValue(source[key]);
-  }
-  return output;
-}
-
 function encodeJson(value: unknown): string {
   return JSON.stringify(canonicalValue(value));
 }
@@ -357,18 +347,6 @@ function decodeObject(value: string | null): JsonObject | undefined {
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
     ? parsed as JsonObject
     : undefined;
-}
-
-function sha256(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
-}
-
-function stableAttemptKey(messageKey: string, sendIndex: number): string {
-  return `sa_${sha256(`${messageKey}\0${sendIndex}`).slice(0, 29)}`;
-}
-
-function stableClientMessageId(messageKey: string, sendIndex: number): string {
-  return `wb_${sha256(`${messageKey}\0${sendIndex}`).slice(0, 29)}`;
 }
 
 function mapAccount(row: AccountRow): IlinkAccountRecord {
