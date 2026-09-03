@@ -130,17 +130,133 @@ Exit gate: background lifecycle and forced-crash recovery pass on Linux, macOS, 
 
 ### 7. Updater and distribution
 
-- Introduce version directories plus a stable launcher so Windows can update a running EXE.
-- Keep transition-only `bin/kintio.js` and `dist/daemon.js` shims in the first native npm
-  package because every existing updater hard-codes those paths and installs with scripts
-  disabled. The shims contain no business logic and only hand control to the native binary.
-- Test direct npm and pnpm upgrades from every public version that contains the legacy
-  updater, including skipped intermediate releases and both service/iLink restoration modes.
-- Build signed/checksummed native assets for supported OS/CPU targets.
-- Add a standalone installer and optional npm platform packages.
+One Rust executable has two distribution channels. GitHub Releases are the source of native
+assets and the only Node-free installation path. npm remains an optional coordinator for
+machines that already have Node.js; installing through npm does not become Node-free merely
+because the payload is native.
 
-Exit gate: every supported historical updater reaches the native binary safely, and native
-self-update works with running-file constraints on Windows.
+#### Supported artifacts
+
+| Host | Rust target | GitHub Release asset | npm dependency alias | Platform version |
+| --- | --- | --- | --- | --- |
+| Linux x64 | `x86_64-unknown-linux-musl` | `kintio-x86_64-unknown-linux-musl.tar.gz` | `@kin-tio/cli-linux-x64` | `X.Y.Z-linux-x64` |
+| Linux arm64 | `aarch64-unknown-linux-musl` | `kintio-aarch64-unknown-linux-musl.tar.gz` | `@kin-tio/cli-linux-arm64` | `X.Y.Z-linux-arm64` |
+| macOS x64 | `x86_64-apple-darwin` | `kintio-x86_64-apple-darwin.tar.gz` | `@kin-tio/cli-darwin-x64` | `X.Y.Z-darwin-x64` |
+| macOS arm64 | `aarch64-apple-darwin` | `kintio-aarch64-apple-darwin.tar.gz` | `@kin-tio/cli-darwin-arm64` | `X.Y.Z-darwin-arm64` |
+| Windows x64 | `x86_64-pc-windows-msvc` | `kintio-x86_64-pc-windows-msvc.zip` | `@kin-tio/cli-win32-x64` | `X.Y.Z-win32-x64` |
+| Windows arm64 | `aarch64-pc-windows-msvc` | `kintio-aarch64-pc-windows-msvc.zip` | `@kin-tio/cli-win32-arm64` | `X.Y.Z-win32-arm64` |
+
+Every archive contains exactly `bin/kintio` or `bin/kintio.exe`. One Release also contains
+`kintio_SHA256SUMS`, `install.sh`, and `install.ps1`. macOS notarization and Windows
+Authenticode signing happen before checksums; GitHub artifact attestations cover the final
+archives. The npm platform variants reuse those exact signed binary bytes rather than
+compiling again.
+
+The six platform variants use npm aliases to prerelease versions of the existing
+`@kin-tio/cli` package, following the native Codex package topology. They publish first to
+dedicated `linux-x64`, `darwin-arm64`, and equivalent dist-tags. The portable `X.Y.Z` package
+with optional aliases publishes last and is the only artifact that advances `latest`. This
+keeps one package identity and one Trusted Publisher rather than creating six registry
+projects.
+
+#### Standalone ownership
+
+The installers own version directories and one stable command path; they do not start, stop,
+or restart a Kintio Runtime:
+
+```text
+~/.kintio/packages/standalone/
+  releases/X.Y.Z-target/bin/kintio
+  current -> releases/X.Y.Z-target
+~/.local/bin/kintio -> ~/.kintio/packages/standalone/current/bin/kintio
+```
+
+Windows uses versioned executables below
+`%USERPROFILE%\.kintio\packages\standalone\releases` and an installer-owned `current`
+directory junction. Its stable command directory lives below
+`%LOCALAPPDATA%\Programs\Kintio`: its `bin` directory is itself an installer-owned junction
+to `%USERPROFILE%\.kintio\packages\standalone\current\bin`, and only that stable parent is
+added to PATH. Stage 6 must prove a replace-without-gap junction switch using native Windows
+semantics before this layout is accepted; deleting the old junction and then creating a new
+one is not an atomic update.
+Filesystems or policies that cannot provide the required junction semantics fail closed; the
+installer must not fall back to copying over a stable executable.
+
+The installer and native updater share one installation lock and compare-and-swap contract.
+Each operation records the exact initial `current` target before downloading. After acquiring
+the lock it must still observe that target, and a latest-version install must not replace a
+newer semantic version. Rollback may replace `current` only when it still points to the exact
+candidate installed by that operation. A changed pointer is concurrent ownership, not
+permission to overwrite another operation.
+
+`install.sh` and `install.ps1` execute the same transaction:
+
+1. Resolve `latest` once to an exact `vX.Y.Z` tag and use immutable URLs afterward.
+2. Map the host to exactly one of the six targets; reject every unknown OS or architecture.
+3. Download only the matching archive and checksum with bounded redirects, size, and time.
+4. Require exactly one matching checksum entry before extraction or execution.
+5. Extract the one fixed archive member into a random staging directory; reject extra
+   members, links, absolute paths, and traversal.
+6. Verify platform signatures and require candidate `--version` output to equal `X.Y.Z`.
+7. Acquire the shared installation lock, revalidate the initial pointer and monotonic version,
+   atomically commit the version directory, then compare-and-swap the installer-owned
+   `current` symlink or junction.
+8. Treat an existing version as idempotent only when its bytes match; never overwrite an
+   unowned path, link, junction, or file.
+9. Update PATH only when ownership is unambiguous. Otherwise print one exact command instead
+   of guessing which shell profile to edit.
+
+#### Native update and transition
+
+`kintio update` selects behavior from installation ownership:
+
+- npm or pnpm installations invoke their owning package manager and never edit
+  `node_modules` directly;
+- standalone installations download and validate while the Runtime remains live, then use
+  the existing stop-if-idle gate, switch `current`, and restore the exact prior service or
+  iLink mode from the new executable;
+- a failed restore stops the candidate process, atomically restores the old pointer, and
+  starts the old executable by its exact real path, but only if `current` still names this
+  operation's candidate; a concurrent pointer change or uncertain process tree fails closed.
+
+The first native npm package keeps transition-only `bin/kintio.js` and `dist/daemon.js`
+because every existing updater hard-codes those paths and installs with scripts disabled.
+Compatibility is process-level, not just filename-level: the shims must preserve daemon PID
+ownership, readiness, signal forwarding, exit status, stop-if-idle, and rollback handles.
+On POSIX the daemon shim replaces itself with the native daemon so its PID remains stable. On
+Windows it stays resident, passes its validated launcher PID to the native daemon, forwards
+signals, mirrors exit status, and never spawns then exits. During that one compatibility
+launch the native daemon writes the launcher PID as legacy `record.daemonPid`, implements the
+old record/control/update-identity protocol itself, and exits if its launcher disappears. The
+old updater's child handle and `record.daemonPid` therefore identify the same lifecycle owner
+for wait, stop, and rollback; the next native restart uses the pure native PID model. The
+shims contain no business behavior and remain only for the documented historical direct-
+upgrade window.
+
+At cutover, `Cargo.toml` becomes the sole version authority and release staging generates npm
+metadata from it; `build.rs` must no longer read the deleted `src/version.ts`. The Release DAG
+is: build and test six targets, sign, checksum and attest once, assemble npm variants from the
+same bytes, and create a draft GitHub Release containing those candidate assets. Publish all
+platform prereleases to target-specific tags, verify their exact Registry versions, then test
+the portable local tarball through clean npm and pnpm installs that resolve those exact alias
+dependencies. Authenticated draft-asset standalone installs must pass at the same point. The
+portable version then publishes once through npm Trusted Publishing directly to `latest`,
+followed by a clean public Registry install, before the draft GitHub Release becomes public.
+The post-publish Registry smoke is verification rather than a rollback boundary: npm OIDC
+does not authorize a later `dist-tag add`, and Kintio will not reintroduce a long-lived npm
+token merely to simulate a transaction the Registry does not provide. A failed public smoke
+leaves the GitHub Release draft, reports an incident, and resumes only after the exact npm
+integrity is understood. Every step records artifact integrity and is idempotently resumable
+because the two final external state changes cannot be atomic. Immediately before publishing
+the draft, the workflow must re-read every asset name and digest and match them against the
+recorded build manifest; draft assets are not assumed immutable merely because smoke tests
+ran earlier.
+
+Exit gate: all six assets execute natively; standalone setup/start/update work with Node
+absent; npm and pnpm installs work with lifecycle scripts disabled; missing optional packages,
+checksum/archive attacks, signal and exit propagation, Windows running-EXE replacement,
+power-loss stages, and rollback are tested; and every public legacy updater can skip directly
+to the native release without losing service or iLink mode.
 
 ### 8. Cutover and removal
 
@@ -150,11 +266,12 @@ self-update works with running-file constraints on Windows.
 - A minimal npm compatibility or installation shim may remain only while historical direct
   upgrade support requires it; it must contain no Kintio behavior.
 
-Exit gate: the installed production command runs with Node absent from `PATH`, and no
-legacy business implementation or duplicate behavior test remains to maintain. The release
-candidate must also record successful real Codex start/steer/resume/MCP, real WeChat
-callback/send, real iLink login/poll/send/media, and native lifecycle/update on Linux,
-macOS, and Windows.
+Exit gate: the standalone-installed production command runs with Node absent from `PATH`, and
+no legacy business implementation or duplicate behavior test remains to maintain. The npm
+coordination path may retain a transition-only JavaScript launcher while its historical
+upgrade window is supported. The release candidate must also record successful real Codex
+start/steer/resume/MCP, real WeChat callback/send, real iLink login/poll/send/media, and native
+lifecycle/update on Linux, macOS, and Windows.
 
 ## Test strategy
 
