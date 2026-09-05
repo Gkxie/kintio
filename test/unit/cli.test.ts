@@ -95,8 +95,6 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
   assert.equal(await runCli([], runtime.overrides), 0);
   assert.match(runtime.stdout.join(''), /Commands:\n  wecom/u);
   assert.match(runtime.stdout.join(''), /ilink <command>/u);
-  assert.match(runtime.stdout.join(''), /ilink <command>/u);
-  assert.match(runtime.stdout.join(''), /ilink <command>/u);
   assert.match(runtime.stdout.join(''), /update\s+Update the global Kintio/u);
   assert.match(runtime.stdout.join(''), /upgrade\s+Alias for update/u);
   runtime.stdout.length = 0;
@@ -192,44 +190,49 @@ test('update and upgrade are exact aliases and need no configured instance', asy
   await assert.rejects(() => fs.stat(path.join(root, '.kintio/.env')), /ENOENT/u);
 });
 
-test('update refuses to change the shared installation while both channels are running', async (t) => {
-  const root = await temporaryRoot(t);
-  const { packageRoot, prefix } = await updatePackage(root);
-  const identity = readInstalledPackageIdentity(packageRoot);
-  const homes = [path.join(root, '.kintio'), path.join(root, '.kintio/wecom')];
-  const records = new Map(homes.map((home, index) => [home, daemonProtocol.parseDaemonRecord({
-    version: 2, runId: `channel-${index}`, daemonPid: process.pid,
-    configFile: path.join(home, '.env'), packageRoot, token: 't'.repeat(32),
-    mode: index === 0 ? 'ilink' : 'wecom',
-    state: { databaseFile: path.join(home, 'data/kintio.sqlite'), lockFile: path.join(home, 'data/kintio.lock') },
-  })]));
-  vi.spyOn(daemonProtocol, 'readDaemonRecord').mockImplementation((home) => records.get(home) || null);
-  const control = vi.spyOn(daemonProtocol, 'requestControl').mockResolvedValue({
-    ok: true, runId: 'channel-running', daemonPid: process.pid, phase: 'running',
+for (const selector of ['default', 'KINTIO_HOME', 'KINTIO_CONFIG_FILE'] as const) {
+  test(`update refuses to change the shared installation while both channels are running (${selector})`, async (t) => {
+    const root = await temporaryRoot(t);
+    const { packageRoot, prefix } = await updatePackage(root);
+    const identity = readInstalledPackageIdentity(packageRoot);
+    const homes = [path.join(root, '.kintio'), path.join(root, '.kintio/wecom')];
+    const records = new Map(homes.map((home, index) => [home, daemonProtocol.parseDaemonRecord({
+      version: 2, runId: `channel-${index}`, daemonPid: process.pid,
+      configFile: path.join(home, '.env'), packageRoot, token: 't'.repeat(32),
+      mode: index === 0 ? 'ilink' : 'wecom',
+      state: { databaseFile: path.join(home, 'data/kintio.sqlite'), lockFile: path.join(home, 'data/kintio.lock') },
+    })]));
+    vi.spyOn(daemonProtocol, 'readDaemonRecord').mockImplementation((home) => records.get(home) || null);
+    const control = vi.spyOn(daemonProtocol, 'requestControl').mockResolvedValue({
+      ok: true, runId: 'channel-running', daemonPid: process.pid, phase: 'running',
+    });
+    let installed = false;
+    let idleGateCalled = false;
+    const runtime = cliRuntime(root, {
+      env: selector === 'default' ? {} : {
+        [selector]: path.join(root, selector === 'KINTIO_HOME' ? '.kintio' : '.kintio/.env'),
+      },
+      packageRoot,
+      stopIfIdle: async () => { idleGateCalled = true; throw new Error('must not stop either channel'); },
+      updater: {
+        prepare: async () => ({
+          kind: 'update', currentVersion: KINTIO_VERSION, targetVersion: '9.8.7',
+          installation: { ...identity, manager: 'npm', prefix },
+          command: { file: 'npm', args: ['install', '--global', '@kin-tio/cli@9.8.7'] },
+          cwd: root,
+          environment: {},
+        }),
+        install: async () => { installed = true; },
+        verify: async () => { throw new Error('must not install or verify'); },
+      },
+    });
+    assert.equal(await runCli(['update'], runtime.overrides), 1);
+    assert.match(runtime.stderr.join(''), /Multiple channel runtimes are running/u);
+    assert.equal(installed, false);
+    assert.equal(idleGateCalled, false);
+    assert.deepEqual(control.mock.calls.map((call) => call[1]), ['ping', 'ping']);
   });
-  let installed = false;
-  let idleGateCalled = false;
-  const runtime = cliRuntime(root, {
-    packageRoot,
-    stopIfIdle: async () => { idleGateCalled = true; throw new Error('must not stop either channel'); },
-    updater: {
-      prepare: async () => ({
-        kind: 'update', currentVersion: KINTIO_VERSION, targetVersion: '9.8.7',
-        installation: { ...identity, manager: 'npm', prefix },
-        command: { file: 'npm', args: ['install', '--global', '@kin-tio/cli@9.8.7'] },
-        cwd: root,
-        environment: {},
-      }),
-      install: async () => { installed = true; },
-      verify: async () => { throw new Error('must not install or verify'); },
-    },
-  });
-  assert.equal(await runCli(['update'], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /Multiple channel runtimes are running/u);
-  assert.equal(installed, false);
-  assert.equal(idleGateCalled, false);
-  assert.deepEqual(control.mock.calls.map((call) => call[1]), ['ping', 'ping']);
-});
+}
 
 test('update-only arguments fail before Registry or package-manager work', async (t) => {
   const root = await temporaryRoot(t);

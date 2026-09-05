@@ -1258,8 +1258,9 @@ async function updateKintio(
 
   const locations = [...new Map([
     location,
-    instanceLocation({}, runtime, 'ilink'),
-    instanceLocation({}, runtime, 'wecom'),
+    // An environment selector must not hide either default channel from the update gate.
+    instanceLocation({ home: path.join(runtime.homeDirectory, '.kintio') }, runtime, 'ilink'),
+    instanceLocation({ home: path.join(runtime.homeDirectory, '.kintio', 'wecom') }, runtime, 'wecom'),
   ].map((item) => [path.resolve(item.home), item])).values()];
 
   return await withUpdateSignalGuard(async (signal) => {
