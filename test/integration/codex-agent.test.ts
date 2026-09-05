@@ -316,7 +316,7 @@ test('keeps only executed MCP attempts after the last steering boundary', () => 
       ...executedText('offer', 'sa_offer', 1),
       tool: 'offer_weixin_bot_channel',
     }],
-  }, 'wechat_kf'), ['sa_offer']);
+  }, 'wechat_kf'), []);
   assert.deepEqual(executedAttemptIds({
     items: [{ ...executedText('ilink', 'sa_ilink', 1), server: 'weixin_ilink' }],
   }, 'weixin_ilink'), ['sa_ilink']);

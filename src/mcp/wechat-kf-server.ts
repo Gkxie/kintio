@@ -36,7 +36,6 @@ const ERROR_KINDS = [
   'wrong_channel',
   'invalid_media_reference',
   'media_preparation_failed',
-  'ilink_unavailable',
   'invalid_send_intent',
   'invalid_media_catalog',
   'unsafe_media_catalog',
@@ -58,7 +57,6 @@ const SAFE_ERROR_MESSAGES: Readonly<Record<WechatToolErrorKind, string>> = {
   wrong_channel: 'This session does not belong to the WeChat KF adapter.',
   invalid_media_reference: 'This conversation cannot use the requested image reference.',
   media_preparation_failed: 'Media preparation failed before any message was sent.',
-  ilink_unavailable: 'An independent iLink Bot conversation cannot be established right now.',
   invalid_send_intent: 'The message parameters do not satisfy the adapter requirements.',
   invalid_media_catalog: 'The conversation media catalog is invalid.',
   unsafe_media_catalog: 'The conversation media catalog contains unsafe fields.',
@@ -174,7 +172,7 @@ function toolResult(result: WechatToolReceipt): CallToolResult {
 }
 
 function toolType(name: string): SendType {
-  if (name === 'offer_weixin_bot_channel' || name === 'send_image') return 'image';
+  if (name === 'send_image') return 'image';
   const type = name.replace(/^send_/u, '');
   return (SEND_TYPES as readonly string[]).includes(type)
     ? type as SendType
@@ -206,11 +204,6 @@ function register(
 
 const SESSION = z.string().regex(/^ws_[A-Za-z0-9_-]{32}$/u);
 const TOOL_DEFINITIONS: readonly [string, string, Record<string, z.ZodType>][] = [
-  [
-    'offer_weixin_bot_channel',
-    'Offer an optional independent Weixin iLink Bot channel by sending a login QR image to the bound conversation. Use only after the user clearly asks to switch or establish that channel.',
-    {},
-  ],
   ['send_text', 'Send one WeChat text message.', { content: z.string().min(1) }],
   ['send_image', 'Send one available image referenced by media:N or artifact:N.', {
     mediaRef: z.string().regex(/^(?:media|artifact):(?:0|[1-9]\d?)$/u),

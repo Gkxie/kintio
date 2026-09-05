@@ -7,7 +7,7 @@
     "cli.ts",
     "daemon.ts",
     ".github/scripts/**/*.ts",
-    "index.ts",
+    "wecom.ts",
     "src/**/*.ts",
     "scripts/**/*.ts",
     "test/**/*.ts",

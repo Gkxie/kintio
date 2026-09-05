@@ -10,7 +10,7 @@ import { ensurePrivateDirectory } from '../lib/private-directory.ts';
 
 export type ControlCommand = 'ping' | 'stop' | 'stop-if-idle';
 export type DaemonPhase = 'starting' | 'running' | 'backoff' | 'stopping' | 'failed';
-export type DaemonMode = 'service' | 'ilink';
+export type DaemonMode = 'wecom' | 'ilink';
 
 export const CONTROL_MAX_BYTES = 4 * 1024;
 export const CONTROL_TIMEOUT_MS = 2_000;
@@ -31,28 +31,19 @@ const absolutePath = z.string().min(1).max(4_096).refine(
   (value) => path.isAbsolute(value) && !value.includes('\0'),
   'path must be absolute',
 ).transform((value) => path.normalize(value));
-const daemonRecordFields = {
+const daemonRecordSchema = z.strictObject({
+  version: z.literal(2),
   runId,
   daemonPid: positiveInteger,
   configFile: absolutePath,
-  mode: z.enum(['service', 'ilink']).default('service'),
+  mode: z.enum(['wecom', 'ilink']),
   packageRoot: absolutePath,
   token,
-};
-const daemonRecordSchema = z.discriminatedUnion('version', [
-  z.strictObject({
-    version: z.literal(1),
-    ...daemonRecordFields,
+  state: z.strictObject({
+    databaseFile: absolutePath,
+    lockFile: absolutePath,
   }),
-  z.strictObject({
-    version: z.literal(2),
-    ...daemonRecordFields,
-    state: z.strictObject({
-      databaseFile: absolutePath,
-      lockFile: absolutePath,
-    }),
-  }),
-]);
+});
 
 const controlRequestSchema = z.strictObject({
   version: z.literal(1),
@@ -139,7 +130,6 @@ const HOST_ENVIRONMENT_NOISE = new Set([
   'COLORTERM',
   'COLUMNS',
   'DBUS_SESSION_BUS_ADDRESS',
-  'HARNESS_DB_FILE',
   'INIT_CWD',
   'KINTIO_CONFIG_FILE',
   'KINTIO_DAEMON_MODE',
@@ -156,11 +146,9 @@ const HOST_ENVIRONMENT_NOISE = new Set([
   'SSH_CONNECTION',
   'SSH_TTY',
   'STY',
-  'TALKFERRY_DB_FILE',
   'TERM',
   'TMUX',
   'TMUX_PANE',
-  'WECOM_DB_FILE',
   'WINDOW',
   'XDG_SEAT',
   'XDG_SESSION_CLASS',

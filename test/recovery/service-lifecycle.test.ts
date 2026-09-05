@@ -10,7 +10,7 @@ import crossSpawn from 'cross-spawn';
 import { isForcedExit, startTestChild } from '../support/child-process.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
-const indexFile = fileURLToPath(new URL('../../index.ts', import.meta.url));
+const indexFile = fileURLToPath(new URL('../../wecom.ts', import.meta.url));
 
 async function availablePort(): Promise<number> {
   const server = net.createServer();
@@ -101,7 +101,7 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
       WECOM_CORP_ID: '',
       WECOM_KF_SECRET: '',
       WECOM_ALLOWED_USER_IDS: '',
-      WECOM_DB_FILE: temporary.filePath,
+      KINTIO_DB_FILE: temporary.filePath,
       CODEX_ENABLED: 'false',
       CODEX_WORKING_DIRECTORY: workingDirectory,
       SHUTDOWN_TIMEOUT_MS: '2000',
@@ -226,7 +226,7 @@ test('managed Worker notices a parent lost before bootstrap listeners exist', as
   await assertPortReleased(servicePort);
 });
 
-test('production script builds and runs dist/index.js', async (t) => {
+test('production script builds and runs dist/wecom.js', async (t) => {
   const servicePort = await availablePort();
   await assertPortReleased(servicePort);
   const temporary = await createTempSqlite(t, {
@@ -249,7 +249,7 @@ test('production script builds and runs dist/index.js', async (t) => {
     WECOM_CORP_ID: '',
     WECOM_KF_SECRET: '',
     WECOM_ALLOWED_USER_IDS: '',
-    WECOM_DB_FILE: temporary.filePath,
+    KINTIO_DB_FILE: temporary.filePath,
     CODEX_ENABLED: 'false',
     CODEX_WORKING_DIRECTORY: workingDirectory,
     SHUTDOWN_TIMEOUT_MS: '2000',
@@ -270,7 +270,7 @@ test('production script builds and runs dist/index.js', async (t) => {
   });
   assert.equal(buildExit, 0, buildOutput);
 
-  const child = startTestChild(t, path.resolve('dist/index.js'), {
+  const child = startTestChild(t, path.resolve('dist/wecom.js'), {
     timeoutMs: 8_000,
     env: environment,
   });

@@ -40,7 +40,7 @@ test('runtime never mutates the host Codex configuration', async (t) => {
     WECOM_KF_SECRET: 'runtime-secret',
     ILINK_ENABLED: 'false',
     WECOM_ALLOWED_USER_IDS: 'wm-runtime-test',
-    WECOM_DB_FILE: temporary.filePath,
+    KINTIO_DB_FILE: temporary.filePath,
     CODEX_WORKING_DIRECTORY: path.join(temporary.directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(temporary.directory, 'image-inputs'),
   }, temporary.directory);

@@ -41,7 +41,7 @@ function daemon(overrides: Partial<CurrentDaemonRecord> = {}): CurrentDaemonReco
     runId: 'run_1',
     daemonPid: 1234,
     configFile: CONFIG_FILE,
-    mode: 'service',
+    mode: 'wecom',
     packageRoot: PACKAGE_ROOT,
     token: TOKEN,
     state: {
@@ -90,7 +90,7 @@ test('control address identity follows filesystem aliases', async (t) => {
 test('protocol schemas are versioned, closed, and validate security-sensitive fields', () => {
   assert.deepEqual(parseDaemonRecord(daemon()), daemon());
   const current = daemon();
-  const legacy = {
+  const retired = {
     version: 1,
     runId: current.runId,
     daemonPid: current.daemonPid,
@@ -98,22 +98,16 @@ test('protocol schemas are versioned, closed, and validate security-sensitive fi
     packageRoot: current.packageRoot,
     token: current.token,
   };
-  assert.deepEqual(parseDaemonRecord(legacy), {
-    version: 1,
-    runId: current.runId,
-    daemonPid: current.daemonPid,
-    configFile: current.configFile,
-    mode: 'service',
-    packageRoot: current.packageRoot,
-    token: current.token,
-  });
+  assert.throws(() => parseDaemonRecord(retired));
+  const { mode: _mode, ...withoutMode } = current;
+  assert.throws(() => parseDaemonRecord(withoutMode));
   assert.deepEqual(parseControlRequest({ version: 1, command: 'stop', token: TOKEN }), {
     version: 1,
     command: 'stop',
     token: TOKEN,
   });
   const updateIdentity = createUpdateRuntimeIdentity(
-    { mode: 'service' },
+    { mode: 'wecom' },
     { PATH: '/tools', CODEX_HOME: '/agent' },
   );
   assert.deepEqual(parseControlRequest({

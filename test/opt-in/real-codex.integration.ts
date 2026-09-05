@@ -119,12 +119,6 @@ async function createRealHarness(): Promise<RealHarness> {
     apiClient,
     mediaGateway,
     observeMs: 10,
-    ilinkOffers: {
-      async offer() {
-        return { offerId: 'qo_real_codex_intent', png: testImage() };
-      },
-      cancel() {},
-    },
   });
   let memoryExecutor: ConversationMemoryExecutor | undefined;
   const mcpHost = new McpIpcHost({
@@ -539,34 +533,6 @@ test.concurrent('real Codex refuses unsupported reminders without claiming succe
   const reply = attemptText(result.attempts);
   assert.match(reply, /无法|不能|不支持|没有.{0,12}(?:提醒|定时|任务)/u);
   assert.doesNotMatch(reply, /已记下|已设置|已创建|会在.{0,12}提醒|到时.{0,12}提醒/u);
-});
-
-test('real Codex offers the Bot QR only for explicit channel-switch intent', { timeout: 240_000 }, async () => {
-  const active = await harness();
-  const explicit = await active.submit({
-    raw: baseMessage(
-      'agent-ilink-offer-explicit',
-      'wm-agent-ilink-offer-explicit',
-      '我明确希望建立一个独立的微信 Bot 聊天渠道，请现在发送登录二维码。',
-    ),
-  });
-  assert.equal(explicit.attempts.length, 1);
-  assert.equal(explicit.attempts[0]?.type, 'image');
-  assert.equal(explicit.attempts[0]?.metadata?.tool, 'offer_weixin_bot_channel');
-
-  const negative = await active.submit({
-    raw: baseMessage(
-      'agent-ilink-offer-negative',
-      'wm-agent-ilink-offer-negative',
-      '只介绍一下现有聊天通道，不要切换渠道，也不要发送登录二维码。',
-    ),
-  });
-  assert.equal(
-    negative.attempts.some((attempt) =>
-      attempt.metadata?.tool === 'offer_weixin_bot_channel'
-    ),
-    false,
-  );
 });
 
 test('full: ten of ten missing-source scenarios avoid the mini program tool rather than guessing identifiers', { timeout: 600_000 }, async () => {

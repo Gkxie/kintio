@@ -49,8 +49,8 @@ polling in the background. You can then send a message to the new bot in WeChat.
 Check the runtime or follow its output:
 
 ```bash
-kintio status
-kintio logs --lines 100
+kintio ilink status
+kintio ilink logs --lines 100
 ```
 
 ### Manage iLink accounts
@@ -82,21 +82,24 @@ The PNG is temporary and the QR expires after five minutes. See the
 [setup guide](docs/setup.md) for the complete QR, multi-account, and non-interactive
 contracts.
 
-### Callback-based channels
+### WeChat KF callbacks
 
 Channels that receive public HTTPS callbacks require a deployment configuration:
 
 ```bash
-kintio setup
-kintio start
-kintio status
-kintio logs --lines 100
+kintio wecom setup
+kintio wecom start
+kintio wecom status
+kintio wecom logs --lines 100
 ```
 
-`kintio setup` creates a private instance under `~/.kintio`, installs the managed Agent
+WeCom uses `~/.kintio/wecom/.env` and its own data, process, and logs. iLink keeps
+its existing `~/.kintio` data. Start or stop each channel independently; neither
+channel launches the other.
+
+`kintio wecom setup` creates a private instance under `~/.kintio/wecom`, installs the managed Agent
 skill, and writes the channel configuration template. Continue with the
 [setup guide](docs/setup.md) for callback credentials, authorization, and the first reply.
-WeChat KF deployments can also enable iLink in the same service Runtime.
 
 ## What it provides
 
@@ -121,16 +124,16 @@ Agent threads are never implicitly merged across channels.
 ## Operations and updates
 
 ```bash
-kintio status
-kintio logs
-kintio restart
+kintio ilink status
+kintio ilink logs
+kintio ilink restart
 kintio update
 ```
 
 `kintio upgrade` is an exact alias for `update`. A recognized global npm or pnpm installation
 can update itself without changing Agent or channel configuration. Kintio refuses unknown
 installation layouts and active Agent work; an idle background instance is restored in its
-existing service or iLink mode.
+existing channel.
 
 ## Security boundaries
 

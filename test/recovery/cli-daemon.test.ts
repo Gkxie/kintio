@@ -123,7 +123,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   const profileRoot = path.join(root, 'profile');
   const callerRoot = path.join(root, 'unrelated-caller');
   const instanceRoot = path.join(profileRoot, 'instances', 'background');
-  const defaultInstanceRoot = path.join(profileRoot, '.kintio');
+  const defaultInstanceRoot = path.join(profileRoot, '.kintio', 'wecom');
   await Promise.all([
     fs.mkdir(packageRoot, { recursive: true }),
     fs.mkdir(callerRoot, { recursive: true }),
@@ -137,7 +137,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     }),
     fs.copyFile('cli.ts', path.join(packageRoot, 'cli.ts')),
     fs.copyFile('daemon.ts', path.join(packageRoot, 'daemon.ts')),
-    fs.copyFile('index.ts', path.join(packageRoot, 'index.ts')),
+    fs.copyFile('wecom.ts', path.join(packageRoot, 'wecom.ts')),
     fs.copyFile('ilink.ts', path.join(packageRoot, 'ilink.ts')),
     fs.copyFile('tsconfig.json', path.join(packageRoot, 'tsconfig.json')),
     fs.copyFile('package.json', path.join(packageRoot, 'package.json')),
@@ -159,7 +159,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
       await foreground.exited.catch(() => undefined);
     }
     if (launcher) {
-      await command(launcher, ['stop', '--home', instanceRoot], {
+      await command(launcher, ['wecom', 'stop', '--home', instanceRoot], {
         cwd: callerRoot,
         env: cleanupEnvironment,
       }).catch(() => undefined);
@@ -189,7 +189,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   for (const required of [
     'dist/cli.js',
     'dist/daemon.js',
-    'dist/index.js',
+    'dist/wecom.js',
     'dist/ilink.js',
     'bin/kintio.js',
     'assets/ilink-login-card.png',
@@ -260,7 +260,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   assert.equal(version.code, 0, version.output);
   assert.equal(version.output.trim(), KINTIO_VERSION);
 
-  const configuredDefault = await kintio(['setup']);
+  const configuredDefault = await kintio(['wecom', 'setup']);
   assert.equal(configuredDefault.code, 0, configuredDefault.output);
   const defaultConfig = path.join(defaultInstanceRoot, '.env');
   await fs.access(defaultConfig);
@@ -285,7 +285,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     .replace(/^PORT=.*$/mu, `PORT=${occupiedAddress.port}`)
     .replace(/^CODEX_ENABLED=.*$/mu, 'CODEX_ENABLED=false');
   await fs.writeFile(defaultConfig, physicalRunConfig, { mode: 0o600 });
-  const physicalRun = startCommand(launcher, ['run'], {
+  const physicalRun = startCommand(launcher, ['wecom', 'run'], {
     cwd: callerRoot,
     env: environment,
   });
@@ -293,7 +293,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   const physicalResult = await Promise.race([
     physicalRun.exited,
     delay(15_000).then(() => {
-      throw new Error(`Global kintio run did not fail its occupied port\n${physicalRun.output()}`);
+      throw new Error(`Global kintio wecom run did not fail its occupied port\n${physicalRun.output()}`);
     }),
   ]);
   foregrounds.delete(physicalRun);
@@ -310,7 +310,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   };
   cleanupEnvironment = explicitEnvironment;
   const configured = await kintio(
-    ['setup', '--home', instanceRoot],
+    ['wecom', 'setup', '--home', instanceRoot],
     explicitEnvironment,
   );
   assert.equal(configured.code, 0, configured.output);
@@ -324,7 +324,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   await fs.writeFile(instanceConfig, source, { mode: 0o600 });
 
   const started = await kintio(
-    ['start', '--home', instanceRoot],
+    ['wecom', 'start', '--home', instanceRoot],
     explicitEnvironment,
   );
   assert.equal(started.code, 0, started.output);
@@ -334,20 +334,20 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   assert.ok(firstState?.workerPid);
 
   const repeated = await kintio(
-    ['start', '--home', instanceRoot],
+    ['wecom', 'start', '--home', instanceRoot],
     explicitEnvironment,
   );
   assert.equal(repeated.code, 0, repeated.output);
   assert.match(repeated.output, /already running/u);
 
   const status = await kintio(
-    ['status', '--home', instanceRoot],
+    ['wecom', 'status', '--home', instanceRoot],
     explicitEnvironment,
   );
   assert.equal(status.code, 0, status.output);
-  assert.match(status.output, /Kintio is running in service mode/u);
+  assert.match(status.output, /Kintio is running in wecom mode/u);
   const logs = await kintio(
-    ['logs', '--home', instanceRoot, '--lines', '20', '--no-follow'],
+    ['wecom', 'logs', '--home', instanceRoot, '--lines', '20', '--no-follow'],
     explicitEnvironment,
   );
   assert.equal(logs.code, 0, logs.output);
@@ -359,14 +359,14 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   await waitForPortRelease(port);
   await waitForRemoval(path.join(instanceRoot, 'data/daemon.lock'));
   const resumed = await kintio(
-    ['start', '--home', instanceRoot],
+    ['wecom', 'start', '--home', instanceRoot],
     explicitEnvironment,
   );
   assert.equal(resumed.code, 0, resumed.output);
   assert.equal((await waitForResponse(port)).status, 200);
 
   const restarted = await kintio(
-    ['restart', '--home', instanceRoot],
+    ['wecom', 'restart', '--home', instanceRoot],
     explicitEnvironment,
   );
   assert.equal(restarted.code, 0, restarted.output);
@@ -375,13 +375,13 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   assert.equal((await waitForResponse(port)).status, 200);
 
   const stopped = await kintio(
-    ['stop', '--home', instanceRoot],
+    ['wecom', 'stop', '--home', instanceRoot],
     explicitEnvironment,
   );
   assert.equal(stopped.code, 0, stopped.output);
   await waitForPortRelease(port);
   const finalStatus = await kintio(
-    ['status', '--home', instanceRoot],
+    ['wecom', 'status', '--home', instanceRoot],
     explicitEnvironment,
   );
   assert.equal(finalStatus.code, 0, finalStatus.output);
@@ -398,7 +398,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     await fs.writeFile(defaultConfig, foregroundConfig, { mode: 0o600 });
     const running = startCommand(
       process.execPath,
-      [installedBin, 'run'],
+      [installedBin, 'wecom', 'run'],
       {
         cwd: callerRoot,
         env: environment,

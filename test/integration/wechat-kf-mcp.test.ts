@@ -34,10 +34,6 @@ async function harness(
     withImage?: boolean;
     failMediaPreparation?: boolean;
     sendPreparedMessage?: (input: SendInput) => Promise<Record<string, unknown>>;
-    ilinkOffers?: {
-      offer(sessionToken: string): Promise<{ offerId: string; png: Buffer }>;
-      cancel(offerId: string): void;
-    };
   } = {},
 ) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'wechat-mcp-'));
@@ -97,7 +93,6 @@ async function harness(
     },
     observeMs: options.observeMs ?? 0,
     ...(options.sleep ? { sleep: options.sleep } : {}),
-    ...(options.ilinkOffers ? { ilinkOffers: options.ilinkOffers } : {}),
   });
   const server = createWechatKfMcpServer(executor);
   const client = new Client({ name: 'wechat-mcp-test', version: '1.0.0' });
@@ -260,53 +255,21 @@ describe('WeChat MCP receipt boundary', () => {
   });
 });
 
-test('iLink offer tool sends an in-memory QR image through the bound KF session', async (t) => {
-  const offers: string[] = [];
-  const created = await harness(t, {
-    ilinkOffers: {
-      async offer(sessionToken) {
-        assert.match(sessionToken, /^ws_/u);
-        return { offerId: 'offer-one', png: Buffer.from('png-bytes') };
-      },
-      cancel(offerId) { offers.push(offerId); },
-    },
-  });
-  const result = await created.client.callTool({
-    name: 'offer_weixin_bot_channel',
-    arguments: { session: created.session.token },
-  });
-  assert.equal(result.isError, undefined);
-  assert.equal(created.mediaCalls.upload, 1);
-  assert.deepEqual(created.sends[0]?.payload, {
-    msgtype: 'image', image: { media_id: 'uploaded-media' },
-  });
-  assert.deepEqual(offers, []);
-});
-
-test('a definitively rejected QR image cancels its background login offer', async (t) => {
-  const cancelled: string[] = [];
-  const created = await harness(t, {
-    ilinkOffers: {
-      async offer() { return { offerId: 'offer-rejected', png: Buffer.from('png') }; },
-      cancel(offerId) { cancelled.push(offerId); },
-    },
-    async sendPreparedMessage() {
-      throw new WecomApiError('rejected', { code: 40001 });
-    },
-  });
+test('WeCom cannot initiate or manage iLink enrollment', async (t) => {
+  const created = await harness(t);
   const result = await created.client.callTool({
     name: 'offer_weixin_bot_channel',
     arguments: { session: created.session.token },
   });
   assert.equal(result.isError, true);
-  assert.deepEqual(cancelled, ['offer-rejected']);
+  assert.equal(created.mediaCalls.upload, 0);
+  assert.equal(created.sends.length, 0);
 });
 
 test('WeChat MCP exposes delivery tools without participant or credential fields', async (t) => {
   const { client } = await harness(t);
   const listed = await client.listTools();
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
-    'offer_weixin_bot_channel',
     'send_image',
     'send_link',
     'send_location',

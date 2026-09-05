@@ -33,7 +33,7 @@ Requirements:
 
 ```bash
 npm install --global @kin-tio/cli
-kintio setup
+kintio wecom setup
 codex login status
 ```
 
@@ -42,18 +42,18 @@ Kintio uses the local Codex CLI session directly. It does not copy API keys or m
 The global command is installed from the public npm Registry. Like Codex's
 user-level [`CODEX_HOME`](https://learn.chatgpt.com/docs/config-file/environment-variables),
 which defaults to `~/.codex`, Kintio keeps mutable user state outside its
-installation. `kintio setup` creates
-the default instance at `~/.kintio`, installs the bundled Agent skill in the
-effective `CODEX_WORKING_DIRECTORY`, and writes `~/.kintio/.env`. On macOS and
+installation. `kintio wecom setup` creates
+the WeCom instance at `~/.kintio/wecom`, installs its bundled Agent skill in the
+effective `CODEX_WORKING_DIRECTORY`, and writes `~/.kintio/wecom/.env`. On macOS and
 Linux the file is created with mode `0600`. On Windows, the CLI requires the
 instance and config to stay inside the current user's profile and trusts that
 profile's ACL boundary; it does not claim to audit arbitrary Windows DACLs.
-Kintio refuses to overwrite an existing config. Use `--home` or `--config` for
+Kintio preserves an existing config. Use `--home` or `--config` for
 an explicit instance location. Windows keeps Kintio-owned database, lock, iLink
 key file, and image staging paths inside that instance. Runtime state never
 defaults to the global package directory.
 The installed `wechat-kf-reply-sop` file is a Kintio-managed asset and is
-atomically refreshed by `setup` and again before every process launch. Changing
+atomically refreshed by `wecom setup` and before WeCom process launches only. Changing
 `CODEX_WORKING_DIRECTORY` therefore moves the active managed Skill boundary to
 that workspace instead of leaving a dangling prompt reference. Keep local Agent
 customizations outside the managed Skill path.
@@ -63,11 +63,12 @@ parent must be trusted: use owner-controlled directories (or a sticky shared
 directory such as `/tmp`) on POSIX. On Windows, keep the instance and config
 inside the current user profile without granting untrusted accounts write
 access; paths outside the profile are rejected by the CLI. The default
-`~/.kintio` directory is the recommended choice.
+channel directory (`~/.kintio/wecom` for WeCom, `~/.kintio` for iLink) is the
+recommended choice.
 
-## 2. Configure shared settings
+## 2. Configure WeCom settings
 
-Configure the shared settings in `~/.kintio/.env`:
+Configure the WeCom settings in `~/.kintio/wecom/.env`:
 
 ```dotenv
 PORT=8888
@@ -77,17 +78,13 @@ CODEX_ENABLED=true
 
 Kintio registers MCP with Codex as local stdio processes. Behind stdio it uses a
 private Unix-domain socket or Windows named pipe, never a TCP port or public Hono
-route, and requires no configured URL or Bearer Token. Remove obsolete
-`KINTIO_MCP_URL`, `KINTIO_MCP_BEARER_TOKEN`, and
-the equivalent `TALKFERRY_`, `HARNESS_`, or `WECOM_` URL/Bearer aliases from
-upgraded deployments.
+route, and requires no configured URL or Bearer Token.
 
 Model, provider, reasoning effort, public search, login, and global Codex
 settings come entirely from the host Codex CLI. Configure them through the
 [official Codex configuration](https://developers.openai.com/codex/config-reference);
 Kintio does not mirror them in `.env` or modify `$CODEX_HOME/config.toml`.
-Existing deployments may keep `TALKFERRY_DB_FILE` during a staged database-name
-migration; new configuration should use `KINTIO_DB_FILE`.
+`KINTIO_DB_FILE` is the only setting for selecting the SQLite file.
 
 ## 3. Configure the WeChat KF adapter
 
@@ -145,13 +142,11 @@ The root route handles both GET verification and POST message events. The revers
 
 Prepare the URL first, then save the callback configuration in the provider console after Kintio starts. The log entry `callback URL verification succeeded` confirms successful verification.
 
-## 4. Configure a combined iLink adapter
+## 4. Run iLink independently
 
-Follow Tencent's [iLink upstream instructions](https://github.com/Tencent/openclaw-weixin/blob/main/README.zh_CN.md). A full callback runtime can additionally enable iLink in `.env`:
-
-```dotenv
-ILINK_ENABLED=true
-```
+The iLink channel uses its own process, database, workspace, and logs. It does
+not read WeCom credentials or start Hono. Its existing `~/.kintio` data stays in
+place; WeCom uses `~/.kintio/wecom`. There is no `ILINK_ENABLED` switch.
 
 iLink bot tokens and reply credentials are stored encrypted. In production, you can provide an explicit 32-byte base64url key:
 
@@ -165,7 +160,8 @@ ILINK_STORAGE_KEY=paste_the_generated_value_here
 
 Without an explicit key, Kintio creates `ilink-storage.key` next to the SQLite database with `0600` permissions. Back up this key with the database; otherwise, restored iLink accounts cannot be decrypted.
 
-The standalone CLI does not require this setting. An operator can connect a new account
+Optional iLink settings belong in `~/.kintio/.env`, not the WeCom configuration.
+The standalone CLI does not require this file. An operator can connect a new account
 whether or not another Kintio process is running:
 
 ```bash
@@ -190,8 +186,7 @@ person authorized to control that host Agent.
 
 The login command exits after persisting credentials and starts no listener. Run
 `kintio ilink start` to process iLink messages in the background without Hono, or use
-`kintio ilink start --foreground` under an external service manager. The combined
-`kintio start` runtime remains available when the callback adapter is also configured.
+`kintio ilink start --foreground` under an external service manager. Start the callback channel separately with `kintio wecom start` when needed.
 
 Account lifecycle is explicit:
 
@@ -208,7 +203,7 @@ a searchable picker; non-interactive callers use `--account` with a provider ID 
 `list`. The first standalone `start` launches one managed daemon. Further `start` and
 `stop` commands reach that owner over private operator IPC,
 so one process owns SQLite while independently reconciling account listeners. Stopping
-the last running account stops the iLink-only daemon. `kintio status` and `kintio logs`
+the last running account stops the iLink-only daemon. `kintio ilink status` and `kintio ilink logs`
 expose its state and output.
 
 `kintio ilink list` prints one provider account ID per line. Pass that exact value to
@@ -224,39 +219,32 @@ An uncatchable termination such as `SIGKILL` or power loss can leave the tempora
 behind. Its provider-side QR still expires after five minutes; remove the stale file
 manually before reusing the same path.
 
-The same enrollment can still begin in an authorized WeChat KF conversation:
-after the user explicitly asks for a separate bot channel, the Agent calls
-`offer_weixin_bot_channel` to send a login QR image. In both cases, the user who scans the
-QR code becomes the only allowed user identity for that bot.
-
-Remote enrollment never grants host authorization. Re-enrolling an existing account from
-the local CLI may upgrade it to host authorization; later remote credential rotation does
-not silently remove that explicit local grant.
-
-WeChat KF and iLink identities remain separate. Scanning the QR code does not copy authorization, Codex threads, or conversation history from the originating adapter.
+Enrollment is available through `kintio ilink login` or the first interactive
+`kintio ilink start`. The WeCom runtime has no iLink enrollment or account
+management tools. Channel authorization, threads, and history remain separate.
 
 ## 5. Start and verify
 
 ```bash
-kintio start
-kintio status
-kintio logs --lines 100
+kintio wecom start
+kintio wecom status
+kintio wecom logs --lines 100
 ```
 
-`kintio start` validates the instance config and launches Kintio's portable
+`kintio wecom start` validates the instance config and launches Kintio's portable
 background daemon. Repeating it while that instance is online reports the
 existing PID instead of creating another consumer. The installed command starts
 prebuilt JavaScript and never compiles TypeScript at runtime. It returns success
 only after the worker completes runtime initialization. A crashed worker is
 restarted with bounded backoff; a port conflict or repeated initialization
-failure returns nonzero. Inspect `kintio logs --no-follow` for the retained log.
+failure returns nonzero. Inspect `kintio wecom logs --no-follow` for the retained log.
 Readiness does not wait for downtime backlog to finish; recoverable messages
 continue at low priority after the live listeners can safely accept work.
 
 For a foreground process under a container or another service manager, use:
 
 ```bash
-kintio run
+kintio wecom run
 ```
 
 For development inside the source checkout, use:
@@ -267,7 +255,7 @@ pnpm install --frozen-lockfile
 pnpm run dev
 ```
 
-Confirm that `kintio logs` contains `Hono server is listening on port 8888` and
+Confirm that `kintio wecom logs` contains `Hono server is listening on port 8888` and
 no later `[supervisor] process failed` entry.
 
 For a WeChat KF deployment, save the callback configuration and complete the authorization flow in section 3.2. For an iLink deployment, send a normal message from the bound account and confirm that the agent replies. If it does not, check for `[ilink-listener] poll cycle failed` in the logs.
@@ -286,21 +274,21 @@ Kintio includes a small cross-platform background daemon. Users operate it
 through the Kintio command surface:
 
 ```bash
-kintio start
-kintio status
-kintio logs --lines 100
-kintio restart
+kintio wecom start
+kintio wecom status
+kintio wecom logs --lines 100
+kintio wecom restart
 kintio update
-kintio stop
+kintio wecom stop
 ```
 
 `stop` uses an authenticated local Unix socket or Windows named pipe and waits
 for the worker's graceful shutdown path.
-`restart` reloads the current installed code while preserving a running
-service/iLink mode and its instance config. The CLI does
+`wecom restart` and `ilink restart` reload only their respective channel with its
+instance configuration. The CLI does
 not modify Nginx, provider consoles, shell profiles, or operating-system boot
 configuration. Configure launchd, systemd, Task Scheduler, a container runtime,
-or another boot mechanism separately with `kintio run` if the machine must start
+or another boot mechanism separately with `kintio wecom run` if the machine must start
 Kintio automatically after reboot.
 
 `update` (or its exact alias `upgrade`) recognizes the npm or pnpm global
@@ -313,14 +301,17 @@ kintio update
 
 Active Agent work, a foreground Runtime, an active standalone login, an unknown
 installation layout, or an ambiguous package-manager root fails before the
-package is changed. The first version coordinates only the selected `--home`;
-stop any other instance homes using the same global installation first.
+package is changed. The updater checks both default channel directories and
+the selected `--home`. If both channels are running, stop the other channel
+first; at most one idle channel is restored automatically. Stop any other custom
+instance homes using the same global installation before updating.
 Kintio also verifies the running Runtime's effective configuration before
 stopping it. If the Runtime was started with shell-only overrides, run the
 update with the same environment or persist those values in the instance
 configuration first.
 
-To remove the command, run `kintio stop` and then `npm uninstall --global
+To remove the command, stop WeCom with `kintio wecom stop` and each active iLink
+account with `kintio ilink stop`, then run `npm uninstall --global
 @kin-tio/cli`. The instance under `~/.kintio` is retained by default so uninstalling
 the package does not silently delete configuration, conversations, or media.
 
@@ -332,30 +323,15 @@ that shell:
 
 ```bash
 export KINTIO_CONFIG_FILE=/absolute/path/to/existing/.env
-kintio start
-kintio status
-kintio logs --lines 100
-kintio restart
-kintio stop
+kintio wecom start
+kintio wecom status
+kintio wecom logs --lines 100
+kintio wecom restart
+kintio wecom stop
 ```
 
 With no explicit `--home`, the config directory becomes the instance root, so
 relative database and workspace paths retain their existing meaning.
-
-Existing source deployments may still use a traditional PM2 entry. Before the
-first native-daemon start, use the old
-PM2 command once to stop and delete its `kintio`, `talkferry`, or `wechat-bot`
-entry, then verify the old process and port are gone. Only then run the command
-group above. This is a one-time ownership transfer; starting both managers would
-create competing consumers and is intentionally not automated.
-
-```bash
-# Choose the name shown by the old `pm2 status` output.
-legacy_name=kintio
-pm2 stop "$legacy_name"
-pm2 delete "$legacy_name"
-pm2 status
-```
 
 The global command and its native daemon must run as the same operating-system user
 that can successfully execute `codex login status`. Reinstall the global Kintio
@@ -372,17 +348,19 @@ These constraints come from the messaging providers and cannot be bypassed local
 
 ## 8. Data and backups
 
-CLI installations store runtime state in `~/.kintio/data/kintio.sqlite` by
-default. `--home` or `KINTIO_HOME` moves the whole instance; `--config` or
+iLink stores state in `~/.kintio/data/kintio.sqlite`; WeCom stores its own state
+in `~/.kintio/wecom/data/kintio.sqlite`. Configuration, account data, and
+Agent workspaces are not deleted by setup, stop, restart, or package removal. `--home` or `KINTIO_HOME` moves the whole instance; `--config` or
 `KINTIO_CONFIG_FILE` selects an existing environment file. Relative paths in
 that configuration resolve from the instance root, not the package manager's
 global installation directory or the caller's current directory.
 
-Upgraded deployments continue to use an existing `data/talkferry.sqlite` or
-`data/wecom.sqlite` unless `KINTIO_DB_FILE` is set explicitly. If more than one
-default state database exists, Kintio refuses to guess which one is
-authoritative. SQLite files, WAL files, environment files, temporary media, and
-iLink storage keys are excluded from Git.
+Only the current SQLite schema (v24) and daemon metadata (v2) are supported.
+Other database versions are rejected without migration or data deletion. Use a
+fresh instance directory when starting from an incompatible version. Retired
+database names and configuration aliases are not discovered automatically.
+SQLite files, WAL files, environment files, temporary media, and iLink storage
+keys are excluded from Git.
 `data/daemon.json`, the ephemeral local control endpoint, and `data/logs` are
 process metadata and logs, not application data; do not restore them with
 SQLite on another machine.
@@ -390,9 +368,8 @@ SQLite on another machine.
 For a deployment migration, stop the currently active process and back up these
 items together:
 
-- the active instance environment file (normally `~/.kintio/.env`);
-- the active SQLite file (`data/kintio.sqlite`, `data/talkferry.sqlite`, or
-  `data/wecom.sqlite`);
+- the active instance environment file (normally `~/.kintio/wecom/.env`);
+- the active SQLite file (normally `data/kintio.sqlite`);
 - `data/ilink-storage.key`, when using the file-based key;
 - the Codex login state and thread history for the operating-system user. Codex CLI manages these separately; they are not included in the SQLite backup.
 

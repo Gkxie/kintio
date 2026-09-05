@@ -21,9 +21,6 @@ most five sends.
   WeChat-native destination is more useful than a link.
 - `send_location`: reliable latitude and longitude are known and the user wants
   an address, map, route, or navigation. A map URL is not a location card.
-- `offer_weixin_bot_channel`: the user clearly asks to establish or switch to an
-  independent Weixin Bot conversation. Scanning creates a separate identity and
-  does not merge authorization or history.
 
 Do not invent coordinates, URLs, mini-program fields, media references, or
 facts merely to use a richer format. When required data cannot be verified, use

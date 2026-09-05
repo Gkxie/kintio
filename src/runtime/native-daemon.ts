@@ -88,7 +88,7 @@ export async function runNativeDaemon({
   home,
   configFile,
   packageRoot,
-  mode = 'service',
+  mode = 'wecom',
   environment = process.env,
   workerControlTimeoutMs = DEFAULT_WORKER_CONTROL_TIMEOUT_MS,
 }: {
@@ -275,7 +275,7 @@ export async function runNativeDaemon({
       process.execPath,
       [path.join(
         instancePackageRoot,
-        mode === 'ilink' ? 'dist/ilink.js' : 'dist/index.js',
+        mode === 'ilink' ? 'dist/ilink.js' : 'dist/wecom.js',
       )],
       {
         cwd: instanceHome,

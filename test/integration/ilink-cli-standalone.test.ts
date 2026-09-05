@@ -183,7 +183,7 @@ test('a missing storage key blocks login but not complete account deletion', asy
   inspected.close();
 });
 
-test('a running callback instance remains the only writer during iLink login', async (t) => {
+test('iLink refuses to borrow a WeCom instance database or enrollment capability', async (t) => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'kintio-ilink-ipc-owner-'));
   const home = path.join(profile, '.kintio');
   t.onTestFinished(() => fs.rmSync(profile, { recursive: true, force: true }));
@@ -223,15 +223,16 @@ test('a running callback instance remains the only writer during iLink login', a
     stdoutIsTTY: true,
     stdoutColumns: 200,
   });
-  assert.equal(result, 0, stderr.join(''));
+  assert.equal(result, 1);
+  assert.match(stderr.join(''), /not running|unavailable|locked|owned|connect/i);
   assert.equal(fs.existsSync(config.state.lockFile), true);
   await runtime.close();
   assert.equal(fs.existsSync(config.state.lockFile), false);
   const persistence = new StatePersistence({ filePath: config.state.databaseFile });
   t.onTestFinished(() => persistence.close());
   assert.equal(
-    persistence.createIlinkStore().listActiveAccounts()[0]?.providerAccountId,
-    'ipc-owner-bot@im.bot',
+    persistence.createIlinkStore().listActiveAccounts().length,
+    0,
   );
 });
 

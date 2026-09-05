@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { TestContext } from 'vitest';
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 import crossSpawn from 'cross-spawn';
 
 import { runCli } from '../../src/cli.ts';
@@ -12,6 +12,7 @@ import { INSTANCE_CONFIG_TEMPLATE } from '../../src/config.ts';
 import { IlinkPromptInterruptedError } from '../../src/ilink/account-picker.ts';
 import type { IlinkOperatorAccount } from '../../src/ilink/cli-login.ts';
 import { runNativeDaemon } from '../../src/runtime/native-daemon.ts';
+import * as daemonProtocol from '../../src/runtime/daemon-protocol.ts';
 import {
   readDaemonRecord,
   requestControl,
@@ -92,11 +93,11 @@ function operatorAccount(
 test('global CLI exposes stable help, version, and argument failures', async (t) => {
   const runtime = cliRuntime(await temporaryRoot(t));
   assert.equal(await runCli([], runtime.overrides), 0);
-  assert.match(runtime.stdout.join(''), /Commands:\n  setup/u);
-  assert.match(runtime.stdout.join(''), /ilink login/u);
-  assert.match(runtime.stdout.join(''), /ilink start/u);
-  assert.match(runtime.stdout.join(''), /ilink delete/u);
-  assert.match(runtime.stdout.join(''), /update\s+Update Kintio/u);
+  assert.match(runtime.stdout.join(''), /Commands:\n  wecom/u);
+  assert.match(runtime.stdout.join(''), /ilink <command>/u);
+  assert.match(runtime.stdout.join(''), /ilink <command>/u);
+  assert.match(runtime.stdout.join(''), /ilink <command>/u);
+  assert.match(runtime.stdout.join(''), /update\s+Update the global Kintio/u);
   assert.match(runtime.stdout.join(''), /upgrade\s+Alias for update/u);
   runtime.stdout.length = 0;
   assert.equal(await runCli(['help'], runtime.overrides), 0);
@@ -110,10 +111,10 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
   assert.equal(await runCli(['unknown'], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /Unknown command: unknown/u);
   runtime.stderr.length = 0;
-  assert.equal(await runCli(['start', '--lines', '5'], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /valid only for "kintio logs"/u);
+  assert.equal(await runCli(['wecom', 'start', '--lines', '5'], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /valid only for "kintio wecom logs"/u);
   runtime.stderr.length = 0;
-  assert.equal(await runCli(['start', '--qr-output', 'qr.png'], runtime.overrides), 1);
+  assert.equal(await runCli(['wecom', 'start', '--qr-output', 'qr.png'], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /valid only for "kintio ilink login"/u);
   runtime.stderr.length = 0;
   assert.equal(await runCli(['--qr-output', 'qr.png'], runtime.overrides), 1);
@@ -122,7 +123,7 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
   assert.equal(await runCli(['ilink', 'logout', '--help'], runtime.overrides), 1);
   assert.match(
     runtime.stderr.join(''),
-    /Usage: kintio ilink <login\|list\|start\|stop\|delete>/u,
+    /Usage: kintio ilink <login\|list\|start\|stop\|delete\|restart\|status\|logs>/u,
   );
   runtime.stderr.length = 0;
   assert.equal(await runCli([
@@ -130,7 +131,7 @@ test('global CLI exposes stable help, version, and argument failures', async (t)
   ], runtime.overrides), 1);
   assert.match(
     runtime.stderr.join(''),
-    /Usage: kintio ilink <login\|list\|start\|stop\|delete>/u,
+    /Usage: kintio ilink <login\|list\|start\|stop\|delete\|restart\|status\|logs>/u,
   );
   runtime.stderr.length = 0;
   assert.equal(await runCli([
@@ -189,6 +190,45 @@ test('update and upgrade are exact aliases and need no configured instance', asy
   assert.equal(runtime.stderr.join(''), '');
   assert.match(runtime.stdout.join(''), /9\.8\.7 was installed successfully/u);
   await assert.rejects(() => fs.stat(path.join(root, '.kintio/.env')), /ENOENT/u);
+});
+
+test('update refuses to change the shared installation while both channels are running', async (t) => {
+  const root = await temporaryRoot(t);
+  const { packageRoot, prefix } = await updatePackage(root);
+  const identity = readInstalledPackageIdentity(packageRoot);
+  const homes = [path.join(root, '.kintio'), path.join(root, '.kintio/wecom')];
+  const records = new Map(homes.map((home, index) => [home, daemonProtocol.parseDaemonRecord({
+    version: 2, runId: `channel-${index}`, daemonPid: process.pid,
+    configFile: path.join(home, '.env'), packageRoot, token: 't'.repeat(32),
+    mode: index === 0 ? 'ilink' : 'wecom',
+    state: { databaseFile: path.join(home, 'data/kintio.sqlite'), lockFile: path.join(home, 'data/kintio.lock') },
+  })]));
+  vi.spyOn(daemonProtocol, 'readDaemonRecord').mockImplementation((home) => records.get(home) || null);
+  const control = vi.spyOn(daemonProtocol, 'requestControl').mockResolvedValue({
+    ok: true, runId: 'channel-running', daemonPid: process.pid, phase: 'running',
+  });
+  let installed = false;
+  let idleGateCalled = false;
+  const runtime = cliRuntime(root, {
+    packageRoot,
+    stopIfIdle: async () => { idleGateCalled = true; throw new Error('must not stop either channel'); },
+    updater: {
+      prepare: async () => ({
+        kind: 'update', currentVersion: KINTIO_VERSION, targetVersion: '9.8.7',
+        installation: { ...identity, manager: 'npm', prefix },
+        command: { file: 'npm', args: ['install', '--global', '@kin-tio/cli@9.8.7'] },
+        cwd: root,
+        environment: {},
+      }),
+      install: async () => { installed = true; },
+      verify: async () => { throw new Error('must not install or verify'); },
+    },
+  });
+  assert.equal(await runCli(['update'], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /Multiple channel runtimes are running/u);
+  assert.equal(installed, false);
+  assert.equal(idleGateCalled, false);
+  assert.deepEqual(control.mock.calls.map((call) => call[1]), ['ping', 'ping']);
 });
 
 test('update-only arguments fail before Registry or package-manager work', async (t) => {
@@ -297,7 +337,7 @@ test('one update excludes concurrent updates and lifecycle commands, then cleans
   const { packageRoot, prefix } = await updatePackage(root);
   const identity = readInstalledPackageIdentity(packageRoot);
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   let releaseInstall!: () => void;
   const installing = new Promise<void>((resolve) => { releaseInstall = resolve; });
   let notifyInstall!: () => void;
@@ -332,7 +372,7 @@ test('one update excludes concurrent updates and lifecycle commands, then cleans
   assert.equal(await runCli(['update', '--home', home], second.overrides), 1);
   assert.match(second.stderr.join(''), /Another Kintio update is already running/u);
   second.stderr.length = 0;
-  assert.equal(await runCli(['start', '--home', home], second.overrides), 1);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], second.overrides), 1);
   assert.match(second.stderr.join(''), /lifecycle command is already running/u);
   releaseInstall();
   assert.equal(await first, 0);
@@ -350,7 +390,7 @@ test('CLI routes only the exact ilink login subcommand to an interactive adapter
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   await fs.appendFile(path.join(home, '.env'), '\nILINK_ENABLED=true\n');
   const signals: AbortSignal[] = [];
   const qrOutputPaths: Array<string | undefined> = [];
@@ -411,16 +451,13 @@ test('CLI routes only the exact ilink login subcommand to an interactive adapter
   assert.equal(signals.length, 2);
 
   runtime.stderr.length = 0;
-  assert.equal(await runCli(['ilink', '--home', home], runtime.overrides), 1);
-  assert.match(
-    runtime.stderr.join(''),
-    /Usage: kintio ilink <login\|list\|start\|stop\|delete>/u,
-  );
+  assert.equal(await runCli(['ilink', '--home', home], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /Usage: kintio ilink <command>/u);
   runtime.stderr.length = 0;
   assert.equal(await runCli(['ilink', 'logout', '--home', home], runtime.overrides), 1);
   assert.match(
     runtime.stderr.join(''),
-    /Usage: kintio ilink <login\|list\|start\|stop\|delete>/u,
+    /Usage: kintio ilink <login\|list\|start\|stop\|delete\|restart\|status\|logs>/u,
   );
 });
 
@@ -453,7 +490,7 @@ test('iLink login and start need no setup, config file, or Hono lifecycle', asyn
     ilinkStart: async ({ config }) => {
       startCalls += 1;
       assert.equal('wecom' in config, false);
-      assert.equal(config.ilink.enabled, true);
+      assert.ok(config.ilink);
       assert.equal(config.state.databaseFile, path.join(home, 'data/kintio.sqlite'));
       return 0;
     },
@@ -875,7 +912,7 @@ test('standalone iLink start launches one managed background daemon before activ
   assert.equal(readDaemonRecord(home)?.mode, 'ilink');
   const firstRunId = readDaemonRecord(home)?.runId;
   assert.ok(firstRunId);
-  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['ilink', 'restart', '--home', home], runtime.overrides), 0);
   assert.equal(readDaemonRecord(home)?.mode, 'ilink');
   assert.notEqual(readDaemonRecord(home)?.runId, firstRunId);
   const restartedRunId = readDaemonRecord(home)?.runId;
@@ -885,14 +922,14 @@ test('standalone iLink start launches one managed background daemon before activ
   assert.equal(await fs.readFile(workerVersionFile, 'utf8'), targetVersion);
   assert.match(runtime.stdout.join(''), new RegExp(`Kintio ${targetVersion} was installed`));
   assert.match(runtime.stdout.join(''), /iLink Runtime was restored/u);
-  await fs.access(path.join(
+  await assert.rejects(fs.access(path.join(
     home,
-    'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
-  ));
+    'ilink-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
+  )), { code: 'ENOENT' });
   await fs.writeFile(path.join(home, '.env'), INSTANCE_CONFIG_TEMPLATE);
   if (process.platform !== 'win32') await fs.chmod(path.join(home, '.env'), 0o600);
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
-  assert.match(runtime.stderr.join(''), /already running in ilink mode/u);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 1);
+  assert.match(runtime.stderr.join(''), /belongs to ilink/u);
   assert.equal(await runCli(['ilink', 'stop', '--home', home], runtime.overrides), 0);
   await Promise.all(daemonRuns);
   assert.equal(readDaemonRecord(home), null);
@@ -934,7 +971,7 @@ test('CLI drains an iLink login before honoring terminal signals', async (t) => 
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   await fs.appendFile(path.join(home, '.env'), '\nILINK_ENABLED=true\n');
   const runtime = cliRuntime(root, {
     stdoutIsTTY: true,
@@ -967,7 +1004,7 @@ test('setup creates one private config and refreshes the managed Agent skill', a
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const runtime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], runtime.overrides), 0);
   const configFile = path.join(home, '.env');
   const skillFile = path.join(
     home,
@@ -985,7 +1022,7 @@ test('setup creates one private config and refreshes the managed Agent skill', a
   );
   assert.equal(await fs.readFile(skillFile, 'utf8'), bundledSkill);
   await fs.writeFile(skillFile, 'stale local skill\n');
-  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], runtime.overrides), 0);
   assert.equal(await fs.readFile(configFile, 'utf8'), firstConfig);
   assert.equal(await fs.readFile(skillFile, 'utf8'), bundledSkill);
   if (process.platform !== 'win32') {
@@ -1003,14 +1040,14 @@ test('managed Skill follows and refreshes the configured Agent workspace', async
   t.onTestFinished(() => fs.rm(workingDirectory, { recursive: true, force: true }));
   const configFile = path.join(home, '.env');
   const runtime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], runtime.overrides), 0);
   await fs.appendFile(
     configFile,
     `\nCODEX_WORKING_DIRECTORY=${workingDirectory}\n`,
   );
   runtime.stdout.length = 0;
 
-  assert.equal(await runCli(['setup', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], runtime.overrides), 0);
   const customSkill = path.join(
     workingDirectory,
     '.agents/skills/wechat-kf-reply-sop/SKILL.md',
@@ -1030,7 +1067,7 @@ test('managed Skill follows and refreshes the configured Agent workspace', async
       return 0;
     },
   });
-  assert.equal(await runCli(['run', '--home', home], runRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'run', '--home', home], runRuntime.overrides), 0);
   assert.equal(executed.length, 1);
   assert.equal(await fs.readFile(customSkill, 'utf8'), bundledSkill);
 });
@@ -1040,8 +1077,7 @@ test('run keeps the worker in the foreground with explicit instance selectors', 
   const home = path.join(root, 'instance');
   const configFile = path.join(home, 'custom.env');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli([
-    'setup', '--home', home, '--config', configFile,
+  assert.equal(await runCli(['wecom', 'setup', '--home', home, '--config', configFile,
   ], setupRuntime.overrides), 0);
   const requests: Array<{ args: readonly string[]; env: NodeJS.ProcessEnv }> = [];
   const runtime = cliRuntime(root, {
@@ -1055,10 +1091,9 @@ test('run keeps the worker in the foreground with explicit instance selectors', 
       return 0;
     },
   });
-  assert.equal(await runCli([
-    'run', '--home', home, '--config', configFile,
+  assert.equal(await runCli(['wecom', 'run', '--home', home, '--config', configFile,
   ], runtime.overrides), 0);
-  assert.deepEqual(requests[0]?.args, [path.join(path.resolve('.'), 'dist/index.js')]);
+  assert.deepEqual(requests[0]?.args, [path.join(path.resolve('.'), 'dist/wecom.js')]);
   assert.equal(requests[0]?.env.KINTIO_HOME, home);
   assert.equal(requests[0]?.env.KINTIO_CONFIG_FILE, configFile);
   assert.equal(requests[0]?.env.AGENT_HOST_CANARY, 'preserved');
@@ -1068,7 +1103,7 @@ test('foreground executor turns a CLI signal into Worker IPC shutdown', async (t
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
-  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const workerFile = path.join(packageRoot, 'dist/wecom.js');
   const readyFile = path.join(home, 'worker-ready');
   const stoppedFile = path.join(home, 'worker-stopped');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
@@ -1087,12 +1122,12 @@ test('foreground executor turns a CLI signal into Worker IPC shutdown', async (t
     'setInterval(() => undefined, 1000);',
   ].join('\n'));
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
 
   const previousListeners = new Set(process.listeners('SIGTERM'));
   const runtime = cliRuntime(root, { packageRoot });
   let workerPid = 0;
-  const running = runCli(['run', '--home', home], runtime.overrides);
+  const running = runCli(['wecom', 'run', '--home', home], runtime.overrides);
   t.onTestFinished(async () => {
     if (workerPid) {
       try { process.kill(workerPid, 'SIGKILL'); } catch {}
@@ -1127,13 +1162,11 @@ test('logs validate line counts and read native daemon output without a process 
   const logFile = path.join(home, 'data/logs/kintio.log');
   await fs.mkdir(path.dirname(logFile), { recursive: true });
   await fs.writeFile(logFile, 'one\ntwo\nthree\n');
-  assert.equal(await runCli([
-    'logs', '--home', home, '--lines', '2', '--no-follow',
+  assert.equal(await runCli(['wecom', 'logs', '--home', home, '--lines', '2', '--no-follow',
   ], runtime.overrides), 0);
   assert.equal(runtime.stdout.join(''), 'two\nthree\n');
   runtime.stderr.length = 0;
-  assert.equal(await runCli([
-    'logs', '--home', home, '--lines', '0', '--no-follow',
+  assert.equal(await runCli(['wecom', 'logs', '--home', home, '--lines', '0', '--no-follow',
   ], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /--lines must be an integer/u);
 });
@@ -1142,10 +1175,10 @@ test('status and stop are idempotent when no daemon exists', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   const runtime = cliRuntime(root);
-  assert.equal(await runCli(['status', '--home', home], runtime.overrides), 0);
-  assert.equal(await runCli(['stop', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'status', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'stop', '--home', home], runtime.overrides), 0);
   assert.match(runtime.stdout.join(''), /Kintio is not running/u);
 });
 
@@ -1153,13 +1186,13 @@ test('source CLI starts, probes, logs, and stops one native daemon', async (t) =
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'fake-package');
-  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const workerFile = path.join(packageRoot, 'dist/wecom.js');
   const bundledSkillFile = path.join(
     packageRoot,
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
   );
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(path.dirname(bundledSkillFile), { recursive: true });
   await fs.writeFile(bundledSkillFile, 'test managed Skill\n');
@@ -1191,34 +1224,33 @@ test('source CLI starts, probes, logs, and stops one native daemon', async (t) =
     },
   });
   t.onTestFinished(async () => {
-    await runCli(['stop', '--home', home], runtime.overrides).catch(() => 1);
+    await runCli(['wecom', 'stop', '--home', home], runtime.overrides).catch(() => 1);
     await Promise.allSettled(daemons);
   });
 
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 0);
   assert.deepEqual(launches, [{
     file: process.execPath,
     args: [path.join(packageRoot, 'dist/daemon.js')],
   }]);
-  assert.equal(await runCli(['status', '--home', home], runtime.overrides), 0);
-  assert.match(runtime.stdout.join(''), /Kintio is running in service mode/u);
+  assert.equal(await runCli(['wecom', 'status', '--home', home], runtime.overrides), 0);
+  assert.match(runtime.stdout.join(''), /Kintio is running in wecom mode/u);
   const mismatched = cliRuntime(root, {
     packageRoot: path.join(root, 'other-installation'),
   });
-  assert.equal(await runCli(['status', '--home', home], mismatched.overrides), 1);
+  assert.equal(await runCli(['wecom', 'status', '--home', home], mismatched.overrides), 1);
   assert.match(mismatched.stderr.join(''), /another config or installation/u);
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 0);
   assert.match(runtime.stdout.join(''), /already running/u);
-  assert.equal(await runCli([
-    'logs', '--home', home, '--no-follow', '--lines', '10',
+  assert.equal(await runCli(['wecom', 'logs', '--home', home, '--no-follow', '--lines', '10',
   ], runtime.overrides), 0);
   assert.match(runtime.stdout.join(''), /unit worker ready/u);
   const firstRunId = readDaemonRecord(home)?.runId;
   assert.ok(firstRunId);
-  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'restart', '--home', home], runtime.overrides), 0);
   assert.notEqual(readDaemonRecord(home)?.runId, firstRunId);
   assert.equal(launches.length, 2);
-  assert.equal(await runCli(['stop', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'stop', '--home', home], runtime.overrides), 0);
   await Promise.all(daemons);
 });
 
@@ -1227,7 +1259,7 @@ test('update verifies changed package contents before starting the new service W
   const home = path.join(root, 'instance');
   const workerVersionFile = path.join(root, 'service-worker-version');
   const { packageRoot, prefix } = await updatePackage(root);
-  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const workerFile = path.join(packageRoot, 'dist/wecom.js');
   await Promise.all([
     fs.mkdir(path.dirname(workerFile), { recursive: true }),
     fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), {
@@ -1249,7 +1281,7 @@ test('update verifies changed package contents before starting the new service W
     "process.on('disconnect', () => process.exit(0));",
   ].join('\n'));
   const setupRuntime = cliRuntime(root, { packageRoot });
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   const identity = readInstalledPackageIdentity(packageRoot);
   const targetVersion = '9.8.7';
   const daemons: Promise<void>[] = [];
@@ -1297,12 +1329,12 @@ test('update verifies changed package contents before starting the new service W
     await Promise.allSettled(daemons);
   });
 
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 0);
   assert.equal(await fs.readFile(workerVersionFile, 'utf8'), KINTIO_VERSION);
   assert.equal(await runCli(['update', '--home', home], runtime.overrides), 0);
   assert.equal(await fs.readFile(workerVersionFile, 'utf8'), targetVersion);
-  assert.equal(readDaemonRecord(home)?.mode, 'service');
-  assert.match(runtime.stdout.join(''), /service Runtime was restored/u);
+  assert.equal(readDaemonRecord(home)?.mode, 'wecom');
+  assert.match(runtime.stdout.join(''), /wecom Runtime was restored/u);
   assert.match(runtime.stdout.join(''), new RegExp(`${targetVersion} was installed successfully`));
 });
 
@@ -1332,7 +1364,7 @@ test('pnpm update restores from the stable link after it moves to a new store', 
         path.join(store, 'bin/kintio.js'),
         `process.stdout.write(${JSON.stringify(`${version}\n`)});\n`,
       ),
-      fs.writeFile(path.join(store, 'dist/index.js'), [
+      fs.writeFile(path.join(store, 'dist/wecom.js'), [
         "import fs from 'node:fs';",
         `fs.writeFileSync(process.env.KINTIO_TEST_WORKER_VERSION, ${JSON.stringify(version)});`,
         "process.send?.({ type: 'ready', pid: process.pid });",
@@ -1355,7 +1387,7 @@ test('pnpm update restores from the stable link after it moves to a new store', 
   ]);
   await fs.symlink(oldStore, stableRoot, process.platform === 'win32' ? 'junction' : 'dir');
   const setupRuntime = cliRuntime(root, { packageRoot: oldStore });
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   const identity = readInstalledPackageIdentity(stableRoot);
   const daemons: Promise<void>[] = [];
   const runtime = cliRuntime(root, {
@@ -1405,7 +1437,7 @@ test('pnpm update restores from the stable link after it moves to a new store', 
     await Promise.allSettled(daemons);
   });
 
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 0);
   assert.equal(await fs.readFile(markerFile, 'utf8'), KINTIO_VERSION);
   assert.equal(readDaemonRecord(home)?.packageRoot, oldStore);
   assert.equal(await runCli(['update', '--home', home], runtime.overrides), 0);
@@ -1429,7 +1461,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
     fs.writeFile(idleFile, '0'),
     fs.writeFile(mutateConfigFile, '0'),
   ]);
-  await fs.writeFile(path.join(packageRoot, 'dist/index.js'), [
+  await fs.writeFile(path.join(packageRoot, 'dist/wecom.js'), [
     "import fs from 'node:fs';",
     "if (fs.readFileSync(process.env.KINTIO_TEST_MUTATE_CONFIG, 'utf8').trim() === '1') fs.appendFileSync(process.env.KINTIO_CONFIG_FILE, '\\nCODEX_WORKING_DIRECTORY=changed-during-restore\\n');",
     "process.send?.({ type: 'ready', pid: process.pid });",
@@ -1444,7 +1476,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
     "process.on('disconnect', () => process.exit(0));",
   ].join('\n'));
   const setupRuntime = cliRuntime(root, { packageRoot });
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   const identity = readInstalledPackageIdentity(packageRoot);
   let installs = 0;
   let failInstall = false;
@@ -1525,7 +1557,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
         home,
         configFile: path.join(home, '.env'),
         packageRoot,
-        mode: request.env.KINTIO_DAEMON_MODE as 'service',
+        mode: request.env.KINTIO_DAEMON_MODE as 'wecom',
         environment: request.env,
       });
       daemons.push(running);
@@ -1537,7 +1569,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
     await Promise.allSettled(daemons);
   });
 
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 0);
   const originalRecord = readDaemonRecord(home);
   assert.equal(originalRecord?.version, 2);
   assert.equal(
@@ -1561,20 +1593,14 @@ test('update refuses active work and restores an idle service daemon', async (t)
   assert.match(runtime.stderr.join(''), /could not preserve the running Runtime state identity/u);
   writeDaemonRecord(home, originalRecord);
   runtime.stderr.length = 0;
-  writeDaemonRecord(home, {
-    version: 1,
-    runId: originalRecord.runId,
-    daemonPid: originalRecord.daemonPid,
-    configFile: originalRecord.configFile,
-    mode: originalRecord.mode,
-    packageRoot: originalRecord.packageRoot,
-    token: originalRecord.token,
-  });
+  await fs.writeFile(path.join(home, 'data/daemon.json'), JSON.stringify({
+    ...originalRecord, version: 1,
+  }));
   assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
   assert.equal(installs, 0);
-  assert.equal((await requestControl(home, 'ping')).phase, 'running');
-  assert.match(runtime.stderr.join(''), /predates safe update metadata/u);
+  assert.match(runtime.stderr.join(''), /expected 2/u);
   writeDaemonRecord(home, originalRecord);
+  assert.equal((await requestControl(home, 'ping')).phase, 'running');
   runtime.stderr.length = 0;
   delete shellEnvironment.PORT;
   assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
@@ -1600,7 +1626,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
     configFile,
     `${validConfig}\nSHUTDOWN_TIMEOUT_MS=0\n`,
   );
-  assert.equal(await runCli(['restart', '--home', home], runtime.overrides), 1);
+  assert.equal(await runCli(['wecom', 'restart', '--home', home], runtime.overrides), 1);
   assert.equal(readDaemonRecord(home)?.runId, busyRunId);
   assert.equal((await requestControl(home, 'ping')).phase, 'running');
   runtime.stderr.length = 0;
@@ -1622,7 +1648,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
   const beforeLostAck = readDaemonRecord(home)?.runId;
   assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
   assert.equal(installs, 0);
-  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.equal(readDaemonRecord(home)?.mode, 'wecom');
   assert.notEqual(readDaemonRecord(home)?.runId, beforeLostAck);
   assert.match(runtime.stderr.join(''), /simulated lost idle ACK/u);
 
@@ -1630,14 +1656,14 @@ test('update refuses active work and restores an idle service daemon', async (t)
   runtime.stderr.length = 0;
   assert.equal(await runCli(['upgrade', '--home', home], runtime.overrides), 0);
   assert.equal(installs, 1);
-  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.equal(readDaemonRecord(home)?.mode, 'wecom');
   const upgradedRecord = readDaemonRecord(home);
   assert.equal(
     upgradedRecord?.version === 2 ? upgradedRecord.state.databaseFile : undefined,
     stateFile,
   );
   assert.notEqual(readDaemonRecord(home)?.runId, busyRunId);
-  assert.match(runtime.stdout.join(''), /service Runtime was restored/u);
+  assert.match(runtime.stdout.join(''), /wecom Runtime was restored/u);
 
   const beforeFailedUpdate = readDaemonRecord(home)?.runId;
   failInstall = true;
@@ -1645,7 +1671,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
   runtime.stderr.length = 0;
   assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
   assert.equal(installs, 2);
-  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.equal(readDaemonRecord(home)?.mode, 'wecom');
   assert.notEqual(readDaemonRecord(home)?.runId, beforeFailedUpdate);
   assert.match(runtime.stderr.join(''), /simulated package-manager failure/u);
   assert.doesNotMatch(runtime.stdout.join(''), /installed successfully/u);
@@ -1655,7 +1681,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
   runtime.stdout.length = 0;
   runtime.stderr.length = 0;
   assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
-  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.equal(readDaemonRecord(home)?.mode, 'wecom');
   assert.match(runtime.stderr.join(''), /simulated version verification failure/u);
   assert.match(runtime.stdout.join(''), /Runtime was restored after the failed update/u);
   assert.doesNotMatch(runtime.stdout.join(''), /installed successfully/u);
@@ -1667,7 +1693,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
   runtime.stderr.length = 0;
   assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
   assert.equal(installs, 4);
-  assert.equal(readDaemonRecord(home)?.mode, 'service');
+  assert.equal(readDaemonRecord(home)?.mode, 'wecom');
   assert.notEqual(readDaemonRecord(home)?.runId, beforeInterruptedUpdate);
   assert.match(runtime.stderr.join(''), /interrupted by SIGTERM/u);
   assert.equal(process.listeners('SIGTERM').length, originalSignalListeners.length);
@@ -1686,7 +1712,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
   await fs.writeFile(configFile, validConfig);
   shellEnvironment.KINTIO_DB_FILE = stateFile;
   changeConfigDuringInstall = false;
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 0);
   delete shellEnvironment.KINTIO_DB_FILE;
 
   await fs.writeFile(mutateConfigFile, '1');
@@ -1701,7 +1727,7 @@ test('update refuses active work and restores an idle service daemon', async (t)
     fs.writeFile(configFile, validConfig),
   ]);
   shellEnvironment.KINTIO_DB_FILE = stateFile;
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 0);
   delete shellEnvironment.KINTIO_DB_FILE;
 
   failProcessTreeTermination = true;
@@ -1716,19 +1742,19 @@ test('update refuses active work and restores an idle service daemon', async (t)
 
   failProcessTreeTermination = false;
   shellEnvironment.KINTIO_DB_FILE = stateFile;
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 0);
   delete shellEnvironment.KINTIO_DB_FILE;
   failRestore = true;
   runtime.stdout.length = 0;
   runtime.stderr.length = 0;
   assert.equal(await runCli(['update', '--home', home], runtime.overrides), 1);
   assert.equal(readDaemonRecord(home), null);
-  assert.match(runtime.stderr.join(''), /was installed, but the service Runtime was not restored/u);
+  assert.match(runtime.stderr.join(''), /was installed, but the wecom Runtime was not restored/u);
   assert.doesNotMatch(runtime.stdout.join(''), /installed successfully/u);
 
   failRestore = false;
   shellEnvironment.KINTIO_DB_FILE = stateFile;
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 0);
   delete shellEnvironment.KINTIO_DB_FILE;
   failInstall = true;
   failRestore = true;
@@ -1745,7 +1771,7 @@ test('a lifecycle lock rejects concurrent background mutation', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   const lock = acquireSingleInstanceLock({
     filePath: path.join(home, 'data/lifecycle.lock'),
   });
@@ -1774,8 +1800,8 @@ test('a lifecycle lock rejects concurrent background mutation', async (t) => {
       return { runtimeRequired: false, runningCount: 0 };
     },
   });
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
-  assert.equal(await runCli(['run', '--home', home], runtime.overrides), 1);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 1);
+  assert.equal(await runCli(['wecom', 'run', '--home', home], runtime.overrides), 1);
   assert.equal(await runCli(['ilink', 'login', '--home', home], runtime.overrides), 1);
   assert.equal(await runCli([
     'ilink', 'start', '--foreground', '--home', home,
@@ -1804,7 +1830,7 @@ test('background startup policy and stale metadata fail safely', async (t) => {
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   let launched = false;
   const invalid = cliRuntime(root, {
     env: { KINTIO_START_TIMEOUT_MS: 'invalid' },
@@ -1813,21 +1839,25 @@ test('background startup policy and stale metadata fail safely', async (t) => {
       return exitedDaemon();
     },
   });
-  assert.equal(await runCli(['start', '--home', home], invalid.overrides), 1);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], invalid.overrides), 1);
   assert.equal(launched, false);
   assert.match(invalid.stderr.join(''), /KINTIO_START_TIMEOUT_MS/u);
 
   writeDaemonRecord(home, {
-    version: 1,
+    version: 2,
     runId: 'stale-daemon',
     daemonPid: 2_147_483_647,
     configFile: path.join(home, '.env'),
-    mode: 'service',
+    mode: 'wecom',
     packageRoot: path.resolve('.'),
     token: 's'.repeat(43),
+    state: {
+      databaseFile: path.join(home, 'data/kintio.sqlite'),
+      lockFile: path.join(home, 'data/kintio.lock'),
+    },
   });
   const status = cliRuntime(root);
-  assert.equal(await runCli(['status', '--home', home], status.overrides), 0);
+  assert.equal(await runCli(['wecom', 'status', '--home', home], status.overrides), 0);
   assert.match(status.stdout.join(''), /not running/u);
   await assert.rejects(
     fs.access(path.join(home, 'data/daemon.json')),
@@ -1835,22 +1865,25 @@ test('background startup policy and stale metadata fail safely', async (t) => {
   );
 
   writeDaemonRecord(home, {
-    version: 1,
+    version: 2,
     runId: 'unreachable-daemon',
     daemonPid: process.pid,
     configFile: path.join(home, '.env'),
-    mode: 'service',
+    mode: 'wecom',
     packageRoot: path.resolve('.'),
     token: 'u'.repeat(43),
+    state: {
+      databaseFile: path.join(home, 'data/kintio.sqlite'),
+      lockFile: path.join(home, 'data/kintio.lock'),
+    },
   });
   const unreachable = cliRuntime(root);
-  assert.equal(await runCli(['status', '--home', home], unreachable.overrides), 1);
+  assert.equal(await runCli(['wecom', 'status', '--home', home], unreachable.overrides), 1);
   assert.match(unreachable.stderr.join(''), /running but unreachable/u);
   await fs.rm(path.join(home, 'data/daemon.json'), { force: true });
 
   const logs = cliRuntime(root);
-  assert.equal(await runCli([
-    'logs', '--home', home, '--no-follow',
+  assert.equal(await runCli(['wecom', 'logs', '--home', home, '--no-follow',
   ], logs.overrides), 1);
   assert.match(logs.stderr.join(''), /no background logs/u);
 });
@@ -1859,7 +1892,7 @@ test('background start reports a daemon that never publishes readiness', async (
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   let launched = false;
   const runtime = cliRuntime(root, {
     env: { KINTIO_START_TIMEOUT_MS: '1000' },
@@ -1868,7 +1901,7 @@ test('background start reports a daemon that never publishes readiness', async (
       return exitedDaemon();
     },
   });
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 1);
   assert.equal(launched, true);
   assert.match(runtime.stderr.join(''), /failed to become ready/u);
 });
@@ -1877,7 +1910,7 @@ test('failed background start rolls back the exact detached process', async (t) 
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   let daemonPid = 0;
   const runtime = cliRuntime(root, {
     env: { ...process.env, KINTIO_START_TIMEOUT_MS: '1000' },
@@ -1907,7 +1940,7 @@ test('failed background start rolls back the exact detached process', async (t) 
     }
   });
 
-  assert.equal(await runCli(['start', '--home', home], runtime.overrides), 1);
+  assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 1);
   assert.match(runtime.stderr.join(''), /failed to become ready/u);
   assert.throws(() => process.kill(daemonPid, 0), { code: 'ESRCH' });
   await assert.rejects(fs.access(path.join(home, 'data/daemon.json')), { code: 'ENOENT' });
@@ -1923,7 +1956,7 @@ test('setup refuses linked config and workspace paths that escape the instance',
   await fs.mkdir(home, { recursive: true });
   await fs.symlink(outsideConfig, path.join(home, '.env'), 'file');
   const configRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], configRuntime.overrides), 1);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], configRuntime.overrides), 1);
   assert.match(configRuntime.stderr.join(''), /not a regular file/u);
 
   await fs.rm(path.join(home, '.env'), { force: true });
@@ -1934,7 +1967,7 @@ test('setup refuses linked config and workspace paths that escape the instance',
     process.platform === 'win32' ? 'junction' : 'dir',
   );
   const skillRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], skillRuntime.overrides), 1);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], skillRuntime.overrides), 1);
   assert.match(skillRuntime.stderr.join(''), /symbolic link|not a directory/u);
 });
 
@@ -1942,10 +1975,10 @@ test('setup enforces POSIX modes without treating chmod as Windows ACL evidence'
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const setupRuntime = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], setupRuntime.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], setupRuntime.overrides), 0);
   await fs.chmod(path.join(home, '.env'), 0o644);
   const runtime = cliRuntime(root);
-  const result = await runCli(['setup', '--home', home], runtime.overrides);
+  const result = await runCli(['wecom', 'setup', '--home', home], runtime.overrides);
   assert.equal(result, process.platform === 'win32' ? 0 : 1);
   if (process.platform !== 'win32') {
     assert.match(runtime.stderr.join(''), /must not be accessible by group or other users/u);
@@ -1956,7 +1989,7 @@ test('managed Skill rejects a pre-existing non-private leaf directory on POSIX',
   const root = await temporaryRoot(t);
   const home = path.join(root, 'instance');
   const initial = cliRuntime(root);
-  assert.equal(await runCli(['setup', '--home', home], initial.overrides), 0);
+  assert.equal(await runCli(['wecom', 'setup', '--home', home], initial.overrides), 0);
   await fs.appendFile(
     path.join(home, '.env'),
     '\nCODEX_WORKING_DIRECTORY=./custom-workspace\n',
@@ -1969,7 +2002,7 @@ test('managed Skill rejects a pre-existing non-private leaf directory on POSIX',
   await fs.chmod(leaf, 0o755);
 
   const runtime = cliRuntime(root);
-  const result = await runCli(['setup', '--home', home], runtime.overrides);
+  const result = await runCli(['wecom', 'setup', '--home', home], runtime.overrides);
   assert.equal(result, process.platform === 'win32' ? 0 : 1);
   if (process.platform !== 'win32') {
     assert.match(runtime.stderr.join(''), /unsafe permissions/u);
@@ -1982,7 +2015,7 @@ test('Windows instance metadata stays inside the current user profile', async (t
   const outside = path.join(root, 'shared', 'instance');
   await fs.mkdir(profile, { recursive: true });
   const runtime = cliRuntime(root, { homeDirectory: profile });
-  const result = await runCli(['setup', '--home', outside], runtime.overrides);
+  const result = await runCli(['wecom', 'setup', '--home', outside], runtime.overrides);
   if (process.platform === 'win32') {
     assert.equal(result, 1);
     assert.match(runtime.stderr.join(''), /inside the current user profile/u);

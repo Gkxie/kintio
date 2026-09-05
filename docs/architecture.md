@@ -11,9 +11,9 @@ A Kintio deployment shares one Codex login. Each provider identity has an indepe
 ## Installation and instance boundary
 
 The global `kintio` command belongs to the installed package; credentials and
-mutable runtime state do not. By default one instance owns `~/.kintio`, which
-contains its environment file, SQLite state, temporary media, and Agent
-workspace. `KINTIO_HOME` and `KINTIO_CONFIG_FILE`, or their CLI options, select
+mutable runtime state do not. By default iLink owns `~/.kintio` and WeCom owns `~/.kintio/wecom`. Each
+channel has a separate process, configuration file, SQLite database, temporary
+media, logs, and Agent workspace. `KINTIO_HOME` and `KINTIO_CONFIG_FILE`, or their CLI options, select
 an explicit existing instance. Relative configured paths resolve from that
 instance root and never from global `node_modules` or an arbitrary caller
 directory.
@@ -21,12 +21,12 @@ directory.
 [cli.ts](../cli.ts) is the executable entry and [src/cli.ts](../src/cli.ts)
 implements setup and lifecycle commands. Background execution launches a small
 native daemon, which owns logs, local control, and bounded worker restarts. The
-worker entry [index.ts](../index.ts) remains the thin process bootstrap for
+WeCom worker entry [wecom.ts](../wecom.ts) is the thin process bootstrap for
 [KintioSupervisor](../src/supervisor.ts). The CLI does not duplicate the SQLite
 schema or invent a second lock; standalone enrollment acquires the canonical
-instance lock only when no runtime owns it. Background start
-succeeds only after the worker publishes readiness following Hono listen and
-runtime initialization. Downtime backlog is a low-priority responsibility and
+instance lock only when no runtime owns it. Background start succeeds only
+after that channel's worker publishes readiness. Only WeCom waits for Hono
+to listen; iLink initializes polling without HTTP. Downtime backlog is a low-priority responsibility and
 is not part of the readiness gate.
 
 ```text
@@ -34,10 +34,11 @@ Kintio CLI
 ├── ilink login → running owner IPC or temporary Enrollment Service
 ├── ilink list/start/stop/delete → running owner IPC or temporary account control
 ├── ilink start → Native daemon → channel-neutral Runtime without Hono
-└── start       → Native daemon → Worker → KintioSupervisor
+└── wecom start → Native daemon → WeCom Worker → KintioSupervisor
 ```
 
-The Supervisor—not Hono—is the process composition root:
+The WeCom Supervisor—not Hono—is the callback process composition root. The
+iLink worker has a separate lifecycle and never opens a Hono listener:
 
 ```text
 Kintio process
@@ -46,26 +47,18 @@ Kintio process
     └── application runtime
         ├── private MCP IPC host and stdio relays
         ├── WeChat message synchronization
-        ├── Weixin iLink polling and login listeners
-        ├── future Feishu WebSocket or another long-lived transport
         └── SQLite Inbox, scheduler, Agent runtime, and delivery tools
 ```
 
 The Supervisor is the callback deployment's process-level composition root;
 `createRuntime()` is the channel-neutral application composition root and can
 also run without Hono through the iLink daemon or `kintio ilink start --foreground`.
-WeChat synchronization is an
-optional Runtime input rather than an iLink prerequisite. Removing that adapter
-in the future should remove its optional Runtime branch without changing the
-iLink enrollment, polling, Agent configuration, or persistence contracts.
-A future long-lived transport belongs
-beside the existing iLink listeners in the runtime's explicit lifecycle, not in
-a Hono route. Extract a shared channel lifecycle only after the second such
-transport exposes real repetition. Separate operating-system processes remain
-an optional future failure-isolation choice, not a prerequisite for Supervisor
-ownership.
+Each runtime accepts exactly one channel configuration. Shared scheduling,
+Agent, persistence, and IPC implementation does not imply shared runtime
+ownership. Neither channel starts, stops, configures, or enrolls the other.
+Future transports should have their own command group and lifecycle.
 
-Startup is deliberately phased:
+WeCom startup is deliberately phased:
 
 1. construct the shared runtime and bind its private MCP IPC endpoint;
 2. bind the Hono HTTP channel while callback ingress returns `503`;
@@ -198,7 +191,9 @@ records, and enrollment audit while preserving unrelated accounts and channels.
 ### Agent access provenance
 
 iLink accounts persist an Agent access level derived only from their enrollment source.
-Terminal enrollment grants `host` access; WeChat KF enrollment grants `restricted` access.
+CLI enrollment grants `host` access. Previously restricted accounts keep their
+stored access level until explicitly enrolled by the local operator. WeCom no
+longer offers iLink enrollment tools.
 Provider messages, Agent prompts, MCP arguments, and participant IDs cannot select or
 upgrade this field. Existing host access survives remote credential rotation and can only
 originate from the local operator path.
@@ -243,7 +238,7 @@ The exact recovery, race, and idempotency transitions are specified by these tes
 | Change provider send capabilities | `src/mcp/`, `src/domain/send-contract.ts` | `test/integration/*-mcp.test.ts` |
 | Change authorization, queues, or recovery | `src/state/sqlite-store.ts`, `conversation-processor.ts` | `test/recovery/`, `sqlite-*` |
 | Change installation or process lifecycle | `cli.ts`, `daemon.ts`, `src/cli.ts`, `src/runtime/native-daemon.ts`, `src/supervisor.ts` | `test/unit/cli.test.ts`, `test/unit/daemon-protocol.test.ts`, `test/recovery/cli-daemon.test.ts` |
-| Change HTTP callbacks or runtime shutdown | `src/app.ts`, `src/runtime.ts`, `index.ts` | `test/integration/callback.test.ts`, `runtime-*` |
+| Change HTTP callbacks or runtime shutdown | `src/app.ts`, `src/runtime.ts`, `wecom.ts` | `test/integration/callback.test.ts`, `runtime-*` |
 
 To add a messaging adapter, first implement its listener, identity model, and provider reply window. Then reuse the common Inbox, agent runtime, and MCP receipt contract. Do not leak its payloads or error codes into another adapter, and do not build a generalized framework for hypothetical integrations.
 

@@ -30,7 +30,7 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const workerFile = path.join(packageRoot, 'dist/wecom.js');
   const logDirectory = path.join(home, 'data/logs');
   await fs.mkdir(logDirectory, { recursive: true });
   await fs.writeFile(
@@ -102,7 +102,7 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   });
   assert.notEqual(second.workerPid, first.workerPid);
   assert.equal(daemonRecord?.configFile, configFile);
-  assert.equal(daemonRecord?.mode, 'service');
+  assert.equal(daemonRecord?.mode, 'wecom');
   assert.equal(daemonRecord?.packageRoot, packageRoot);
   assert.equal(daemonRecord?.version, 2);
   assert.equal(
@@ -148,7 +148,7 @@ test('stop-if-idle ignores stale request IDs and accepts only the current Worker
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const workerFile = path.join(packageRoot, 'dist/wecom.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, 'PORT=18891\n');
@@ -201,7 +201,7 @@ test('stop-if-idle Worker error and timeout fail closed without stopping the dae
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const workerFile = path.join(packageRoot, 'dist/wecom.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, 'PORT=18892\n');
@@ -341,7 +341,7 @@ test('restart exhaustion remains observable until an explicit stop', async (t) =
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const workerFile = path.join(packageRoot, 'dist/wecom.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, 'PORT=18890\n');

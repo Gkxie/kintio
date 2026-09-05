@@ -6,11 +6,11 @@ import { runNativeDaemon } from './src/runtime/native-daemon.ts';
 
 const home = process.env.KINTIO_HOME;
 const configFile = process.env.KINTIO_CONFIG_FILE;
-const mode = process.env.KINTIO_DAEMON_MODE || 'service';
+const mode = process.env.KINTIO_DAEMON_MODE || 'wecom';
 if (!home || !configFile) {
   throw new Error('KINTIO_HOME and KINTIO_CONFIG_FILE are required for daemon mode');
 }
-if (mode !== 'service' && mode !== 'ilink') {
+if (mode !== 'wecom' && mode !== 'ilink') {
   throw new Error(`Unsupported Kintio daemon mode: ${mode}`);
 }
 
