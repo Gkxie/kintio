@@ -556,7 +556,7 @@ export async function createRuntime({
           });
           server.on('error', (error) => {
             logger.error(`[wecom] listener failed: ${error.message}`);
-            void changeWecom('stop').catch((failure: unknown) => logger.error(String(failure)));
+            void changeWecom('stop').catch(() => logger.error('[wecom] listener cleanup failed'));
           });
           store.setWecomRuntime(true, file);
           processor.setChannelEnabled('wechat_kf', Boolean(sync));
@@ -728,8 +728,8 @@ export async function createRuntime({
           ilinkRuntimeStarted = true;
           if (ilink) await startIlinkEnrollment();
           if (shared && store.getWecomRuntime().enabled) {
-            await changeWecom('start').catch((error: unknown) => {
-              logger.error(`[wecom] listener could not be restored: ${String(error)}`);
+            await changeWecom('start').catch(() => {
+              logger.error('[wecom] listener could not be restored; run "kintio wecom start" to inspect its configuration or callback port');
             });
           }
           startupRecoveryActive = true;

@@ -16,6 +16,7 @@ export interface WorkerOptions {
   readonly signal: AbortSignal;
   readonly stdout: (text: string) => void;
   readonly logger?: Logger;
+  readonly onStopRequested?: () => void;
   readonly onStarted?: (control: {
     readonly stopIfIdleForUpdate: () => boolean;
   }) => void | Promise<void>;
@@ -84,6 +85,8 @@ export async function runWorker(options: WorkerOptions): Promise<number> {
       waitForAbort(options.signal).then(() => 'signal' as const),
       stopRequested.then(() => 'channel-stop' as const),
     ]);
+    // Tell the daemon this is an intentional stop before cleanup can fail.
+    if (reason === 'channel-stop') options.onStopRequested?.();
     return reason === 'signal' ? 130 : 0;
   } finally {
     await closeRuntime(runtime, options.config.state.shutdownTimeoutMs);

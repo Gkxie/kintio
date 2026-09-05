@@ -13,7 +13,7 @@ async function fixture(t: TestContext, environment: NodeJS.ProcessEnv = {}) {
   const home = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-wecom-lifecycle-'));
   t.onTestFinished(() => fs.rm(home, { recursive: true, force: true }));
   const socket = net.createServer();
-  await new Promise<void>((resolve) => socket.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve) => socket.listen(0, '0.0.0.0', resolve));
   const port = (socket.address() as net.AddressInfo).port;
   t.onTestFinished(async () => {
     if (socket.listening) await new Promise<void>((resolve) => socket.close(() => resolve()));
@@ -44,14 +44,15 @@ it('an invalid saved WeCom configuration does not take down shared runtime recov
   await releasePort();
   await runtime.wecomControl!('start');
   await runtime.close();
-  await fs.writeFile(file, 'PORT=invalid\n');
+  await fs.writeFile(file, 'CODEX_ENABLED=synthetic-sensitive-config-value\n');
   const errors: string[] = [];
   const restored = await createRuntime({ config, logger: { info() {}, warn() {}, error: (message) => errors.push(message) } });
   t.onTestFinished(() => restored.close());
   await restored.start();
   assert.deepEqual(await restored.wecomControl!('status'), { running: false });
   assert.equal((await readIlinkAccountSnapshot({ config, packageRoot: path.resolve('.'), signal: AbortSignal.timeout(5_000) })).mode, 'runtime');
-  assert.match(errors.join('\n'), /listener could not be restored.*PORT/u);
+  assert.match(errors.join('\n'), /listener could not be restored/u);
+  assert.doesNotMatch(errors.join('\n'), /synthetic-sensitive-config-value/u);
 });
 
 it('disabling iLink Agent processing does not disable the independent WeCom listener', async (t) => {

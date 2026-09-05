@@ -9,6 +9,7 @@ import { test } from 'vitest';
 import crossSpawn from 'cross-spawn';
 
 import { requestControl } from '../../src/runtime/daemon-protocol.ts';
+import { processIsAlive } from '../../src/runtime/single-instance-lock.ts';
 import { KINTIO_VERSION } from '../../src/version.ts';
 
 interface CommandResult {
@@ -419,8 +420,8 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     const result = await running.exited;
     foregrounds.delete(running);
     await waitForPortRelease(foregroundPort);
-    await waitForRemoval(foregroundLock);
     if (cause === 'parent disconnect' || process.platform !== 'win32') {
+      await waitForRemoval(foregroundLock);
       assert.deepEqual(
         { code: result.code, signal: result.signal },
         { code: 0, signal: null },
@@ -428,6 +429,16 @@ test('installed global CLI owns background and foreground lifecycles from any cw
       );
       assert.match(result.output, /Stopping Kintio runtime/u);
     } else {
+      // Forced Windows termination may leave metadata; the next start reclaims it.
+      const owner = await fs.readFile(foregroundLock, 'utf8').then(
+        (text) => JSON.parse(text) as { pid: number },
+        () => undefined,
+      );
+      if (owner) {
+        const deadline = Date.now() + 5_000;
+        while (processIsAlive(owner.pid) && Date.now() < deadline) await delay(50);
+        assert.equal(processIsAlive(owner.pid), false, `Foreground worker ${owner.pid} survived termination`);
+      }
       assert.notDeepEqual(
         { code: result.code, signal: result.signal },
         { code: 0, signal: null },

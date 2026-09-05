@@ -103,13 +103,14 @@ test('iLink worker control exposes the Runtime atomic idle gate', async () => {
   assert.equal(await running, 130);
 });
 
-test('stopping the last account closes a foreground iLink runtime successfully', async () => {
+test('stopping the last account notifies its owner before closing the runtime', async () => {
   const events: string[] = [];
   let requestStop: (() => void) | undefined;
   const running = runWorker({
     config: config(),
     signal: new AbortController().signal,
     stdout() {},
+    onStopRequested() { events.push('notify-owner'); },
     create: async ({ onStopRequested }) => {
       requestStop = onStopRequested;
       return {
@@ -126,7 +127,7 @@ test('stopping the last account closes a foreground iLink runtime successfully',
   assert.ok(requestStop);
   requestStop();
   assert.equal(await running, 0);
-  assert.deepEqual(events, ['start', 'stop', 'close']);
+  assert.deepEqual(events, ['start', 'notify-owner', 'stop', 'close']);
 });
 
 test('iLink start closes a runtime whose startup fails', async () => {

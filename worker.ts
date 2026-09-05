@@ -90,11 +90,17 @@ try {
     stdout: (text) => process.stdout.write(text),
     onStarted(control) {
       stopIfIdleForUpdate = control.stopIfIdleForUpdate;
-      process.send?.({ type: 'ready', pid: process.pid });
+      if (!controller.signal.aborted && process.connected) {
+        process.send?.({ type: 'ready', pid: process.pid }, (error) => { if (error) shutdown(); });
+      }
+    },
+    onStopRequested() {
+      if (process.connected) {
+        process.send?.({ type: 'shutdown-request', pid: process.pid }, (error) => { if (error) shutdown(); });
+      }
     },
   });
   if (result === 0 && process.connected) {
-    process.send?.({ type: 'shutdown-request', pid: process.pid });
     await parentShutdown;
   }
   process.exitCode = result === 130 ? 0 : result;

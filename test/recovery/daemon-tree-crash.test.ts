@@ -89,7 +89,7 @@ async function waitForPortRelease(port: number, timeoutMs = 20_000): Promise<voi
     try {
       await new Promise<void>((resolve, reject) => {
         server.once('error', reject);
-        server.listen(port, '127.0.0.1', resolve);
+        server.listen(port, '0.0.0.0', resolve);
       });
       await new Promise<void>((resolve) => server.close(() => resolve()));
       return;
@@ -489,6 +489,12 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
   });
   assert.equal(stopped.code, 0, stopped.output);
   await waitForPortRelease(servicePort);
-  await waitForDead(secondTree);
+  try {
+    await waitForDead(secondTree);
+  } catch (error) {
+    const state = await requestControl(instanceHome, 'ping').catch(() => undefined);
+    const log = await fs.readFile(path.join(instanceHome, 'data/logs/kintio.log'), 'utf8').catch(() => 'No runtime log');
+    throw new Error(`${String(error)}; phase=${state?.phase}; worker=${state?.workerPid}\n${log.slice(-4_096)}`);
+  }
   secondTree.forEach((pid) => ownedPids.delete(pid));
 });
