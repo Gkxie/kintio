@@ -4,6 +4,8 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.8.1
+
 - Reduced the npm artifact to runtime resources, generated new instance
   configuration directly inside the Kintio home, and published a Changelog
   that starts at the packaged version without repository-only headings
