@@ -123,7 +123,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   const profileRoot = path.join(root, 'profile');
   const callerRoot = path.join(root, 'unrelated-caller');
   const instanceRoot = path.join(profileRoot, 'instances', 'background');
-  const defaultInstanceRoot = path.join(profileRoot, '.kintio', 'wecom');
+  const defaultInstanceRoot = path.join(profileRoot, '.kintio');
   await Promise.all([
     fs.mkdir(packageRoot, { recursive: true }),
     fs.mkdir(callerRoot, { recursive: true }),
@@ -137,8 +137,8 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     }),
     fs.copyFile('cli.ts', path.join(packageRoot, 'cli.ts')),
     fs.copyFile('daemon.ts', path.join(packageRoot, 'daemon.ts')),
-    fs.copyFile('wecom.ts', path.join(packageRoot, 'wecom.ts')),
-    fs.copyFile('ilink.ts', path.join(packageRoot, 'ilink.ts')),
+    fs.copyFile('worker.ts', path.join(packageRoot, 'worker.ts')),
+    fs.copyFile('mcp-relay.ts', path.join(packageRoot, 'mcp-relay.ts')),
     fs.copyFile('tsconfig.json', path.join(packageRoot, 'tsconfig.json')),
     fs.copyFile('package.json', path.join(packageRoot, 'package.json')),
     fs.symlink(
@@ -189,8 +189,8 @@ test('installed global CLI owns background and foreground lifecycles from any cw
   for (const required of [
     'dist/cli.js',
     'dist/daemon.js',
-    'dist/wecom.js',
-    'dist/ilink.js',
+    'dist/worker.js',
+    'dist/mcp-relay.js',
     'bin/kintio.js',
     'assets/ilink-login-card.png',
   ]) assert.equal(packedFiles.includes(required), true, required);
@@ -262,7 +262,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
 
   const configuredDefault = await kintio(['wecom', 'setup']);
   assert.equal(configuredDefault.code, 0, configuredDefault.output);
-  const defaultConfig = path.join(defaultInstanceRoot, '.env');
+  const defaultConfig = path.join(defaultInstanceRoot, 'wecom/.env');
   await fs.access(defaultConfig);
   await assert.rejects(fs.access(path.join(callerRoot, '.env')), { code: 'ENOENT' });
   await assert.rejects(fs.access(path.join(callerRoot, 'data')), { code: 'ENOENT' });
@@ -314,10 +314,10 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     explicitEnvironment,
   );
   assert.equal(configured.code, 0, configured.output);
-  await fs.access(path.join(instanceRoot, '.env'));
+  await fs.access(path.join(instanceRoot, 'wecom/.env'));
   await assert.rejects(fs.access(staleHome), { code: 'ENOENT' });
   const port = await availablePort();
-  const instanceConfig = path.join(instanceRoot, '.env');
+  const instanceConfig = path.join(instanceRoot, 'wecom/.env');
   const source = (await fs.readFile(instanceConfig, 'utf8'))
     .replace(/^PORT=.*$/mu, `PORT=${port}`)
     .replace(/^CODEX_ENABLED=.*$/mu, 'CODEX_ENABLED=false');
@@ -338,14 +338,14 @@ test('installed global CLI owns background and foreground lifecycles from any cw
     explicitEnvironment,
   );
   assert.equal(repeated.code, 0, repeated.output);
-  assert.match(repeated.output, /already running/u);
+  assert.match(repeated.output, /running/u);
 
   const status = await kintio(
     ['wecom', 'status', '--home', instanceRoot],
     explicitEnvironment,
   );
   assert.equal(status.code, 0, status.output);
-  assert.match(status.output, /Kintio is running in wecom mode/u);
+  assert.match(status.output, /Kintio shared runtime is running/u);
   const logs = await kintio(
     ['wecom', 'logs', '--home', instanceRoot, '--lines', '20', '--no-follow'],
     explicitEnvironment,
@@ -426,7 +426,7 @@ test('installed global CLI owns background and foreground lifecycles from any cw
         { code: 0, signal: null },
         result.output,
       );
-      assert.match(result.output, /Received parent shutdown; shutting down/u);
+      assert.match(result.output, /Stopping Kintio runtime/u);
     } else {
       assert.notDeepEqual(
         { code: result.code, signal: result.signal },

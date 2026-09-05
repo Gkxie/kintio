@@ -99,8 +99,8 @@ test('direct config loading defaults mutable state to the user instance', async 
   const instance = path.join(profile, '.kintio', 'wecom');
   const config = loadConfig({ environment: {}, homeDirectory: profile });
 
-  assert.equal(config.state.databaseFile, path.join(instance, 'data/kintio.sqlite'));
-  assert.equal(config.state.lockFile, path.join(instance, 'data/kintio.lock'));
+  assert.equal(config.state.databaseFile, path.join(instance, '../data/kintio.sqlite'));
+  assert.equal(config.state.lockFile, path.join(instance, '../data/kintio.lock'));
   assert.equal(config.codex.imageTempDirectory, path.join(instance, 'data/codex-input'));
   assert.equal(config.codex.workingDirectory, path.join(instance, 'codex-workspace'));
 });
@@ -149,8 +149,8 @@ test('an instance root owns relative config, state, cache, and workspace paths',
   assert.equal(config.port, 9234);
   assert.equal(config.state.databaseFile, path.join(root, 'state/kintio.sqlite'));
   assert.equal(config.state.lockFile, path.join(root, 'state/kintio.lock'));
-  assert.equal(config.codex.workingDirectory, path.join(root, 'workspace'));
-  assert.equal(config.codex.imageTempDirectory, path.join(root, 'cache/images'));
+  assert.equal(config.codex.workingDirectory, path.join(root, 'wecom/workspace'));
+  assert.equal(config.codex.imageTempDirectory, path.join(root, 'wecom/cache/images'));
 });
 
 test('Windows keeps Kintio state inside the instance without owning the Agent workspace', async (t) => {
@@ -167,7 +167,7 @@ test('Windows keeps Kintio state inside the instance without owning the Agent wo
 
   assert.equal(config.state.databaseFile, path.join(root, 'state/kintio.sqlite'));
   assert.equal(config.state.lockFile, path.join(root, 'state/kintio.lock'));
-  assert.equal(config.codex.imageTempDirectory, path.join(root, 'cache/images'));
+  assert.equal(config.codex.imageTempDirectory, path.join(root, 'wecom/cache/images'));
   assert.equal(config.codex.workingDirectory, workspace);
 });
 
@@ -181,7 +181,7 @@ test('KINTIO_CONFIG_FILE selects its directory when no instance root is supplied
   });
 
   assert.equal(config.state.databaseFile, path.join(root, 'data/kintio.sqlite'));
-  assert.equal(config.codex.workingDirectory, path.join(root, 'agent-work'));
+  assert.equal(config.codex.workingDirectory, path.join(root, 'wecom/agent-work'));
 });
 
 test('default config loading does not copy file values into process.env', async (t) => {

@@ -7,7 +7,7 @@ import { test, vi } from 'vitest';
 
 import { runCli } from '../../src/cli.ts';
 import { loadIlinkRuntimeConfig } from '../../src/config.ts';
-import { startIlinkCliRuntime } from '../../src/ilink/cli-start.ts';
+import { runWorker } from '../../src/runtime/run-worker.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import { readDaemonRecord } from '../../src/runtime/daemon-protocol.ts';
@@ -29,7 +29,7 @@ test('iLink start owns polling and Agent lifecycle without setup or Hono', async
   assert.equal('port' in config, false);
   const controller = new AbortController();
   const output: string[] = [];
-  const running = startIlinkCliRuntime({
+  const running = runWorker({
     config,
     signal: controller.signal,
     stdout: (text) => output.push(text),
@@ -39,7 +39,7 @@ test('iLink start owns polling and Agent lifecycle without setup or Hono', async
     controller.abort();
     await running.catch(() => undefined);
   });
-  await eventually(() => output.join('').includes('iLink runtime is active'));
+  await eventually(() => output.join('').includes('shared runtime is active'));
   assert.equal(fs.existsSync(config.state.lockFile), true);
   controller.abort();
   assert.equal(await running, 130);
@@ -105,7 +105,7 @@ test('foreground iLink lifecycle never loses a concurrent stop/start decision', 
     await foreground.catch(() => undefined);
     fs.rmSync(profile, { recursive: true, force: true });
   });
-  await eventually(() => stdout.join('').includes('iLink runtime is active'));
+  await eventually(() => stdout.join('').includes('shared runtime is active'));
   assert.equal(fs.existsSync(path.join(home, 'data/lifecycle.lock')), true);
   const [stopResult, startResult] = await Promise.all([
     runCli(['ilink', 'stop', '--home', home], overrides),
@@ -114,7 +114,7 @@ test('foreground iLink lifecycle never loses a concurrent stop/start decision', 
   assert.equal(stopResult, 0, stderr.join(''));
   assert.ok(startResult === 0 || startResult === 1);
   await new Promise<void>((resolve) => setTimeout(resolve, 50));
-  if (!completed || readDaemonRecord(home)?.mode === 'ilink') {
+  if (!completed || readDaemonRecord(home)?.mode === 'shared') {
     assert.equal(
       await runCli(['ilink', 'stop', '--home', home], overrides),
       0,

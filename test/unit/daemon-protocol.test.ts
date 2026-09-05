@@ -41,7 +41,7 @@ function daemon(overrides: Partial<CurrentDaemonRecord> = {}): CurrentDaemonReco
     runId: 'run_1',
     daemonPid: 1234,
     configFile: CONFIG_FILE,
-    mode: 'wecom',
+    mode: 'shared',
     packageRoot: PACKAGE_ROOT,
     token: TOKEN,
     state: {
@@ -107,7 +107,7 @@ test('protocol schemas are versioned, closed, and validate security-sensitive fi
     token: TOKEN,
   });
   const updateIdentity = createUpdateRuntimeIdentity(
-    { mode: 'wecom' },
+    { mode: 'shared' },
     { PATH: '/tools', CODEX_HOME: '/agent' },
   );
   assert.deepEqual(parseControlRequest({

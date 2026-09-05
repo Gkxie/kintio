@@ -271,7 +271,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
     fs.cp('bin', path.join(packageRoot, 'bin'), { recursive: true }),
     fs.cp('assets', path.join(packageRoot, 'assets'), { recursive: true }),
     fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), { recursive: true }),
-    ...['cli.ts', 'daemon.ts', 'wecom.ts', 'ilink.ts', 'mcp-relay.ts', 'tsconfig.json',
+    ...['cli.ts', 'daemon.ts', 'worker.ts', 'mcp-relay.ts', 'tsconfig.json',
       'package.json'].map((file) =>
       fs.copyFile(file, path.join(packageRoot, file))),
     fs.symlink(
@@ -343,7 +343,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
     upstream!.listen(upstreamPort, '127.0.0.1', resolve);
   });
 
-  const configFile = path.join(instanceHome, '.env');
+  const configFile = path.join(instanceHome, 'wecom/.env');
   let config = await fs.readFile(configFile, 'utf8');
   for (const [name, value] of Object.entries({
     PORT: String(servicePort),
@@ -378,7 +378,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
   const bootstrapDelay = path.join(root, 'delay-worker-bootstrap.mjs');
   await fs.writeFile(bootstrapDelay, [
     "const entry = (process.argv[1] || '').replaceAll('\\\\', '/');",
-    "if (entry.endsWith('/dist/wecom.js')) {",
+    "if (entry.endsWith('/dist/worker.js')) {",
     '  await new Promise((resolve) => setTimeout(resolve, 1000));',
     '}',
   ].join('\n'));

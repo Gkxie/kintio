@@ -6,8 +6,7 @@ import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import {
-  loadConfig,
-  loadIlinkRuntimeConfig,
+  loadSharedRuntimeConfig,
   parseStartTimeout,
   WORKER_GRACEFUL_TIMEOUT_MS,
 } from '../config.ts';
@@ -88,7 +87,7 @@ export async function runNativeDaemon({
   home,
   configFile,
   packageRoot,
-  mode = 'wecom',
+  mode = 'shared',
   environment = process.env,
   workerControlTimeoutMs = DEFAULT_WORKER_CONTROL_TIMEOUT_MS,
 }: {
@@ -118,7 +117,7 @@ export async function runNativeDaemon({
   const token = randomBytes(32).toString('base64url');
   const address = controlAddress(instanceHome, process.platform, runId);
   const instancePackageRoot = path.resolve(packageRoot);
-  const effectiveConfig = (mode === 'ilink' ? loadIlinkRuntimeConfig : loadConfig)({
+  const effectiveConfig = loadSharedRuntimeConfig({
     environment: { ...environment },
     envFile: instanceConfig,
     root: instanceHome,
@@ -275,7 +274,7 @@ export async function runNativeDaemon({
       process.execPath,
       [path.join(
         instancePackageRoot,
-        mode === 'ilink' ? 'dist/ilink.js' : 'dist/wecom.js',
+        'dist/worker.js',
       )],
       {
         cwd: instanceHome,

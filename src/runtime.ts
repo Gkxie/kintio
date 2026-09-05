@@ -1,9 +1,14 @@
 import path from 'node:path';
+import fs from 'node:fs';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { createAdaptorServer, type ServerType } from '@hono/node-server';
 
+import { createApp } from './app.ts';
+import { installManagedSkill } from './runtime/managed-skill.ts';
+import { samePath } from './lib/path-identity.ts';
 import { acquireSingleInstanceLock } from './runtime/single-instance-lock.ts';
 import { CodexAgent, createCodexAppServer } from './services/codex-agent.ts';
 import { ConversationProcessor } from './services/conversation-processor.ts';
@@ -38,7 +43,7 @@ import {
   StatePersistence,
   StatePersistenceUnclosedError,
 } from './state/persistence.ts';
-import type { AppConfig, IlinkRuntimeConfig } from './config.ts';
+import { KINTIO_PACKAGE_ROOT, loadConfig, type AppConfig, type IlinkRuntimeConfig, type SharedRuntimeConfig } from './config.ts';
 import type { ChatChannel, Logger } from './types.ts';
 import { KINTIO_VERSION } from './version.ts';
 
@@ -49,9 +54,10 @@ export interface Runtime {
   stopAccepting(): void;
   close(): Promise<void>;
   abort(): Promise<void>;
+  wecomControl?(action: 'start' | 'stop' | 'restart' | 'status', configFile?: string): Promise<{ running: boolean }>;
 }
 
-export type RuntimeConfig = AppConfig | IlinkRuntimeConfig;
+export type RuntimeConfig = AppConfig | IlinkRuntimeConfig | SharedRuntimeConfig;
 
 function ilinkSecretGeneration(providerMessageId: string): number {
   return Number.parseInt(
@@ -63,15 +69,16 @@ function ilinkSecretGeneration(providerMessageId: string): number {
 export async function createRuntime({
   config,
   logger = console,
-  onIlinkStopRequested,
+  onStopRequested,
 }: {
   config: RuntimeConfig;
   logger?: Logger;
-  onIlinkStopRequested?: () => void;
+  onStopRequested?: () => void;
 }): Promise<Runtime> {
-  const wecom = 'wecom' in config ? config.wecom : undefined;
+  let wecom = 'wecom' in config ? config.wecom : undefined;
+  const shared = 'home' in config ? config : undefined;
+  let wecomConfig: AppConfig | undefined = 'wecom' in config ? config : undefined;
   const ilink = 'ilink' in config ? config.ilink : undefined;
-  if (wecom && ilink) throw new Error('Each runtime must own exactly one channel');
   if (
     (!wecom?.api.enabled && !ilink) ||
     (!config.codex.enabled && !ilink)
@@ -94,9 +101,9 @@ export async function createRuntime({
     };
   }
 
-  const enabledChannels: readonly ChatChannel[] = [
-    ...(wecom?.api.enabled ? ['wechat_kf' as const] : []),
-    ...(ilink ? ['weixin_ilink' as const] : []),
+  const enabledChannels = (): readonly ChatChannel[] => [
+    ...(wecom?.api.enabled && wecomConfig?.codex.enabled ? ['wechat_kf' as const] : []),
+    ...(ilink && config.codex.enabled ? ['weixin_ilink' as const] : []),
   ];
 
   const instanceLock = acquireSingleInstanceLock({
@@ -129,9 +136,8 @@ export async function createRuntime({
       }
     }, 60 * 60 * 1000);
     cleanupTimer.unref();
-    const startupInbound = store.recoverStartup().inbound.filter((record) =>
-      enabledChannels.includes(record.channel));
-    const apiClient = wecom?.api.enabled
+    const startupInbound = store.recoverStartup().inbound;
+    let apiClient = wecom?.api.enabled
       ? new WecomApiClient({
           corpId: wecom.api.corpId,
           kfSecret: wecom.api.kfSecret,
@@ -139,7 +145,10 @@ export async function createRuntime({
           timeoutMs: wecom.api.timeoutMs,
         })
       : undefined;
-    const mediaGateway = apiClient ? new WecomMediaGateway({ apiClient }) : undefined;
+    let mediaGateway = apiClient ? new WecomMediaGateway({ apiClient }) : undefined;
+    let wecomServer: ServerType | undefined;
+    let wecomChange: Promise<{ running: boolean }> | undefined;
+    let wecomRecovery: Promise<void> | undefined;
     let ilinkListener: IlinkListenerManager | undefined;
     let ilinkRuntimeStarted = false;
     let toolsUnavailable = false;
@@ -181,26 +190,27 @@ export async function createRuntime({
       providerAccountId: account.providerAccountId,
       runtimeEnabled: account.runtimeEnabled,
     });
-    const scheduleIlinkStop = (
+    const scheduleRuntimeStop = (
       enrollment: ReturnType<typeof ensureIlinkEnrollment>,
       runningCount: number,
     ): void => {
-      if (runningCount !== 0 || !onIlinkStopRequested) return;
+      if (runningCount !== 0 || wecomServer || wecomChange || terminalLoginActive() || !onStopRequested) return;
       const expectedEpoch = accountMutationEpoch;
       setImmediate(() => {
         if (
           toolsUnavailable ||
+          wecomServer || wecomChange || terminalLoginActive() || activeAccountMutations > 0 ||
           expectedEpoch !== accountMutationEpoch ||
           enrollment.accounts.listRuntimeAccountsWithSecrets().length !== 0
         ) return;
         toolsUnavailable = true;
-        onIlinkStopRequested();
+        onStopRequested();
       });
     };
     const terminalLoginActive = (): boolean =>
       terminalLoginBegins > 0 ||
       Boolean(ilinkEnrollment?.manager.hasActiveLocalOperatorLogin());
-    const wechatTools = apiClient && mediaGateway
+    let wechatTools = apiClient && mediaGateway
       ? new WechatKfToolExecutor({
           store,
           apiClient,
@@ -245,6 +255,8 @@ export async function createRuntime({
           version: KINTIO_VERSION,
         }),
         operator: () => createIlinkLoginMcpServer({
+          ...(config.codex.enabled ? { restartAccounts: () => runAccountMutation(async () => { await ilinkListener?.restart(); }) } : {}),
+          ...(shared ? { wecomControl: (action, configFile) => changeWecom(action, configFile) } : {}),
           async begin(signal) {
             if (toolsUnavailable) throw new Error('service unavailable');
             terminalLoginBegins += 1;
@@ -280,7 +292,7 @@ export async function createRuntime({
               const runningCount = enrollment.accounts
                 .listRuntimeAccountsWithSecrets().length;
               accountMutationEpoch += 1;
-              if (!enabled) scheduleIlinkStop(enrollment, runningCount);
+              if (!enabled) scheduleRuntimeStop(enrollment, runningCount);
               return {
                 account: operatorAccount({ account, secret: stored!.secret }),
                 runningCount,
@@ -298,7 +310,7 @@ export async function createRuntime({
               const runningCount = enrollment.accounts
                 .listRuntimeAccountsWithSecrets().length;
               accountMutationEpoch += 1;
-              scheduleIlinkStop(enrollment, runningCount);
+              scheduleRuntimeStop(enrollment, runningCount);
               return {
                 account: operatorAccount({ account, secret: stored!.secret }),
                 runningCount,
@@ -309,9 +321,9 @@ export async function createRuntime({
         logger,
       });
       operatorMcpHost = activeOperatorHost;
-      await activeOperatorHost.start();
     }
-    if (!config.codex.enabled) {
+    if (!config.codex.enabled && !shared) {
+      await operatorMcpHost?.start();
       logger.info('[runtime] Agent processing is disabled; iLink enrollment remains available');
       let started: Promise<void> | undefined;
       let closing: Promise<void> | undefined;
@@ -377,10 +389,10 @@ export async function createRuntime({
       instanceKey: config.state.lockFile,
       stateDirectory: path.dirname(config.state.lockFile),
       relayFile,
-      ...(wechatTools ? {
+      ...(wechatTools || shared ? {
         wechatKf: () => createWechatKfMcpServer({
           execute(name, input) {
-            if (toolsUnavailable) throw new Error('service unavailable');
+            if (toolsUnavailable || !wechatTools) throw new Error('WeCom is stopped');
             return wechatTools.execute(name, input);
           },
         }),
@@ -405,7 +417,8 @@ export async function createRuntime({
     });
     mcpHost = activeMcpHost;
     const mcpLaunches = await activeMcpHost.start();
-    const mcpToolTimeoutSec = Math.ceil((
+    // A singleton can be enabled later with the maximum supported API/observe timeouts.
+    const mcpToolTimeoutSec = shared ? 505 : Math.ceil((
       (wecom?.api.timeoutMs || 10_000) * 4 +
       (wecom?.api.observeMs || 5_000) +
       5_000
@@ -433,6 +446,7 @@ export async function createRuntime({
       codex,
       trustedCodex,
       config: config.codex,
+      channelConfig: (channel) => channel === 'wechat_kf' && wecomConfig ? wecomConfig.codex : config.codex,
     });
     conversationMemory = new ConversationMemoryExecutor({
       store,
@@ -466,7 +480,7 @@ export async function createRuntime({
       logger,
     });
     let requestDeferredDrain = (): void => {};
-    const sync = apiClient
+    let sync = apiClient
       ? new WecomSync({
           apiClient,
           store,
@@ -478,7 +492,95 @@ export async function createRuntime({
           },
         })
       : undefined;
-    ilinkListener = ilink && ilinkStore && ilinkSecretBox
+    if (shared) processor.setChannelEnabled('wechat_kf', false);
+
+    async function closeWecom(): Promise<void> {
+      const server = wecomServer;
+      wecomServer = undefined;
+      processor.setChannelEnabled('wechat_kf', false);
+      wecom = undefined;
+      sync?.stopAccepting();
+      if (server?.listening) {
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => error ? reject(error) : resolve());
+          (server as ServerType & { closeAllConnections?: () => void }).closeAllConnections?.();
+        });
+      }
+      await sync?.close();
+      await wecomRecovery;
+      await processor.waitForChannelIdle('wechat_kf');
+      await wechatTools?.close();
+      sync = undefined;
+      wechatTools = undefined;
+      mediaGateway = undefined;
+      apiClient = undefined;
+    }
+
+    function changeWecom(action: 'start' | 'stop' | 'restart' | 'status', configFile?: string): Promise<{ running: boolean }> {
+      if (action === 'status') return Promise.resolve({ running: Boolean(wecomServer?.listening) });
+      const operation = (wecomChange?.catch(() => undefined) || Promise.resolve()).then(async () => {
+        if (!shared || toolsUnavailable) throw new Error('Kintio runtime is stopping');
+        const stored = store.getWecomRuntime();
+        const file = configFile || stored.configFile || path.join(shared.home, 'wecom/.env');
+        if (action === 'stop' || action === 'restart') {
+          store.setWecomRuntime(false, stored.configFile || file);
+          await closeWecom();
+        }
+        if (action === 'stop') return { running: false };
+        if (wecomServer?.listening) {
+          if (configFile && !samePath(file, stored.configFile)) throw new Error('WeCom is already running with another config; stop it first');
+          return { running: true };
+        }
+        if (!fs.existsSync(file)) throw new Error('WeCom config is missing; run "kintio wecom setup" first');
+        const settings = loadConfig({ root: shared.home, envFile: file, environment: { ...process.env, KINTIO_DB_FILE: config.state.databaseFile } });
+        installManagedSkill({ packageRoot: KINTIO_PACKAGE_ROOT, workingDirectory: settings.codex.workingDirectory });
+        if (!samePath(settings.codex.imageTempDirectory, config.codex.imageTempDirectory)) {
+          cleanupStagedImageOrphans(settings.codex.imageTempDirectory);
+        }
+        wecomConfig = settings;
+        wecom = settings.wecom;
+        processor.configureWecom(wecom.allowedUserIds, wecom.authorization);
+        if (wecom.api.enabled && settings.codex.enabled) {
+          apiClient = new WecomApiClient({ corpId: wecom.api.corpId, kfSecret: wecom.api.kfSecret, baseUrl: wecom.api.baseUrl, timeoutMs: wecom.api.timeoutMs });
+          mediaGateway = new WecomMediaGateway({ apiClient });
+          wechatTools = new WechatKfToolExecutor({ store, apiClient, mediaGateway, observeMs: wecom.api.observeMs, logger });
+          sync = new WecomSync({ apiClient, store, processor, logger, startPaused: true, onDeferredReady: () => queueMicrotask(requestDeferredDrain) });
+        }
+        const app = createApp({ config: settings, logger, messageProcessor: sync || null, acceptIngress: () => Boolean(wecomServer?.listening) && !toolsUnavailable });
+        const server = createAdaptorServer({ fetch: app.fetch });
+        wecomServer = server;
+        try {
+          await new Promise<void>((resolve, reject) => {
+            server.once('error', reject);
+            server.listen(settings.port, '0.0.0.0', () => { server.off('error', reject); resolve(); });
+          });
+          server.on('error', (error) => {
+            logger.error(`[wecom] listener failed: ${error.message}`);
+            void changeWecom('stop').catch((failure: unknown) => logger.error(String(failure)));
+          });
+          store.setWecomRuntime(true, file);
+          processor.setChannelEnabled('wechat_kf', Boolean(sync));
+          const catchUp = sync?.catchUp();
+          sync?.startConsuming();
+          wecomRecovery = Promise.all([catchUp, ...(sync ? [processor.recover(store.listRecoverableInbound('wechat_kf'), { priority: 'low' })] : [])])
+            .then(() => { requestDeferredDrain(); })
+            .catch((error: unknown) => logger.error(`[wecom] recovery failed: ${String(error)}`))
+            .finally(() => { wecomRecovery = undefined; });
+          logger.info(`Hono server is listening on port ${settings.port}`);
+          return { running: true };
+        } catch (error) {
+          await closeWecom();
+          throw error;
+        }
+      });
+      const tracked = operation.finally(() => {
+        if (wecomChange === tracked) wecomChange = undefined;
+        if (ilinkEnrollment) scheduleRuntimeStop(ilinkEnrollment, ilinkEnrollment.accounts.listRuntimeAccountsWithSecrets().length);
+      });
+      wecomChange = tracked;
+      return tracked;
+    }
+    ilinkListener = config.codex.enabled && ilink && ilinkStore && ilinkSecretBox
       ? new IlinkListenerManager({
           logger,
           host: {
@@ -582,7 +684,7 @@ export async function createRuntime({
       while (!closing && accepting) {
         await sync?.waitForIdle();
         await processor.waitForIdle();
-        const records = activeStore.activateNextDeferredConversation(enabledChannels);
+        const records = activeStore.activateNextDeferredConversation(enabledChannels());
         if (!records.length) return;
         await processor.recover(records, { priority: 'low' });
         await processor.waitForIdle();
@@ -611,19 +713,25 @@ export async function createRuntime({
       });
     };
     const runtime = {
-      messageProcessor: sync || null,
+      get messageProcessor() { return sync || null; },
+      ...(shared ? { wecomControl: changeWecom } : {}),
       start(): Promise<void> {
         if (!accepting) return Promise.reject(new Error('Kintio runtime is stopping'));
         starting ||= (async () => {
           const catchUp = sync?.catchUp() || Promise.resolve();
           const recovery = processor.recover(
-            startupInbound,
+            startupInbound.filter((record) => enabledChannels().includes(record.channel)),
             { priority: 'low' },
           );
           sync?.startConsuming();
           await ilinkListener?.start();
           ilinkRuntimeStarted = true;
           if (ilink) await startIlinkEnrollment();
+          if (shared && store.getWecomRuntime().enabled) {
+            await changeWecom('start').catch((error: unknown) => {
+              logger.error(`[wecom] listener could not be restored: ${String(error)}`);
+            });
+          }
           startupRecoveryActive = true;
           startupRecovery = Promise.all([catchUp, recovery])
             .then(async () => {
@@ -647,7 +755,7 @@ export async function createRuntime({
           !accepting || startupRecoveryActive || deferredDrainRequested ||
           deferredDrain !== undefined || !processor.isIdle() ||
           terminalLoginActive() ||
-          activeAccountMutations > 0 ||
+          activeAccountMutations > 0 || wecomChange || wecomRecovery ||
           Boolean(ilinkTools && !ilinkTools.isIdle()) ||
           Boolean(wechatTools && !wechatTools.isIdle())
         ) return false;
@@ -674,6 +782,8 @@ export async function createRuntime({
             await starting?.catch(() => undefined);
             await startupRecovery?.catch(() => undefined);
             await deferredDrain?.catch(() => undefined);
+            await wecomChange?.catch(() => undefined);
+            if (shared) await closeWecom();
             await sync?.close();
             await ilinkClosing;
             await processor.close();
@@ -710,6 +820,12 @@ export async function createRuntime({
         runtime.stopAccepting();
         toolsUnavailable = true;
         wechatTools?.abort();
+        if (wecomServer) {
+          const server = wecomServer;
+          wecomServer = undefined;
+          server.close();
+          (server as ServerType & { closeAllConnections?: () => void }).closeAllConnections?.();
+        }
         await Promise.all([
           processor.abort(),
           ilinkClosing,
@@ -718,6 +834,8 @@ export async function createRuntime({
         ]);
       },
     };
+    // Publish operator control only after all channel lifecycle state exists.
+    await operatorMcpHost?.start();
     return runtime;
   } catch (error: unknown) {
     if (cleanupTimer) clearInterval(cleanupTimer);

@@ -96,6 +96,7 @@ interface AgentOptions {
   readonly codex: CodexBoundary;
   readonly trustedCodex?: CodexBoundary;
   readonly config: AgentConfig;
+  readonly channelConfig?: (channel: ChatChannel) => AgentConfig;
 }
 
 interface ActiveState {
@@ -404,14 +405,16 @@ export class CodexAgent {
   readonly #codex: CodexBoundary;
   readonly #trustedCodex: CodexBoundary;
   readonly #config: AgentConfig;
+  readonly #channelConfig: (channel: ChatChannel) => AgentConfig;
   readonly #active = new Map<string, ActiveState>();
   readonly #prepared = new Map<string, PreparedState>();
   readonly #pendingMemoryThreads = new Map<string, string>();
 
-  constructor({ codex, trustedCodex = codex, config }: AgentOptions) {
+  constructor({ codex, trustedCodex = codex, config, channelConfig }: AgentOptions) {
     this.#codex = codex;
     this.#trustedCodex = trustedCodex;
     this.#config = config;
+    this.#channelConfig = channelConfig || (() => config);
   }
 
   #boundary(agentAccess: AgentAccess): CodexBoundary {
@@ -419,7 +422,7 @@ export class CodexAgent {
   }
 
   async #thread(
-    input: Pick<AgentInput, 'conversationId' | 'threadId' | 'agentAccess'>,
+    input: Pick<AgentInput, 'conversationId' | 'threadId' | 'agentAccess'> & { channel?: ChatChannel },
     startFresh = false,
   ): Promise<{
     readonly key: string;
@@ -428,7 +431,7 @@ export class CodexAgent {
     const key = input.conversationId;
     const agentAccess = input.agentAccess || 'restricted';
     const options: CodexThreadOptions = {
-      workingDirectory: this.#config.workingDirectory,
+      workingDirectory: (input.channel ? this.#channelConfig(input.channel) : this.#config).workingDirectory,
       ...(agentAccess === 'host'
         ? { developerInstructions: HOST_CHANNEL_INSTRUCTIONS }
         : {
@@ -451,8 +454,9 @@ export class CodexAgent {
     conversationId: string,
     threadId: string,
     agentAccess: AgentAccess = 'restricted',
+    channel?: ChatChannel,
   ): Promise<string> {
-    const input = { conversationId, threadId, agentAccess };
+    const input = { conversationId, threadId, agentAccess, ...(channel ? { channel } : {}) };
     const boundary = this.#boundary(agentAccess);
     const state = threadId && boundary.getThreadState
       ? await boundary.getThreadState(threadId)
@@ -486,7 +490,7 @@ export class CodexAgent {
     const prompt = buildPrompt(input);
     return withStagedImages(
       (input.resolvedMedia || []).filter((media) => media.kind === 'image'),
-      { temporaryRoot: this.#config.imageTempDirectory },
+      { temporaryRoot: this.#channelConfig(input.channel).imageTempDirectory },
       (paths) => operation(paths.length
         ? [
             { type: 'text', text: prompt },
@@ -505,7 +509,7 @@ export class CodexAgent {
     state: ActiveState,
   ): Promise<AgentCompletion> {
     const attempts = executedAttemptIds(result, state.toolServer);
-    const generated = await generatedCandidate(result, this.#config.generatedImageDirectory);
+    const generated = await generatedCandidate(result, this.#channelConfig(state.toolServer).generatedImageDirectory);
     if (generated) {
       return {
         executedAttemptIds: [...new Set([
@@ -527,7 +531,7 @@ export class CodexAgent {
       const retryResult = await retry.completion;
       const retryImage = await generatedCandidate(
         retryResult,
-        this.#config.generatedImageDirectory,
+        this.#channelConfig(state.toolServer).generatedImageDirectory,
       );
       const retryAttempts = executedAttemptIds(retryResult, state.toolServer);
       if (retryImage) {
@@ -547,7 +551,7 @@ export class CodexAgent {
       clientUserMessageId: `${state.latestClientInputId}-format-retry`,
     });
     const retryResult = await retry.completion;
-    const retryImage = await generatedCandidate(retryResult, this.#config.generatedImageDirectory);
+    const retryImage = await generatedCandidate(retryResult, this.#channelConfig(state.toolServer).generatedImageDirectory);
     const retryAttempts = executedAttemptIds(retryResult, state.toolServer);
     if (retryImage) {
       return {
@@ -710,6 +714,7 @@ export class CodexAgent {
     clientInputIds: readonly string[],
     latestClientInputId: string,
     agentAccess: AgentAccess = 'restricted',
+    channel?: ChatChannel,
   ): Promise<HistoryInspection> {
     if (!threadId || !clientInputIds.length) {
       return { state: 'missing', turnId: '', foundClientInputIds: new Set(), artifacts: [], executedAttemptIds: [] };
@@ -755,7 +760,7 @@ export class CodexAgent {
         typeof item.type === 'string' ? [{ ...item, type: item.type }] : [],
       ),
     };
-    const generated = await generatedCandidate(result, this.#config.generatedImageDirectory);
+    const generated = await generatedCandidate(result, (channel ? this.#channelConfig(channel) : this.#config).generatedImageDirectory);
     return {
       state: status === 'completed'
         ? 'completed'

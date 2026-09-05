@@ -26,6 +26,8 @@ const LOGIN_STATUS = z.enum([
 ]);
 
 export interface IlinkLoginOperator {
+  restartAccounts?(): Promise<void>;
+  wecomControl?(action: 'start' | 'stop' | 'restart' | 'status', configFile?: string): Promise<{ running: boolean }>;
   begin(signal?: AbortSignal): Promise<{
     readonly offerId: string;
     readonly qrContent: string;
@@ -94,12 +96,38 @@ function failure(error: unknown, operation: 'login' | 'account' = 'login') {
 
 export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServer {
   const server = new McpServer(
-    { name: 'kintio-ilink-login', version: KINTIO_VERSION },
+    { name: 'kintio-operator', version: KINTIO_VERSION },
     {
       instructions:
-        'Private local operator tools for iLink enrollment and account lifecycle. Never expose this server to an Agent.',
+        'Private local operator tools for channel lifecycle and iLink enrollment. Never expose this server to an Agent.',
     },
   );
+
+  if (operator.restartAccounts) {
+    server.registerTool('restart_accounts', {
+      description: 'Restart enabled iLink listeners without restarting the shared runtime or WeCom.',
+      inputSchema: {},
+    }, async () => {
+      try {
+        await operator.restartAccounts!();
+        return textResult('iLink listeners restarted.', { restarted: true });
+      } catch (error) { return failure(error, 'account'); }
+    });
+  }
+  if (operator.wecomControl) {
+    server.registerTool('wecom_control', {
+      description: 'Start, stop, restart, or inspect the singleton WeCom listener. Other channels remain active.',
+      inputSchema: { action: z.enum(['start', 'stop', 'restart', 'status']), configFile: z.string().max(4_096).optional() },
+      outputSchema: { running: z.boolean() },
+    }, async ({ action, configFile }) => {
+      try {
+        return textResult('WeCom listener state.', await operator.wecomControl!(action, configFile));
+      } catch (error) {
+        // Local operator errors are not exposed to conversation Agents.
+        return { content: [{ type: 'text' as const, text: error instanceof Error ? error.message : String(error) }], isError: true };
+      }
+    });
+  }
 
   server.registerTool(
     'begin_login',

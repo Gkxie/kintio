@@ -15,7 +15,7 @@ import type {
   NormalizedMessage,
 } from '../types.ts';
 
-const SCHEMA_VERSION = 24;
+const SCHEMA_VERSION = 25;
 const INBOUND_STATUSES = [
   'received',
   'processing',
@@ -575,7 +575,7 @@ export class SqliteStore {
     );
     const version = Number(versionRow?.user_version ?? 0);
     if (version === SCHEMA_VERSION) return;
-    if (version !== 0) {
+    if (version !== 0 && version !== 24) {
       throw new Error(
         `SQLite schema version ${version} is not supported; expected ${SCHEMA_VERSION}. Use a new Kintio data directory.`,
       );
@@ -583,6 +583,12 @@ export class SqliteStore {
 
     this.#database.exec('BEGIN IMMEDIATE');
     try {
+      this.#database.exec('CREATE TABLE wecom_runtime (singleton INTEGER PRIMARY KEY CHECK (singleton = 1), enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)), config_file TEXT NOT NULL) STRICT');
+      if (version === 24) {
+        this.#database.exec('PRAGMA user_version = 25');
+        this.#database.exec('COMMIT');
+        return;
+      }
       this.#database.exec(`
         CREATE TABLE sync_cursors (
           open_kfid TEXT PRIMARY KEY,
@@ -2576,6 +2582,16 @@ export class SqliteStore {
     });
   }
 
+  getWecomRuntime(): { enabled: boolean; configFile: string } {
+    const row = this.#database.prepare('SELECT enabled, config_file FROM wecom_runtime WHERE singleton = 1').get();
+    return { enabled: row?.enabled === 1, configFile: String(row?.config_file || '') };
+  }
+
+  setWecomRuntime(enabled: boolean, configFile: string): void {
+    this.#database.prepare('INSERT INTO wecom_runtime VALUES (1, ?, ?) ON CONFLICT(singleton) DO UPDATE SET enabled = excluded.enabled, config_file = excluded.config_file')
+      .run(enabled ? 1 : 0, configFile);
+  }
+
   recoverStartup(): StartupRecovery {
     return this.#transaction(() => {
       const now = this.#now();
@@ -2610,7 +2626,13 @@ export class SqliteStore {
       `).run(now);
       return {
         uncertainSends: Number(sending),
-        inbound: rowsAs<InboundRow>(
+        inbound: this.listRecoverableInbound(),
+      };
+    });
+  }
+
+  listRecoverableInbound(channel?: ChatChannel): InboundRecord[] {
+    return rowsAs<InboundRow>(
           this.#database
             .prepare(`
               SELECT * FROM inbound_messages
@@ -2618,13 +2640,11 @@ export class SqliteStore {
                 'received', 'failed', 'processing', 'preparing',
                 'steering', 'steered', 'ready'
               )
-                AND deferred = 0
+                AND deferred = 0 AND (? IS NULL OR channel = ?)
               ORDER BY inbox_seq
             `)
-            .all(),
-        ).map((row) => mapInbound(row)!),
-      };
-    });
+            .all(channel ?? null, channel ?? null),
+        ).map((row) => mapInbound(row)!);
   }
 
   rememberInboundMedia({

@@ -43,7 +43,7 @@ The global command is installed from the public npm Registry. Like Codex's
 user-level [`CODEX_HOME`](https://learn.chatgpt.com/docs/config-file/environment-variables),
 which defaults to `~/.codex`, Kintio keeps mutable user state outside its
 installation. `kintio wecom setup` creates
-the WeCom instance at `~/.kintio/wecom`, installs its bundled Agent skill in the
+WeCom configuration at `~/.kintio/wecom`, installs its bundled Agent skill in the
 effective `CODEX_WORKING_DIRECTORY`, and writes `~/.kintio/wecom/.env`. On macOS and
 Linux the file is created with mode `0600`. On Windows, the CLI requires the
 instance and config to stay inside the current user's profile and trusts that
@@ -53,7 +53,7 @@ an explicit instance location. Windows keeps Kintio-owned database, lock, iLink
 key file, and image staging paths inside that instance. Runtime state never
 defaults to the global package directory.
 The installed `wechat-kf-reply-sop` file is a Kintio-managed asset and is
-atomically refreshed by `wecom setup` and before WeCom process launches only. Changing
+atomically refreshed by `wecom setup` and before WeCom starts. Changing
 `CODEX_WORKING_DIRECTORY` therefore moves the active managed Skill boundary to
 that workspace instead of leaving a dangling prompt reference. Keep local Agent
 customizations outside the managed Skill path.
@@ -63,8 +63,8 @@ parent must be trusted: use owner-controlled directories (or a sticky shared
 directory such as `/tmp`) on POSIX. On Windows, keep the instance and config
 inside the current user profile without granting untrusted accounts write
 access; paths outside the profile are rejected by the CLI. The default
-channel directory (`~/.kintio/wecom` for WeCom, `~/.kintio` for iLink) is the
-recommended choice.
+Kintio home (`~/.kintio`) is the recommended choice. WeCom keeps its own
+configuration and Agent workspace in the `wecom` subdirectory.
 
 ## 2. Configure WeCom settings
 
@@ -88,7 +88,7 @@ Kintio does not mirror them in `.env` or modify `$CODEX_HOME/config.toml`.
 
 ## 3. Configure the WeChat KF adapter
 
-Skip this section if you only need to restore an existing iLink Bot. In that case, confirm that all four `WECOM_*` values below are empty in `.env`.
+Skip this section for an iLink-only deployment. Its optional configuration is separate at `~/.kintio/.env`.
 
 ### 3.1 Obtain credentials
 
@@ -144,9 +144,10 @@ Prepare the URL first, then save the callback configuration in the provider cons
 
 ## 4. Run iLink independently
 
-The iLink channel uses its own process, database, workspace, and logs. It does
-not read WeCom credentials or start Hono. Its existing `~/.kintio` data stays in
-place; WeCom uses `~/.kintio/wecom`. There is no `ILINK_ENABLED` switch.
+The iLink channel works without WeCom configuration or Hono. It shares the
+Kintio worker and database when WeCom is also running, but keeps its own Agent
+workspace, identities, and account controls. Existing `~/.kintio` data stays in
+place. There is no `ILINK_ENABLED` switch.
 
 iLink bot tokens and reply credentials are stored encrypted. In production, you can provide an explicit 32-byte base64url key:
 
@@ -220,8 +221,8 @@ behind. Its provider-side QR still expires after five minutes; remove the stale 
 manually before reusing the same path.
 
 Enrollment is available through `kintio ilink login` or the first interactive
-`kintio ilink start`. The WeCom runtime has no iLink enrollment or account
-management tools. Channel authorization, threads, and history remain separate.
+`kintio ilink start`. WeCom conversation Agents have no iLink enrollment or account
+management tools; the local CLI can manage both listeners in the shared runtime. Channel authorization, threads, and history remain separate.
 
 ## 5. Start and verify
 
@@ -231,9 +232,9 @@ kintio wecom status
 kintio wecom logs --lines 100
 ```
 
-`kintio wecom start` validates the instance config and launches Kintio's portable
-background daemon. Repeating it while that instance is online reports the
-existing PID instead of creating another consumer. The installed command starts
+`kintio wecom start` validates the WeCom config and attaches its singleton
+listener to the shared runtime, launching the portable background daemon only
+if needed. Repeating it reports the existing worker instead of creating another consumer. The installed command starts
 prebuilt JavaScript and never compiles TypeScript at runtime. It returns success
 only after the worker completes runtime initialization. A crashed worker is
 restarted with bounded backoff; a port conflict or repeated initialization
@@ -252,11 +253,12 @@ For development inside the source checkout, use:
 ```bash
 corepack enable pnpm
 pnpm install --frozen-lockfile
-pnpm run dev
+pnpm run build
+node dist/cli.js wecom run
 ```
 
 Confirm that `kintio wecom logs` contains `Hono server is listening on port 8888` and
-no later `[supervisor] process failed` entry.
+no later worker failure entry.
 
 For a WeChat KF deployment, save the callback configuration and complete the authorization flow in section 3.2. For an iLink deployment, send a normal message from the bound account and confirm that the agent replies. If it does not, check for `[ilink-listener] poll cycle failed` in the logs.
 
@@ -282,10 +284,11 @@ kintio update
 kintio wecom stop
 ```
 
-`stop` uses an authenticated local Unix socket or Windows named pipe and waits
-for the worker's graceful shutdown path.
-`wecom restart` and `ilink restart` reload only their respective channel with its
-instance configuration. The CLI does
+`stop` uses authenticated local IPC and drains only the selected listener.
+Stopping the last active channel also shuts down the shared worker and daemon.
+`wecom restart` reloads its configuration and HTTP listener; `ilink restart`
+restarts enabled account listeners. Neither restarts the other channel.
+Shared runtime settings are loaded when the worker starts, including after an update. The CLI does
 not modify Nginx, provider consoles, shell profiles, or operating-system boot
 configuration. Configure launchd, systemd, Task Scheduler, a container runtime,
 or another boot mechanism separately with `kintio wecom run` if the machine must start
@@ -301,10 +304,9 @@ kintio update
 
 Active Agent work, a foreground Runtime, an active standalone login, an unknown
 installation layout, or an ambiguous package-manager root fails before the
-package is changed. The updater checks both default channel directories and
-the selected `--home`. If both channels are running, stop the other channel
-first; at most one idle channel is restored automatically. Stop any other custom
-instance homes using the same global installation before updating.
+package is changed. The updater coordinates the shared runtime and restores its enabled channels
+and accounts. A selected custom home cannot hide a running default home. Stop
+any other homes using the same global installation before updating.
 Kintio also verifies the running Runtime's effective configuration before
 stopping it. If the Runtime was started with shell-only overrides, run the
 update with the same environment or persist those values in the instance
@@ -330,8 +332,9 @@ kintio wecom restart
 kintio wecom stop
 ```
 
-With no explicit `--home`, the config directory becomes the instance root, so
-relative database and workspace paths retain their existing meaning.
+With no explicit `--home`, a WeCom config in a directory named `wecom` uses that
+directory's parent as the shared home; other explicit config locations use their
+containing directory. Prefer `--home` when both channels use a custom location.
 
 The global command and its native daemon must run as the same operating-system user
 that can successfully execute `codex login status`. Reinstall the global Kintio
@@ -348,15 +351,17 @@ These constraints come from the messaging providers and cannot be bypassed local
 
 ## 8. Data and backups
 
-iLink stores state in `~/.kintio/data/kintio.sqlite`; WeCom stores its own state
-in `~/.kintio/wecom/data/kintio.sqlite`. Configuration, account data, and
+Both channels use `~/.kintio/data/kintio.sqlite`. WeCom-specific data has dedicated
+tables; common message and conversation tables retain channel-scoped identities. Configuration, account data, and
 Agent workspaces are not deleted by setup, stop, restart, or package removal. `--home` or `KINTIO_HOME` moves the whole instance; `--config` or
-`KINTIO_CONFIG_FILE` selects an existing environment file. Relative paths in
-that configuration resolve from the instance root, not the package manager's
-global installation directory or the caller's current directory.
+`KINTIO_CONFIG_FILE` selects an existing environment file. Shared database paths
+resolve from the Kintio home. Relative WeCom Agent paths resolve from `<home>/wecom`,
+while iLink Agent paths resolve from `<home>`. None resolve from the package
+manager's global installation directory or the caller's current directory.
 
-Only the current SQLite schema (v24) and daemon metadata (v2) are supported.
-Other database versions are rejected without migration or data deletion. Use a
+SQLite schema 25 and shared-runtime daemon metadata (v2, `shared` mode) are supported.
+Schema 24 upgrades by adding the singleton lifecycle table without rebuilding
+existing tables. Older or unknown schemas are rejected without data deletion. Use a
 fresh instance directory when starting from an incompatible version. Retired
 database names and configuration aliases are not discovered automatically.
 SQLite files, WAL files, environment files, temporary media, and iLink storage
@@ -368,7 +373,7 @@ SQLite on another machine.
 For a deployment migration, stop the currently active process and back up these
 items together:
 
-- the active instance environment file (normally `~/.kintio/wecom/.env`);
+- the optional `~/.kintio/.env` and WeCom configuration `~/.kintio/wecom/.env`;
 - the active SQLite file (normally `data/kintio.sqlite`);
 - `data/ilink-storage.key`, when using the file-based key;
 - the Codex login state and thread history for the operating-system user. Codex CLI manages these separately; they are not included in the SQLite backup.

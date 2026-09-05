@@ -30,7 +30,7 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/wecom.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   const logDirectory = path.join(home, 'data/logs');
   await fs.mkdir(logDirectory, { recursive: true });
   await fs.writeFile(
@@ -102,7 +102,7 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   });
   assert.notEqual(second.workerPid, first.workerPid);
   assert.equal(daemonRecord?.configFile, configFile);
-  assert.equal(daemonRecord?.mode, 'wecom');
+  assert.equal(daemonRecord?.mode, 'shared');
   assert.equal(daemonRecord?.packageRoot, packageRoot);
   assert.equal(daemonRecord?.version, 2);
   assert.equal(
@@ -148,7 +148,7 @@ test('stop-if-idle ignores stale request IDs and accepts only the current Worker
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/wecom.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, 'PORT=18891\n');
@@ -201,7 +201,7 @@ test('stop-if-idle Worker error and timeout fail closed without stopping the dae
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/wecom.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, 'PORT=18892\n');
@@ -258,7 +258,7 @@ test('iLink daemon launches its worker and honors a last-account shutdown reques
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/ilink.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, '');
@@ -273,7 +273,7 @@ test('iLink daemon launches its worker and honors a last-account shutdown reques
     home,
     configFile,
     packageRoot,
-    mode: 'ilink',
+    mode: 'shared',
     environment: {},
   });
   t.onTestFinished(async () => {
@@ -287,7 +287,7 @@ test('iLink daemon launches its worker and honors a last-account shutdown reques
     return response?.phase === 'running' ? response : undefined;
   });
   assert.ok(running.workerPid);
-  assert.equal(readDaemonRecord(home)?.mode, 'ilink');
+  assert.equal(readDaemonRecord(home)?.mode, 'shared');
   await daemon;
   await assert.rejects(fs.access(daemonRecordPath(home)), { code: 'ENOENT' });
   const log = await fs.readFile(path.join(home, 'data/logs/kintio.log'), 'utf8');
@@ -299,17 +299,17 @@ test('real iLink worker publishes readiness and drains after daemon shutdown', a
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-real-ilink-daemon-'));
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
-  const workerFile = path.join(packageRoot, 'dist/ilink.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.writeFile(
     workerFile,
-    `await import(${JSON.stringify(pathToFileURL(path.resolve('ilink.ts')).href)});\n`,
+    `await import(${JSON.stringify(pathToFileURL(path.resolve('worker.ts')).href)});\n`,
   );
   const daemon = runNativeDaemon({
     home,
     configFile: path.join(home, '.env'),
     packageRoot,
-    mode: 'ilink',
+    mode: 'shared',
     environment: {},
   });
   t.onTestFinished(async () => {
@@ -331,7 +331,7 @@ test('real iLink worker publishes readiness and drains after daemon shutdown', a
   await assert.rejects(fs.access(daemonRecordPath(home)), { code: 'ENOENT' });
   assert.match(
     await fs.readFile(path.join(home, 'data/logs/kintio.log'), 'utf8'),
-    /Kintio iLink runtime is active[\s\S]+daemon stopped/u,
+    /Kintio shared runtime is active[\s\S]+daemon stopped/u,
   );
 });
 
@@ -341,7 +341,7 @@ test('restart exhaustion remains observable until an explicit stop', async (t) =
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/wecom.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, 'PORT=18890\n');

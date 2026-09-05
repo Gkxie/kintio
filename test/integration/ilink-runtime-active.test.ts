@@ -337,6 +337,7 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   assert.deepEqual(
     (await operator.listTools()).tools.map((tool) => tool.name),
     [
+      'restart_accounts',
       'begin_login',
       'login_status',
       'cancel_login',

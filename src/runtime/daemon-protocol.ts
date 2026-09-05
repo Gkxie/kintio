@@ -10,7 +10,7 @@ import { ensurePrivateDirectory } from '../lib/private-directory.ts';
 
 export type ControlCommand = 'ping' | 'stop' | 'stop-if-idle';
 export type DaemonPhase = 'starting' | 'running' | 'backoff' | 'stopping' | 'failed';
-export type DaemonMode = 'wecom' | 'ilink';
+export type DaemonMode = 'shared';
 
 export const CONTROL_MAX_BYTES = 4 * 1024;
 export const CONTROL_TIMEOUT_MS = 2_000;
@@ -36,7 +36,7 @@ const daemonRecordSchema = z.strictObject({
   runId,
   daemonPid: positiveInteger,
   configFile: absolutePath,
-  mode: z.enum(['wecom', 'ilink']),
+  mode: z.literal('shared'),
   packageRoot: absolutePath,
   token,
   state: z.strictObject({

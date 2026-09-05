@@ -78,12 +78,30 @@ test('fresh storage uses the current schema and reopening preserves messages', (
   const [messageKey] = ingest(store, [message('current-schema')]);
   assert.ok(messageKey);
   const original = store.getInbound(messageKey);
-  assert.equal(schemaVersion(filePath), 24);
+  assert.equal(schemaVersion(filePath), 25);
   persistence.close();
   const restored = reopen(t, filePath);
   assert.deepEqual(restored.getInbound(messageKey), original);
   assert.deepEqual(restored.integrityCheck().map(Object.values), [['ok']]);
   assert.deepEqual(restored.foreignKeyCheck(), []);
+});
+
+test('schema 24 adds only the singleton lifecycle table and preserves existing conversation state', (t) => {
+  const { persistence, store, filePath } = harness(t);
+  const [key] = ingest(store, [message('before-shared-runtime')]);
+  assert.ok(key);
+  const before = store.getInbound(key);
+  persistence.close();
+  withTestDatabase(filePath, (database) => {
+    database.exec('DROP TABLE wecom_runtime; PRAGMA user_version = 24');
+  });
+  const restored = reopen(t, filePath);
+  assert.equal(schemaVersion(filePath), 25);
+  assert.deepEqual(restored.getInbound(key), before);
+  assert.deepEqual(restored.getWecomRuntime(), { enabled: false, configFile: '' });
+  restored.setWecomRuntime(true, '/synthetic/wecom/.env');
+  assert.deepEqual(restored.getWecomRuntime(), { enabled: true, configFile: '/synthetic/wecom/.env' });
+  assert.deepEqual(restored.integrityCheck().map(Object.values), [['ok']]);
 });
 
 test('invalid journal mode is rejected before runtime use', (t) => {
@@ -95,7 +113,7 @@ test('invalid journal mode is rejected before runtime use', (t) => {
   }), /Unsupported SQLite journal mode/u);
 });
 
-for (const version of [1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 25, 999]) {
+for (const version of [1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 26, 999]) {
   test(`schema ${version} is rejected without upgrading, resetting, or modifying stored data`, (context) => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sqlite-unsupported-'));
     const filePath = path.join(directory, 'state.sqlite');
@@ -106,7 +124,7 @@ for (const version of [1, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
       PRAGMA user_version = ${version};
     `));
     assert.throws(() => new StatePersistence({ filePath }),
-      /schema version .* is not supported; expected 24/u);
+      /schema version .* is not supported; expected 25/u);
     assert.equal(schemaVersion(filePath), version);
     withTestDatabase(filePath, (database) => {
       assert.deepEqual(database.prepare('SELECT value FROM retained_data').all().map(Object.values),

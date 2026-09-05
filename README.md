@@ -93,11 +93,11 @@ kintio wecom status
 kintio wecom logs --lines 100
 ```
 
-WeCom uses `~/.kintio/wecom/.env` and its own data, process, and logs. iLink keeps
-its existing `~/.kintio` data. Start or stop each channel independently; neither
-channel launches the other.
+WeCom uses `~/.kintio/wecom/.env`; iLink keeps its existing `~/.kintio` data.
+Both share one background runtime and SQLite database. Start or stop their
+listeners independently; their identities, authorization, and conversations stay isolated.
 
-`kintio wecom setup` creates a private instance under `~/.kintio/wecom`, installs the managed Agent
+`kintio wecom setup` creates private configuration under `~/.kintio/wecom`, installs the managed Agent
 skill, and writes the channel configuration template. Continue with the
 [setup guide](docs/setup.md) for callback credentials, authorization, and the first reply.
 

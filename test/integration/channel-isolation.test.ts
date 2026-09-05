@@ -5,12 +5,17 @@ import path from 'node:path';
 import { describe, it, vi } from 'vitest';
 
 import { runCli } from '../../src/cli.ts';
-import { loadConfig, loadIlinkRuntimeConfig } from '../../src/config.ts';
+import { loadConfig, loadSharedRuntimeConfig } from '../../src/config.ts';
 import { readIlinkAccountSnapshot } from '../../src/ilink/cli-accounts.ts';
-import { findMcpDescriptorFile, operatorMcpInstanceKey } from '../../src/mcp/ipc-protocol.ts';
+import { openIlinkOperatorControl, controlWecom, restartIlinkListeners } from '../../src/ilink/cli-login.ts';
+import { IlinkClient } from '../../src/ilink/protocol/client.ts';
+import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
+import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
+import { StatePersistence } from '../../src/state/persistence.ts';
+import { SqliteStore } from '../../src/state/sqlite-store.ts';
+import net from 'node:net';
 import { createRuntime } from '../../src/runtime.ts';
 import { WecomSync } from '../../src/services/wecom-sync.ts';
-import { KintioSupervisor } from '../../src/supervisor.ts';
 
 const logger = { info() {}, warn() {}, error() {} };
 
@@ -48,63 +53,98 @@ describe('independent WeCom and iLink channels', () => {
     }
   });
 
-  for (const stopped of ['wecom', 'ilink'] as const) {
-    it(`stopping ${stopped} leaves the other live runtime usable`, async (t) => {
-      const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-channel-live-'));
-      t.onTestFinished(() => fs.rm(profile, { recursive: true, force: true }));
-      vi.spyOn(WecomSync.prototype, 'catchUp').mockResolvedValue(undefined);
-      const wecomConfig = loadConfig({
-        homeDirectory: profile,
-        environment: {
-          WECOM_CORP_ID: 'ww-isolation-test', WECOM_KF_SECRET: 'test-only-secret',
-          ILINK_ENABLED: 'true', ILINK_STORAGE_KEY: 'invalid-but-unrelated',
-        },
-      });
-      const ilinkConfig = loadIlinkRuntimeConfig({
-        homeDirectory: profile,
-        environment: { PORT: 'invalid-but-unrelated', WECOM_CORP_ID: 'incomplete' },
-      });
-      assert.equal(wecomConfig.state.databaseFile, path.join(profile, '.kintio/wecom/data/kintio.sqlite'));
-      assert.equal(ilinkConfig.state.databaseFile, path.join(profile, '.kintio/data/kintio.sqlite'));
-      assert.notEqual(wecomConfig.state.lockFile, ilinkConfig.state.lockFile);
-      assert.notEqual(wecomConfig.codex.workingDirectory, ilinkConfig.codex.workingDirectory);
-      await assert.rejects(createRuntime({
-        config: { ...wecomConfig, ilink: ilinkConfig.ilink }, logger,
-      }), /exactly one channel/u);
 
-      const wecom = await createRuntime({ config: wecomConfig, logger });
-      const supervisor = new KintioSupervisor({
-        config: { ...wecomConfig, port: 0 }, runtime: wecom, logger,
-      });
-      t.onTestFinished(() => supervisor.close());
-      const ilink = await createRuntime({ config: ilinkConfig, logger });
-      t.onTestFinished(() => ilink.close());
-      const [{ port }] = await Promise.all([supervisor.start(), ilink.start()]);
-      assert.ok(wecom.messageProcessor);
-      assert.equal(ilink.messageProcessor, null);
-      await fs.access(wecomConfig.state.lockFile);
-      await fs.access(ilinkConfig.state.lockFile);
-      assert.throws(() => findMcpDescriptorFile(
-        path.dirname(wecomConfig.state.lockFile), operatorMcpInstanceKey(wecomConfig.state.lockFile),
-      ), /not running/u);
-      await assert.rejects(fs.access(path.join(path.dirname(wecomConfig.state.databaseFile), 'ilink-storage.key')), { code: 'ENOENT' });
-      await assert.rejects(fs.access(path.join(ilinkConfig.codex.workingDirectory, '.agents/skills/wechat-kf-reply-sop/SKILL.md')), { code: 'ENOENT' });
-
-      if (stopped === 'wecom') {
-        await supervisor.close();
-        await fs.access(ilinkConfig.state.lockFile);
-        const snapshot = await readIlinkAccountSnapshot({
-          config: ilinkConfig, packageRoot: path.resolve('.'), signal: new AbortController().signal,
-        });
-        assert.equal(snapshot.mode, 'runtime');
-        assert.deepEqual(snapshot.accounts, []);
-      } else {
-        await ilink.close();
-        await fs.access(wecomConfig.state.lockFile);
-        const response = await fetch('http://127.0.0.1:' + port + '/', { signal: AbortSignal.timeout(2_000) });
-        assert.equal(await response.text(), 'hello world');
-        assert.equal(supervisor.state, 'running');
-      }
+  it('shares one database and recovery pass while listeners start, stop, restart, and restore independently', async (t) => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-shared-runtime-'));
+    t.onTestFinished(() => fs.rm(home, { recursive: true, force: true }));
+    const probe = net.createServer();
+    await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+    const port = (probe.address() as net.AddressInfo).port;
+    await new Promise<void>((resolve) => probe.close(() => resolve()));
+    await fs.mkdir(path.join(home, 'wecom'), { mode: 0o700 });
+    await fs.writeFile(path.join(home, 'wecom/.env'), [
+      'PORT=' + port,
+      'WECOM_CALLBACK_TOKEN=TestCallback',
+      'WECOM_ENCODING_AES_KEY=abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
+      'WECOM_CORP_ID=ww-test', 'WECOM_KF_SECRET=synthetic-secret',
+    ].join('\n'), { mode: 0o600 });
+    const key = Buffer.alloc(32, 4).toString('base64url');
+    await fs.writeFile(path.join(home, '.env'), 'ILINK_STORAGE_KEY=' + key, { mode: 0o600 });
+    const config = loadSharedRuntimeConfig({ root: home, environment: {} });
+    const wecom = loadConfig({ root: home, environment: {} });
+    assert.equal(wecom.state.databaseFile, config.state.databaseFile);
+    assert.equal(wecom.state.lockFile, config.state.lockFile);
+    assert.notEqual(wecom.codex.workingDirectory, config.codex.workingDirectory);
+    const persistence = new StatePersistence({ filePath: config.state.databaseFile });
+    const accountKey = createIlinkAccountKey('shared-test@im.bot');
+    persistence.createIlinkStore().registerAccount({
+      providerAccountId: 'shared-test@im.bot', ownerPeerId: 'peer-test',
+      baseUrl: 'https://ilinkai.weixin.qq.com/', agentAccess: 'host', now: Date.now(),
+      encryptedBotToken: new IlinkSecretBox(key).seal('synthetic-token', {
+        secretKind: 'bot_token', accountId: accountKey, peerId: 'peer-test', generation: 1,
+      }),
     });
-  }
+    persistence.close();
+    vi.spyOn(WecomSync.prototype, 'catchUp').mockResolvedValue(undefined);
+    vi.spyOn(IlinkClient.prototype, 'getUpdates').mockImplementation(async (_cursor, { signal } = {}) => {
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) resolve();
+        else signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+      throw new Error('aborted synthetic poll');
+    });
+    const recovery = vi.spyOn(SqliteStore.prototype, 'recoverStartup');
+    const stopRequested = vi.fn();
+    let runtime = await createRuntime({ config, logger, onStopRequested: stopRequested });
+    t.onTestFinished(() => runtime.close());
+    await runtime.start();
+    assert.equal(recovery.mock.calls.length, 1);
+    assert.deepEqual(await controlWecom(config, path.resolve('.'), 'status'), { running: false });
+    await assert.rejects(fetch('http://127.0.0.1:' + port + '/', { signal: AbortSignal.timeout(500) }));
+    const operator = await openIlinkOperatorControl(config, path.resolve('.'), AbortSignal.timeout(10_000));
+    t.onTestFinished(() => operator.close());
+    const [account] = await operator.listAccounts();
+    assert.ok(account);
+    const revision = { generation: account.generation, incarnation: account.incarnation };
+    await operator.setAccountRuntime(account.accountKey, true, revision);
+    const ilinkImage = path.join(config.codex.imageTempDirectory, 'kintio-image-active');
+    const wecomOrphan = path.join(wecom.codex.imageTempDirectory, 'kintio-image-orphan');
+    await fs.mkdir(ilinkImage, { mode: 0o700 });
+    await fs.mkdir(wecomOrphan, { recursive: true, mode: 0o700 });
+    // Repeated/concurrent starts attach to the same singleton; no second bind or recovery.
+    await Promise.all([controlWecom(config, path.resolve('.'), 'start'), controlWecom(config, path.resolve('.'), 'start')]);
+    await fs.access(ilinkImage);
+    await fs.access(wecom.codex.imageTempDirectory);
+    await assert.rejects(fs.access(wecomOrphan), { code: 'ENOENT' });
+    assert.equal(await (await fetch('http://127.0.0.1:' + port + '/', { headers: { connection: 'close' } })).text(), 'hello world');
+    assert.equal(recovery.mock.calls.length, 1);
+    await controlWecom(config, path.resolve('.'), 'stop');
+    assert.equal(stopRequested.mock.calls.length, 0);
+    assert.equal((await operator.listAccounts())[0]?.runtimeEnabled, true);
+    await controlWecom(config, path.resolve('.'), 'start');
+    await restartIlinkListeners(config, path.resolve('.'));
+    assert.equal(recovery.mock.calls.length, 1);
+    assert.equal((await fetch('http://127.0.0.1:' + port + '/', { headers: { connection: 'close' } })).status, 200);
+    const errors: string[] = [];
+    const cli = { env: {}, packageRoot: path.resolve('.'), stdout() {}, stderr: (message: string) => errors.push(message) };
+    // Foreground runtimes expose the same operator control; CLI commands must not spawn a second worker.
+    assert.equal(await runCli(['wecom', 'start', '--home', home], cli), 0, errors.join(''));
+    assert.equal(await runCli(['ilink', 'restart', '--home', home], cli), 0, errors.join(''));
+    assert.equal(recovery.mock.calls.length, 1);
+    await operator.setAccountRuntime(account.accountKey, false, revision);
+    assert.equal(stopRequested.mock.calls.length, 0);
+    await operator.close();
+    // Whole-runtime shutdown preserves the desired state, unlike channel stop.
+    await runtime.close();
+    runtime = await createRuntime({ config, logger, onStopRequested: stopRequested });
+    await runtime.start();
+    assert.equal(recovery.mock.calls.length, 2);
+    assert.equal((await fetch('http://127.0.0.1:' + port + '/', { headers: { connection: 'close' } })).status, 200);
+    const snapshot = await readIlinkAccountSnapshot({ config, packageRoot: path.resolve('.'), signal: AbortSignal.timeout(5_000) });
+    assert.equal(snapshot.accounts[0]?.runtimeEnabled, false);
+    await assert.rejects(fs.access(path.join(config.codex.workingDirectory, '.agents/skills/wechat-kf-reply-sop/SKILL.md')));
+    await controlWecom(config, path.resolve('.'), 'stop');
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(stopRequested.mock.calls.length, 1);
+  });
 });

@@ -83,10 +83,9 @@ kintio wecom status
 kintio wecom logs --lines 100
 ```
 
-客服通道的配置位于 `~/.kintio/wecom/.env`，数据、进程和日志独立管理。iLink 继续使用
-现有的 `~/.kintio` 数据；两条通道分别启停，不会相互启动或停止。
+WeCom 通道的配置位于 `~/.kintio/wecom/.env`，iLink 沿用 `~/.kintio`。两条通道共用一套后台运行时和 SQLite 数据库，监听分别启停；身份、授权和对话仍然隔离。
 
-`kintio wecom setup` 会在 `~/.kintio/wecom` 下创建私有实例、安装 Agent Skill，并写入通道配置模板。
+`kintio wecom setup` 会在 `~/.kintio/wecom` 下创建私有配置、安装 Agent Skill，并写入通道配置模板。
 回调凭据、授权流程和首次回复见英文[部署指南](docs/setup.md)。
 
 ## 核心能力

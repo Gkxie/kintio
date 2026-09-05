@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test } from 'vitest';
 
 import { loadIlinkRuntimeConfig } from '../../src/config.ts';
-import { startIlinkCliRuntime } from '../../src/ilink/cli-start.ts';
+import { runWorker } from '../../src/runtime/run-worker.ts';
 
 function config() {
   return loadIlinkRuntimeConfig({
@@ -18,7 +18,7 @@ test('iLink start runs and drains a foreground runtime without Hono', async () =
   const events: string[] = [];
   const output: string[] = [];
   const controller = new AbortController();
-  const running = startIlinkCliRuntime({
+  const running = runWorker({
     config: config(),
     signal: controller.signal,
     stdout: (text) => output.push(text),
@@ -38,14 +38,14 @@ test('iLink start runs and drains a foreground runtime without Hono', async () =
   controller.abort();
   assert.equal(await running, 130);
   assert.deepEqual(events, ['start', 'stop', 'close']);
-  assert.match(output.join(''), /iLink runtime is active/u);
+  assert.match(output.join(''), /shared runtime is active/u);
 });
 
 test('background worker publishes readiness without terminal instructions', async () => {
   const controller = new AbortController();
   const output: string[] = [];
   let started = false;
-  const running = startIlinkCliRuntime({
+  const running = runWorker({
     background: true,
     config: config(),
     signal: controller.signal,
@@ -64,7 +64,7 @@ test('background worker publishes readiness without terminal instructions', asyn
   assert.equal(started, true);
   controller.abort();
   assert.equal(await running, 130);
-  assert.equal(output.join(''), 'Kintio iLink runtime is active.\n');
+  assert.equal(output.join(''), 'Kintio shared runtime is active.\n');
 });
 
 test('iLink worker control exposes the Runtime atomic idle gate', async () => {
@@ -72,7 +72,7 @@ test('iLink worker control exposes the Runtime atomic idle gate', async () => {
   const decisions = [false, true];
   let stopIfIdle: (() => boolean) | undefined;
   let calls = 0;
-  const running = startIlinkCliRuntime({
+  const running = runWorker({
     background: true,
     config: config(),
     signal: controller.signal,
@@ -106,12 +106,12 @@ test('iLink worker control exposes the Runtime atomic idle gate', async () => {
 test('stopping the last account closes a foreground iLink runtime successfully', async () => {
   const events: string[] = [];
   let requestStop: (() => void) | undefined;
-  const running = startIlinkCliRuntime({
+  const running = runWorker({
     config: config(),
     signal: new AbortController().signal,
     stdout() {},
-    create: async ({ onIlinkStopRequested }) => {
-      requestStop = onIlinkStopRequested;
+    create: async ({ onStopRequested }) => {
+      requestStop = onStopRequested;
       return {
         messageProcessor: null,
         async start() { events.push('start'); },
@@ -131,7 +131,7 @@ test('stopping the last account closes a foreground iLink runtime successfully',
 
 test('iLink start closes a runtime whose startup fails', async () => {
   const events: string[] = [];
-  await assert.rejects(() => startIlinkCliRuntime({
+  await assert.rejects(() => runWorker({
     config: config(),
     signal: new AbortController().signal,
     stdout() {},
@@ -154,7 +154,7 @@ test('a pre-aborted iLink start creates no runtime', async () => {
   const controller = new AbortController();
   controller.abort();
   let created = false;
-  assert.equal(await startIlinkCliRuntime({
+  assert.equal(await runWorker({
     config: config(),
     signal: controller.signal,
     stdout() {},
@@ -170,7 +170,7 @@ test('iLink start force-aborts after its bounded graceful shutdown', async () =>
   const base = config();
   const controller = new AbortController();
   const events: string[] = [];
-  const running = startIlinkCliRuntime({
+  const running = runWorker({
     config: {
       ...base,
       state: { ...base.state, shutdownTimeoutMs: 5 },
@@ -191,6 +191,6 @@ test('iLink start force-aborts after its bounded graceful shutdown', async () =>
   });
   await new Promise<void>((resolve) => setImmediate(resolve));
   controller.abort();
-  await assert.rejects(() => running, /Graceful iLink shutdown timed out/u);
+  await assert.rejects(() => running, /Graceful Kintio shutdown timed out/u);
   assert.deepEqual(events, ['start', 'stop', 'close', 'abort']);
 });
