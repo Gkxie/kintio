@@ -40,17 +40,13 @@ const NO_ACTION_MARKERS: ReadonlySet<string> = new Set([
   '[[TALKFERRY_NO_ADDITIONAL_ACTION]]',
   '[[HARNESS_NO_ADDITIONAL_ACTION]]',
 ]);
-const WECHAT_KF_TOOL_NAMES = [
-  ...SEND_TOOL_NAMES,
-  'offer_weixin_bot_channel',
-] as const;
 const CHANNEL_AGENT_PROFILES: Readonly<Record<ChatChannel, {
   readonly tools: readonly string[];
   readonly prompt: string;
 }>> = Object.freeze({
   wechat_kf: Object.freeze({
-    tools: WECHAT_KF_TOOL_NAMES,
-    prompt: 'Continue the personal conversation according to the user\'s explicit intent. Follow $wechat-kf-reply-sop and deliver the final response with the wechat_kf tools. Call offer_weixin_bot_channel only when the user clearly asks to establish or switch to an independent iLink Bot conversation; scanning its QR creates a separate identity and does not inherit authorization, thread, or history from this adapter.',
+    tools: SEND_TOOL_NAMES,
+    prompt: 'Continue the personal conversation according to the user\'s explicit intent. Follow $wechat-kf-reply-sop and deliver the final response with the wechat_kf tools.',
   }),
   weixin_ilink: Object.freeze({
     tools: Object.freeze(['send_text', 'send_image']),

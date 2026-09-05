@@ -14,18 +14,11 @@ import {
 import { ensurePrivateDirectory } from '../lib/private-directory.ts';
 
 const STAGED_IMAGE_PREFIX = 'kintio-image-';
-const LEGACY_STAGED_IMAGE_PREFIXES = [
-  'talkferry-image-',
-  'wechat-codex-image-',
-] as const;
 
 export function cleanupStagedImageOrphans(temporaryRoot: string): void {
   ensurePrivateDirectory(temporaryRoot);
   for (const entry of readdirSync(temporaryRoot, { withFileTypes: true })) {
-    if (
-      !entry.name.startsWith(STAGED_IMAGE_PREFIX) &&
-      !LEGACY_STAGED_IMAGE_PREFIXES.some((prefix) => entry.name.startsWith(prefix))
-    ) continue;
+    if (!entry.name.startsWith(STAGED_IMAGE_PREFIX)) continue;
     rmSync(path.join(temporaryRoot, entry.name), { recursive: true, force: true });
   }
 }

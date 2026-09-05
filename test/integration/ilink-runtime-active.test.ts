@@ -10,7 +10,7 @@ import type {
   AgentCompletion,
   AgentInput,
 } from '../../src/agent/runtime.ts';
-import { createConfig } from '../../src/config.ts';
+import { loadIlinkRuntimeConfig } from '../../src/config.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import {
@@ -93,13 +93,13 @@ async function fixture(t: TestContext) {
     prefix: 'ilink-active-runtime-',
   });
   const storageKey = Buffer.alloc(32, 41).toString('base64url');
-  const config = createConfig({
+  const config = loadIlinkRuntimeConfig({ environment: {
     WECOM_CALLBACK_TOKEN: 'RuntimeIlinkToken123',
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
     WECOM_CORP_ID: 'ww-ilink-runtime',
     WECOM_KF_SECRET: 'wecom-must-not-connect',
     WECOM_ALLOWED_USER_IDS: 'wm-unrelated-user',
-    WECOM_DB_FILE: temp.filePath,
+    KINTIO_DB_FILE: temp.filePath,
     CODEX_WORKING_DIRECTORY: `${temp.directory}/codex-workspace`,
     CODEX_IMAGE_TMP_DIR: `${temp.directory}/codex-images`,
     ILINK_ENABLED: 'true',
@@ -107,7 +107,7 @@ async function fixture(t: TestContext) {
     ILINK_API_TIMEOUT_MS: '5000',
     ILINK_LONG_POLL_TIMEOUT_MS: '120000',
     ILINK_MAX_ACCOUNTS: '2',
-  }, temp.directory);
+  }, root: temp.directory });
   const accounts = [account('one'), account('two')];
   const persistence = temp.openPersistence();
   const ilink = persistence.createIlinkStore();

@@ -1,9 +1,7 @@
 import {
-  KINTIO_PACKAGE_ROOT,
   loadIlinkRuntimeConfig,
 } from './src/config.ts';
 import { startIlinkCliRuntime } from './src/ilink/cli-start.ts';
-import { installManagedSkill } from './src/runtime/managed-skill.ts';
 import {
   CONTROL_TIMEOUT_MS,
   parseWorkerStopIfIdleRequest,
@@ -11,10 +9,6 @@ import {
 } from './src/runtime/daemon-protocol.ts';
 
 const config = loadIlinkRuntimeConfig();
-installManagedSkill({
-  packageRoot: KINTIO_PACKAGE_ROOT,
-  workingDirectory: config.codex.workingDirectory,
-});
 
 const controller = new AbortController();
 let resolveParentShutdown!: () => void;

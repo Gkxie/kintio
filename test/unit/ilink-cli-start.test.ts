@@ -23,7 +23,7 @@ test('iLink start runs and drains a foreground runtime without Hono', async () =
     signal: controller.signal,
     stdout: (text) => output.push(text),
     create: async ({ config: runtimeConfig }) => {
-      assert.equal(runtimeConfig.wecom, undefined);
+      assert.equal('wecom' in runtimeConfig, false);
       return {
         messageProcessor: null,
         async start() { events.push('start'); },

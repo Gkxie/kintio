@@ -32,47 +32,39 @@ function testConfig(
   return createConfig(environment, root, platform);
 }
 
-test('the generated instance config is safe before choosing a channel', () => {
+test('the generated instance config is specific to WeCom and safe before credentials are filled', () => {
   const environment = parseEnv(INSTANCE_CONFIG_TEMPLATE);
   const config = testConfig(environment);
 
   assert.equal(config.wecom.callbackToken, '');
   assert.equal(config.wecom.encodingAesKey, '');
   assert.equal(config.wecom.api.enabled, false);
-  assert.equal(config.ilink.enabled, false);
+  assert.equal('ilink' in config, false);
 });
 
 describe('independent channel activation', () => {
   it('allows iLink with no WeChat callback or KF API credentials', () => {
     const kintioDatabase = path.join(os.tmpdir(), 'kintio-test.sqlite');
-    const talkFerryDatabase = path.join(os.tmpdir(), 'talkferry-test.sqlite');
-    const config = testConfig({
-      ILINK_ENABLED: 'true',
+    const config = loadIlinkRuntimeConfig({ environment: {
       KINTIO_DB_FILE: kintioDatabase,
-      TALKFERRY_DB_FILE: talkFerryDatabase,
-    }, os.tmpdir());
+    }, root: os.tmpdir() });
 
-    assert.equal(config.wecom.api.enabled, false);
-    assert.equal(config.wecom.callbackToken, '');
-    assert.equal(config.wecom.encodingAesKey, '');
-    assert.equal(config.ilink.enabled, true);
+    assert.equal('wecom' in config, false);
+    assert.ok(config.ilink);
     assert.equal(config.codex.enabled, true);
     assert.equal(config.state.databaseFile, kintioDatabase);
     assert.equal(config.state.lockFile, path.join(os.tmpdir(), 'kintio.lock'));
   });
 
   it('does not infer iLink activation from WeChat KF credentials', () => {
-    assert.throws(() => testConfig({
-      WECOM_CORP_ID: 'ww-explicit-channel',
-      WECOM_KF_SECRET: 'secret',
-    }), /ILINK_ENABLED must be explicitly true or false/u);
     const config = testConfig({
       WECOM_CORP_ID: 'ww-explicit-channel',
       WECOM_KF_SECRET: 'secret',
-      ILINK_ENABLED: 'false',
+      ILINK_ENABLED: 'true',
+      ILINK_STORAGE_KEY: 'invalid-but-unrelated',
     });
     assert.equal(config.wecom.api.enabled, true);
-    assert.equal(config.ilink.enabled, false);
+    assert.equal('ilink' in config, false);
   });
 
   it('keeps callback credentials paired when the callback is enabled', () => {
@@ -104,12 +96,11 @@ test('source and compiled config resolve the same project root', () => {
 test('direct config loading defaults mutable state to the user instance', async (t) => {
   const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-default-profile-'));
   t.onTestFinished(() => fs.rm(profile, { recursive: true, force: true }));
-  const instance = path.join(profile, '.kintio');
+  const instance = path.join(profile, '.kintio', 'wecom');
   const config = loadConfig({ environment: {}, homeDirectory: profile });
 
   assert.equal(config.state.databaseFile, path.join(instance, 'data/kintio.sqlite'));
   assert.equal(config.state.lockFile, path.join(instance, 'data/kintio.lock'));
-  assert.equal(config.ilink.storageKeyFile, path.join(instance, 'data/ilink-storage.key'));
   assert.equal(config.codex.imageTempDirectory, path.join(instance, 'data/codex-input'));
   assert.equal(config.codex.workingDirectory, path.join(instance, 'codex-workspace'));
 });
@@ -136,7 +127,7 @@ test('standalone iLink config ignores unrelated callback settings and needs no f
   const enrollment = loadIlinkEnrollmentConfig({ environment: {}, envFile, root });
   assert.equal(enrollment.ilink.maxAccounts, 2);
   const runtime = loadIlinkRuntimeConfig({ environment: {}, envFile, root });
-  assert.equal(runtime.ilink.enabled, true);
+  assert.ok(runtime.ilink);
   assert.equal(runtime.ilink.maxAccounts, 2);
   assert.equal(runtime.codex.workingDirectory, path.join(root, 'agent-work'));
   assert.equal('wecom' in runtime, false);
@@ -160,7 +151,6 @@ test('an instance root owns relative config, state, cache, and workspace paths',
   assert.equal(config.state.lockFile, path.join(root, 'state/kintio.lock'));
   assert.equal(config.codex.workingDirectory, path.join(root, 'workspace'));
   assert.equal(config.codex.imageTempDirectory, path.join(root, 'cache/images'));
-  assert.equal(config.ilink.storageKeyFile, path.join(root, 'state/ilink-storage.key'));
 });
 
 test('Windows keeps Kintio state inside the instance without owning the Agent workspace', async (t) => {
@@ -177,10 +167,6 @@ test('Windows keeps Kintio state inside the instance without owning the Agent wo
 
   assert.equal(config.state.databaseFile, path.join(root, 'state/kintio.sqlite'));
   assert.equal(config.state.lockFile, path.join(root, 'state/kintio.lock'));
-  assert.equal(
-    config.ilink.storageKeyFile,
-    path.join(root, 'secrets/ilink-storage.key'),
-  );
   assert.equal(config.codex.imageTempDirectory, path.join(root, 'cache/images'));
   assert.equal(config.codex.workingDirectory, workspace);
 });
@@ -227,59 +213,27 @@ test('Windows environment names remain case-insensitive before file fallback', a
   assert.equal(config.port, process.platform === 'win32' ? 9000 : 9001);
 });
 
-test('fresh state uses Kintio names while an existing legacy database stays in place', () => {
+test('state paths use only Kintio defaults or the explicit database setting', () => {
   const root = path.join(os.tmpdir(), 'kintio-state-root');
-  const data = path.join(root, 'data');
-  const explicitKintio = path.join(os.tmpdir(), 'kintio-explicit', 'state.sqlite');
-  const explicitTalkFerry = path.join(os.tmpdir(), 'talkferry-explicit', 'state.sqlite');
-  assert.deepEqual(resolveStateFiles({}, root, () => false), {
-    databaseFile: path.join(data, 'kintio.sqlite'),
-    lockFile: path.join(data, 'kintio.lock'),
+  assert.deepEqual(resolveStateFiles({}, root), {
+    databaseFile: path.join(root, 'data/kintio.sqlite'),
+    lockFile: path.join(root, 'data/kintio.lock'),
   });
-  assert.deepEqual(resolveStateFiles({}, root, (filePath) =>
-    filePath === path.join(data, 'talkferry.sqlite')
-  ), {
-    databaseFile: path.join(data, 'talkferry.sqlite'),
-    lockFile: path.join(data, 'talkferry.lock'),
-  });
-  assert.deepEqual(resolveStateFiles({}, root, (filePath) =>
-    filePath === path.join(data, 'wecom.sqlite')
-  ), {
-    databaseFile: path.join(data, 'wecom.sqlite'),
-    lockFile: path.join(data, 'wecom.lock'),
-  });
-  assert.deepEqual(resolveStateFiles({
-    KINTIO_DB_FILE: explicitKintio,
-  }, root, () => true), {
-    databaseFile: explicitKintio,
-    lockFile: path.join(path.dirname(explicitKintio), 'kintio.lock'),
-  });
-  assert.deepEqual(resolveStateFiles({
-    TALKFERRY_DB_FILE: explicitTalkFerry,
-  }, root, () => false), {
-    databaseFile: explicitTalkFerry,
-    lockFile: path.join(path.dirname(explicitTalkFerry), 'talkferry.lock'),
+  assert.deepEqual(resolveStateFiles({ KINTIO_DB_FILE: 'custom/state.sqlite' }, root), {
+    databaseFile: path.join(root, 'custom/state.sqlite'),
+    lockFile: path.join(root, 'custom/kintio.lock'),
   });
 });
 
-test('state selection rejects ambiguous new and legacy databases', async (t) => {
-  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-state-selection-'));
+test('state selection does not discover or adopt databases with retired default names', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-current-state-'));
   t.onTestFinished(() => fs.rm(root, { recursive: true, force: true }));
   await fs.mkdir(path.join(root, 'data'));
-  await Promise.all([
-    fs.writeFile(path.join(root, 'data/kintio.sqlite'), ''),
-    fs.writeFile(path.join(root, 'data/talkferry.sqlite'), ''),
-    fs.writeFile(path.join(root, 'data/wecom.sqlite'), ''),
-  ]);
-  assert.throws(
-    () => resolveStateFiles({}, root),
-    /Multiple default state databases exist/u,
-  );
-  assert.deepEqual(resolveStateFiles({
-    KINTIO_DB_FILE: path.join(root, 'data/wecom.sqlite'),
-  }, root), {
-    databaseFile: path.join(root, 'data/wecom.sqlite'),
-    lockFile: path.join(root, 'data/wecom.lock'),
+  await Promise.all(['wecom.sqlite', 'talkferry.sqlite'].map((name) =>
+    fs.writeFile(path.join(root, 'data', name), 'untouched')));
+  assert.deepEqual(resolveStateFiles({}, root), {
+    databaseFile: path.join(root, 'data/kintio.sqlite'),
+    lockFile: path.join(root, 'data/kintio.lock'),
   });
 });
 
@@ -289,8 +243,7 @@ test('message processing remains disabled until CorpID and Secret are present', 
   assert.equal(config.port, 8888);
   assert.equal(config.wecom.api.enabled, false);
   assert.equal(config.codex.enabled, false);
-  assert.equal(config.ilink.enabled, false);
-  assert.equal(config.ilink.baseUrl, 'https://ilinkai.weixin.qq.com/');
+  assert.equal('ilink' in config, false);
   assert.equal(path.basename(config.codex.imageTempDirectory), 'codex-input');
   assert.equal(path.basename(path.dirname(config.codex.imageTempDirectory)), 'data');
   assert.equal(
@@ -341,30 +294,12 @@ test('allowed users and channel runtime defaults are parsed', () => {
   );
   assert.equal(config.codex.enabled, true);
   assert.equal(config.wecom.expectedReceiveId, 'ww-test');
-  assert.equal(config.ilink.enabled, true);
-  assert.equal(config.ilink.storageKey, 'i'.repeat(43));
-  assert.equal(config.ilink.longPollTimeoutMs, 35_000);
-  assert.equal(config.ilink.maxAccounts, 20);
 });
 
-test('legacy harness database alias remains compatible', () => {
-  const databaseFile = path.join(os.tmpdir(), 'legacy-kintio.sqlite');
-  const config = testConfig({
-    ILINK_ENABLED: 'true',
-    HARNESS_DB_FILE: databaseFile,
-  }, os.tmpdir());
-
-  assert.equal(config.state.databaseFile, databaseFile);
-  assert.equal(config.state.lockFile, path.join(os.tmpdir(), 'wecom.lock'));
-});
-
-test('TalkFerry configuration aliases remain compatible for upgrades', () => {
-  const databaseFile = path.join(os.tmpdir(), 'talkferry-state.sqlite');
-  const config = testConfig({
-    ILINK_ENABLED: 'true',
-    TALKFERRY_DB_FILE: databaseFile,
-  }, os.tmpdir());
-
-  assert.equal(config.state.databaseFile, databaseFile);
-  assert.equal(config.state.lockFile, path.join(os.tmpdir(), 'talkferry.lock'));
-});
+test.each(['HARNESS_DB_FILE', 'TALKFERRY_DB_FILE', 'WECOM_DB_FILE'])(
+  'retired %s does not configure Kintio state', (name) => {
+    const config = testConfig({ [name]: 'retired.sqlite' });
+    assert.equal(config.state.databaseFile, path.join(isolatedRoot, 'data/kintio.sqlite'));
+    assert.equal(config.state.lockFile, path.join(isolatedRoot, 'data/kintio.lock'));
+  },
+);

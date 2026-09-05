@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { test } from 'vitest';
 
-import { createConfig } from '../../src/config.ts';
+import { loadIlinkRuntimeConfig } from '../../src/config.ts';
 import {
   findMcpDescriptorFile,
   operatorMcpInstanceKey,
@@ -15,13 +15,14 @@ import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 test('iLink enrollment stays available when the Codex adapter is disabled', async (t) => {
   const temp = await createTempSqlite(t, { prefix: 'ilink-login-no-agent-' });
-  const config = createConfig({
+  const defaults = loadIlinkRuntimeConfig({ environment: {
     ILINK_ENABLED: 'true',
     ILINK_STORAGE_KEY: Buffer.alloc(32, 45).toString('base64url'),
     KINTIO_DB_FILE: temp.filePath,
     CODEX_ENABLED: 'false',
     CODEX_WORKING_DIRECTORY: path.join(temp.directory, 'agent-workspace'),
-  }, temp.directory);
+  }, root: temp.directory });
+  const config = { ...defaults, codex: { ...defaults.codex, enabled: false } };
   const logs: string[] = [];
   const runtime = await createRuntime({
     config,

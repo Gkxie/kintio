@@ -8,7 +8,7 @@ import { test, vi } from 'vitest';
 import type { TestContext } from 'vitest';
 
 import { createApp } from '../../src/app.ts';
-import { createConfig, type AppConfig } from '../../src/config.ts';
+import { createConfig, loadIlinkRuntimeConfig, type AppConfig } from '../../src/config.ts';
 import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { StatePersistence } from '../../src/state/persistence.ts';
@@ -29,7 +29,7 @@ function activeConfig(directory: string): AppConfig {
     WECOM_KF_SECRET: 'runtime-secret',
     ILINK_ENABLED: 'false',
     WECOM_ALLOWED_USER_IDS: 'wm-runtime',
-    WECOM_DB_FILE: path.join(directory, 'wecom.sqlite'),
+    KINTIO_DB_FILE: path.join(directory, 'wecom.sqlite'),
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
   }, directory);
@@ -77,19 +77,18 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
     })],
   });
   previousPersistence.close();
-  const config = createConfig({
-    ILINK_ENABLED: 'true',
-    HARNESS_DB_FILE: databaseFile,
+  const config = loadIlinkRuntimeConfig({ environment: {
+    KINTIO_DB_FILE: databaseFile,
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
-  }, directory);
+  }, root: directory });
   const runtime = await createRuntime({ config, logger });
   t.onTestFinished(() => runtime.close());
 
   assert.equal(runtime.messageProcessor, null);
   await runtime.start();
 
-  const app = createApp({ config, logger, messageProcessor: runtime.messageProcessor });
+  const app = createApp({ config: createConfig({}, directory), logger, messageProcessor: runtime.messageProcessor });
   const rootResponse = await app.request('/');
   assert.equal(await rootResponse.text(), 'hello world');
   assert.equal((await app.request('/', { method: 'POST' })).status, 404);

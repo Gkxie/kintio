@@ -4,6 +4,16 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- **Breaking:** move callback-channel commands under `kintio wecom` and remove
+  shared startup. WeCom keeps its own configuration, data, process, and logs in
+  `~/.kintio/wecom`; iLink continues using `~/.kintio` without moving existing
+  data. Manage iLink enrollment through `kintio ilink`; the WeCom invitation tool
+  is removed and iLink no longer installs the WeCom reply Skill.
+
+- Removed historical database migrations, retired configuration aliases, and
+  old daemon metadata support. Kintio now uses only its current data formats;
+  incompatible databases require a fresh instance and are never reset silently.
+
 - Reduced the npm artifact to runtime resources, generated new instance
   configuration directly inside the Kintio home, and published a Changelog
   that starts at the packaged version without repository-only headings

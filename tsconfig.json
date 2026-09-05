@@ -31,7 +31,7 @@
     "cli.ts",
     "daemon.ts",
     "ilink.ts",
-    "index.ts",
+    "wecom.ts",
     "mcp-relay.ts",
     "src/**/*.ts"
   ],

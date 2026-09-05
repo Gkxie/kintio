@@ -64,9 +64,10 @@ jobs:
             }
           }
           NODE
-          HOME="$RUNNER_TEMP/kintio-profile" "$RUNNER_TEMP/kintio-global/bin/kintio" setup
-          test -f "$RUNNER_TEMP/kintio-profile/.kintio/.env"
-          test -f "$RUNNER_TEMP/kintio-profile/.kintio/codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md"
+          HOME="$RUNNER_TEMP/kintio-profile" "$RUNNER_TEMP/kintio-global/bin/kintio" wecom setup
+          test -f "$RUNNER_TEMP/kintio-profile/.kintio/wecom/.env"
+          test -f "$RUNNER_TEMP/kintio-profile/.kintio/wecom/codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md"
+          test ! -e "$RUNNER_TEMP/kintio-profile/.kintio/.env"
 
   platform-tests:
     name: Tests (${{ matrix.os }})
