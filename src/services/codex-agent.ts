@@ -6,8 +6,6 @@ import type {
   AgentCompletion,
   AgentImageArtifact,
   AgentInput,
-  AgentMediaCapability,
-  AgentMessage,
   AgentSubmission,
   HistoryInspection,
 } from '../agent/runtime.ts';
@@ -35,11 +33,6 @@ import {
 
 const MAX_CONTEXT_CHARACTERS = 16_000;
 const NO_ACTION_MARKER = '[[KINTIO_NO_ADDITIONAL_ACTION]]';
-const NO_ACTION_MARKERS: ReadonlySet<string> = new Set([
-  NO_ACTION_MARKER,
-  '[[TALKFERRY_NO_ADDITIONAL_ACTION]]',
-  '[[HARNESS_NO_ADDITIONAL_ACTION]]',
-]);
 const CHANNEL_AGENT_PROFILES: Readonly<Record<ChatChannel, {
   readonly tools: readonly string[];
   readonly prompt: string;
@@ -102,15 +95,10 @@ interface AgentOptions {
 interface ActiveState {
   readonly thread: CodexThread;
   readonly primaryMessageKey: string;
-  latestMessage: AgentMessage;
   latestClientInputId: string;
-  mediaCatalog: readonly AgentMediaCapability[];
   rawCompletion?: Promise<CodexTurnResult>;
   completion?: Promise<AgentCompletion>;
   pendingSteer?: Promise<void>;
-  imageRequested: boolean;
-  hasImageInput: boolean;
-  imageRetryUsed: boolean;
   finishing: boolean;
   toolSessionToken: string;
   publishArtifact?: AgentInput['publishArtifact'];
@@ -384,21 +372,10 @@ function containsClientId(value: unknown, clientId: string): boolean {
   return Object.values(record).some((child) => containsClientId(child, clientId));
 }
 
-function requestsImageGeneration(message: AgentMessage): boolean {
-  const text = `${message.text}\n${message.summary}`;
-  const hasImageSubject =
-    /(?:图|图片|照片|画面|人物|脸|头发|表情|背景|构图)/u.test(text) ||
-    /\b(?:image|photo|picture|portrait|face|hair|expression|background|composition)\b/iu.test(text);
-  const hasGenerationAction =
-    /(?:生成|创作|编辑|修改|调整|替换|移除|添加|融合|合成|换)/u.test(text) ||
-    /\b(?:generate|create|edit|modify|adjust|replace|remove|add|blend|merge|swap)\b/iu.test(text);
-  return hasImageSubject && hasGenerationAction;
-}
-
 function choseNoAction(result: CodexTurnResult): boolean {
   return result.items.some((item) =>
     item.type === 'agentMessage' &&
-    NO_ACTION_MARKERS.has(String(item.text || '').trim()),
+    String(item.text || '').trim() === NO_ACTION_MARKER,
   );
 }
 
@@ -524,30 +501,6 @@ export class CodexAgent {
     if (state.allowNoAction && choseNoAction(result)) {
       return { decision: 'no_action' };
     }
-    if (state.imageRequested && state.hasImageInput && !state.imageRetryUsed) {
-      state.imageRetryUsed = true;
-      const retry = await thread.startRun(
-        'The participant explicitly requested image generation or editing, and this turn includes image input. Perform image generation only and wait for the host runtime to register an artifact; do not send placeholder text first.',
-        { clientUserMessageId: `${state.latestClientInputId}-image-retry` },
-      );
-      const retryResult = await retry.completion;
-      const retryImage = await generatedCandidate(
-        retryResult,
-        this.#channelConfig(state.toolServer).generatedImageDirectory,
-      );
-      const retryAttempts = executedAttemptIds(retryResult, state.toolServer);
-      if (retryImage) {
-        return {
-          executedAttemptIds: [...new Set([
-            ...retryAttempts,
-            ...await this.#sendArtifact(thread, retryImage, state),
-          ])],
-        };
-      }
-      if (retryAttempts.length) {
-        return { executedAttemptIds: retryAttempts };
-      }
-    }
     const correction = `No deliverable message has been sent. Use the ${state.toolServer} tools now to complete the response.`;
     const retry = await thread.startRun(correction, {
       clientUserMessageId: `${state.latestClientInputId}-format-retry`,
@@ -586,17 +539,12 @@ export class CodexAgent {
   }
 
   async #start(input: AgentInput): Promise<Extract<AgentSubmission, { kind: 'started' }>> {
-    const { message, mediaCatalog = [] } = input;
+    const { message } = input;
     const { key, thread } = await this.#thread(input);
     const state: ActiveState = {
       thread,
       primaryMessageKey: message.messageKey,
-      latestMessage: message,
       latestClientInputId: input.clientInputId || message.messageKey,
-      mediaCatalog,
-      imageRequested: requestsImageGeneration(message),
-      hasImageInput: Boolean(input.resolvedMedia?.length),
-      imageRetryUsed: false,
       finishing: false,
       toolSessionToken: input.toolSessionToken,
       allowNoAction: input.allowNoAction === true,
@@ -652,14 +600,10 @@ export class CodexAgent {
   ): Promise<Extract<AgentSubmission, { kind: 'steered' }>> {
     const { message } = input;
     if (state.finishing) throw new Error('Codex active turn already completed');
-    state.latestMessage = message;
     state.latestClientInputId = input.clientInputId || message.messageKey;
-    state.mediaCatalog = input.mediaCatalog || state.mediaCatalog;
     state.toolSessionToken = input.toolSessionToken;
     state.publishArtifact = input.publishArtifact || state.publishArtifact;
     state.allowNoAction = input.allowNoAction === true;
-    state.imageRequested ||= requestsImageGeneration(message);
-    state.hasImageInput ||= Boolean(input.resolvedMedia?.length);
     const confirmed = deferred<string>();
     state.pendingSteer = confirmed.promise.then(() => undefined, () => undefined);
     const steeringOperation = this.#withImages(

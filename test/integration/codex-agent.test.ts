@@ -524,7 +524,7 @@ test('generated cleanup rejects symlinked roots and escape components', async (t
   await fs.access(linkedFile);
 });
 
-test('explicit image edit discards premature failure text and forces exactly one generation retry', async (t) => {
+test('an image produced after generic delivery correction is still registered and sent', async (t) => {
   const png = Buffer.from('89504e470d0a1a0a03030303', 'hex');
   const boundary = new FakeBoundary([
     { items: [{ id: 'premature-text', type: 'agentMessage', status: 'completed', text: '图片处理失败' }] },
@@ -562,11 +562,16 @@ test('explicit image edit discards premature failure text and forces exactly one
   assert.deepEqual(completed.executedAttemptIds, ['sa_retried_image']);
   assert.deepEqual(published, [png]);
   assert.equal(boundary.runCalls.length, 3);
-  assert.match(String(boundary.runCalls[1]?.input), /image generation.*host runtime.*artifact/isu);
+  assert.match(String(boundary.runCalls[1]?.input), /No deliverable message has been sent/u);
+  assert.doesNotMatch(String(boundary.runCalls[1]?.input), /image generation only/u);
   assert.match(String(boundary.runCalls[2]?.input), /artifact:0.*send_image/su);
 });
 
-test('image descriptions do not treat action substrings as generation intent', async (t) => {
+test.for([
+  'Describe the image address shown here.',
+  'Do not edit this photo; only describe its content.',
+  '这张照片不要修改，只分析内容。',
+])('missing delivery is corrected without overriding image intent: %s', async (text, t) => {
   const png = Buffer.from('89504e470d0a1a0a03030303', 'hex');
   const boundary = new FakeBoundary([
     { items: [{ id: 'draft', type: 'agentMessage', text: 'draft' }] },
@@ -576,10 +581,10 @@ test('image descriptions do not treat action substrings as generation intent', a
   const submission = await agent.submit(agentInput('im-image-description', {
     message: {
       ...message('im-image-description'),
-      text: 'Describe the image address shown here.',
-      summary: 'Describe the image address shown here.',
+      text,
+      summary: text,
     },
-    contextText: 'Describe the image address shown here.',
+    contextText: text,
     resolvedMedia: [{ kind: 'image', bytes: png, contentType: 'image/png' }],
   }));
   assert.equal(submission.kind, 'started');
@@ -714,38 +719,57 @@ test('history inspection joins generated output with its later artifact send tur
   assert.deepEqual(inspection.executedAttemptIds, ['sa_history_image']);
 });
 
-test('current and legacy recovery no-action markers finish without another tool call', async (t) => {
-  for (const marker of [
-    '[[KINTIO_NO_ADDITIONAL_ACTION]]',
-    '[[TALKFERRY_NO_ADDITIONAL_ACTION]]',
-    '[[HARNESS_NO_ADDITIONAL_ACTION]]',
-  ]) {
-    const boundary = new FakeBoundary([{
-      items: [{
-        id: 'no-action',
-        type: 'agentMessage',
-        status: 'completed',
-        text: marker,
-      }],
-    }]);
+test('the current no-action marker requires host-confirmed terminal channel facts', async (t) => {
+  const noAction = {
+    items: [{ type: 'agentMessage', text: '[[KINTIO_NO_ADDITIONAL_ACTION]]' }],
+  };
+  for (const allowNoAction of [false, true]) {
+    const boundary = new FakeBoundary([
+      noAction,
+      { items: [executedText('required-reply', 'sa_required_reply', 2)] },
+    ]);
     const agent = createAgent(t, boundary);
-    const submission = await agent.submit(agentInput(`no-action-${marker}`, {
-      contextText: '恢复已有渠道事实',
-      allowNoAction: true,
-    }));
+    const submission = await agent.submit(agentInput('no-action', { allowNoAction }));
     assert.equal(submission.kind, 'started');
     if (submission.kind !== 'started') continue;
-    assert.deepEqual(await submission.completion, {
-      decision: 'no_action',
-    });
-    assert.equal(boundary.runCalls.length, 1);
+    assert.deepEqual(await submission.completion, allowNoAction
+      ? { decision: 'no_action' }
+      : { executedAttemptIds: ['sa_required_reply'] });
+    assert.equal(boundary.runCalls.length, allowNoAction ? 1 : 2);
   }
 });
 
-test('performs at most one format retry', async (t) => {
+test.for([
+  '[[TALKFERRY_NO_ADDITIONAL_ACTION]]',
+  '[[HARNESS_NO_ADDITIONAL_ACTION]]',
+])('obsolete no-action markers do not bypass delivery: %s', async (marker, t) => {
+  const boundary = new FakeBoundary([
+    { items: [{ type: 'agentMessage', text: marker }] },
+    { items: [executedText('reply', 'sa_required_reply', 2)] },
+  ]);
+  const agent = createAgent(t, boundary);
+  const submission = await agent.submit(agentInput('old-no-action', { allowNoAction: true }));
+  assert.equal(submission.kind, 'started');
+  if (submission.kind !== 'started') return;
+  assert.deepEqual(await submission.completion, { executedAttemptIds: ['sa_required_reply'] });
+  assert.equal(boundary.runCalls.length, 2);
+});
+
+test.for([false, true])('performs at most one delivery correction, with image input: %s', async (withImage, t) => {
   const boundary = new FakeBoundary([{ items: [] }, { items: [] }]);
   const agent = createAgent(t, boundary);
-  const submission = await agent.submit(agentInput('im-retry', { contextText: '请回答' }));
+  const text = '请编辑这张图片';
+  const submission = await agent.submit(agentInput('im-retry', {
+    contextText: text,
+    message: { ...message('im-retry'), text, summary: text },
+    ...(withImage ? {
+      resolvedMedia: [{
+        kind: 'image' as const,
+        bytes: Buffer.from('89504e470d0a1a0a03030303', 'hex'),
+        contentType: 'image/png',
+      }],
+    } : {}),
+  }));
   assert.equal(submission.kind, 'started');
   if (submission.kind !== 'started') return;
   await assert.rejects(
