@@ -14,7 +14,12 @@ type Fixture = {
   files: { filename: string; status: string }[];
 };
 
-function verify(t: TestContext, boundary: Boundary, change: (fixture: Fixture) => void = () => {}) {
+function verify(
+  t: TestContext,
+  boundary: Boundary,
+  change: (fixture: Fixture) => void = () => {},
+  lineEnding?: '\n' | '\r\n',
+) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'kintio-release-boundary-'));
   t.onTestFinished(() => fs.rmSync(directory, { recursive: true, force: true }));
   const manifest = (version: string) => JSON.stringify({ name: '@kin-tio/cli', version, type: 'module' });
@@ -55,8 +60,9 @@ function verify(t: TestContext, boundary: Boundary, change: (fixture: Fixture) =
     },
     base: { 'package.json': manifest('0.6.1'), 'src/version.ts': runtime('0.6.1') },
   };
-  const workflow = fs.readFileSync(`.github/workflows/${boundary}.yml`, 'utf8');
-  const module = /node --input-type=module <<'NODE'\n([\s\S]*?)\n\s+NODE/u.exec(workflow)?.[1];
+  const source = fs.readFileSync(`.github/workflows/${boundary}.yml`, 'utf8');
+  const workflow = lineEnding ? source.replaceAll('\r\n', '\n').replaceAll('\n', lineEnding) : source;
+  const module = /node --input-type=module <<'NODE'\n([\s\S]*?)\n\s+NODE/u.exec(workflow.replaceAll('\r\n', '\n'))?.[1];
   assert.ok(module, `missing ${boundary} validation module`);
   const bootstrap = `
     const fixture = ${JSON.stringify({ files: fixture.files, pull, contents, repository, sha, baseSha })};
@@ -111,6 +117,13 @@ function verify(t: TestContext, boundary: Boundary, change: (fixture: Fixture) =
 }
 
 for (const boundary of ['release-pr', 'release'] as const) {
+  for (const [name, lineEnding] of [['LF', '\n'], ['CRLF', '\r\n']] as const) {
+    test(`${boundary} validation executes from a ${name} workflow checkout`, (t) => {
+      const { result } = verify(t, boundary, undefined, lineEnding);
+      assert.equal(result.status, 0, result.stderr || result.stdout);
+    });
+  }
+
   test(`${boundary} executes shared validation from its checked-out source with synthetic GitHub results`, (t) => {
     const { result, directory } = verify(t, boundary);
     assert.equal(result.status, 0, result.stderr || result.stdout);
