@@ -116,15 +116,9 @@ only to make a direct PR look issue-driven.
 - Every PR must explain the problem, observable result, verification, and
   compatibility impact. Use `Refs` for issues that remain open until release.
 - `Quality`, `Unit, integration, recovery, security`, and `gitleaks` must pass.
-- An Owner-authored, same-repository, non-draft PR that changes the Agent,
-  prompt/Skill, MCP, runtime, state, or real-evaluation boundary automatically
-  queues `Real Codex validation`. Review the exact diff, then explicitly approve
-  the `codex-eval` Environment deployment; its API key is unavailable before
-  approval. Forks, bots, and other authors must remain ineligible. The workflow
-  must use `pull_request`, never `pull_request_target`. For a deliberate smoke
-  test outside a PR, dispatch the same workflow on `master` or a `codex/*`
-  branch. The Environment's selected branch policies are `master`, `codex/*`,
-  and `refs/pull/*/merge`.
+- Ordinary pull requests run deterministic tests only. The optional hosted real
+  Codex check belongs to the Release PR flow described below; it has no manual
+  dispatch or ordinary-PR trigger.
 - A CODEOWNER reviews external contributions. A sole maintainer cannot approve
   their own PR, but their changes must still pass the same automated checks.
 - Use squash merge and delete the source branch after merging. The PR title must
@@ -261,6 +255,17 @@ proves an owner-merged Release PR. Expose the private key only to the trusted
    check, including `Release plan`, CI, CodeQL, Dependency Review, CLA, and
    Gitleaks. Do not edit the bot-owned branch; correct source notes through an
    ordinary pull request instead.
+   `Release Codex validation` is optional, not a release requirement. It accepts
+   only a non-draft, same-repository `release/next` PR authored by
+   `kintio-release[bot]`, with the event initiated by that bot or the owner. Its
+   `pull_request_target` job runs the validator from the trusted base commit
+   without secrets and checks the candidate's exact three-file plan. Only then
+   can `Approved Release Codex smoke test` request the `codex-eval` Environment.
+   Review the bound commit and explicitly approve that deployment if a real
+   smoke test is wanted; keep required reviewers enabled and administrator bypass
+   disabled. The API key is unavailable before approval. New commits and title
+   corrections revalidate the candidate; body-only edits do not replace pending
+   approval. Rerunning an old workflow attempt is ineligible.
 4. Squash Merge the Release PR. That owner merge is the sole human release
    authorization. The `Release PR` workflow independently verifies the bot
    identity, fixed branch, title, changed-file allowlist, package and runtime
