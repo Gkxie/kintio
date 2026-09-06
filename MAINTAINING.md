@@ -263,9 +263,12 @@ proves an owner-merged Release PR. Expose the private key only to the trusted
    can `Approved Release Codex smoke test` request the `codex-eval` Environment.
    Review the bound commit and explicitly approve that deployment if a real
    smoke test is wanted; keep required reviewers enabled and administrator bypass
-   disabled. The API key is unavailable before approval. New commits and title
-   corrections revalidate the candidate; body-only edits do not replace pending
-   approval. Rerunning an old workflow attempt is ineligible.
+   disabled. The API key is unavailable before approval. New source commits
+   replace the preceding candidate approval. Title and description edits do not
+   trigger this workflow or alter its checks/approval; the required `Release
+   plan` check independently revalidates titles. This keeps an initially stale
+   title from blocking source validation while the bot updates PR metadata.
+   Rerunning an old workflow attempt is ineligible.
 4. Squash Merge the Release PR. That owner merge is the sole human release
    authorization. The `Release PR` workflow independently verifies the bot
    identity, fixed branch, title, changed-file allowlist, package and runtime

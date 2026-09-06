@@ -251,7 +251,8 @@ test('repository workflows preserve executable security boundaries', async () =>
   const releaseCodex = workflows.get('.github/workflows/release-codex.yml') || '';
   assert.match(releaseCodex, /^  pull_request_target:\n    branches: \[master\]$/mu);
   assert.doesNotMatch(releaseCodex, /^  (?:pull_request|push|workflow_dispatch|schedule):/mu);
-  assert.match(releaseCodex, /types: \[opened, synchronize, reopened, ready_for_review, edited\]/u);
+  assert.match(releaseCodex, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
+  assert.doesNotMatch(releaseCodex, /github\.event\.changes|PR_TITLE:/u);
   for (const file of ['CHANGELOG.md', 'package.json', 'src/version.ts']) {
     assert.match(
       releaseCodex,
@@ -283,7 +284,7 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(authorizeJob, /path: candidate/u);
   assert.match(authorizeJob, /working-directory: candidate/u);
   assert.match(authorizeJob, /test "\$\(git rev-parse HEAD\)" = "\$HEAD_SHA"/u);
-  assert.match(authorizeJob, /\.\.\/trusted\/\.github\/scripts\/reconcile-release\.ts verify/u);
+  assert.match(authorizeJob, /\.\.\/trusted\/\.github\/scripts\/reconcile-release\.ts verify-source$/mu);
   assert.match(authorizeJob, /authorized=true\\nhead_sha=%s\\n/u);
   assert.match(validateJob, /needs: authorize/u);
   assert.match(validateJob, /if: needs\.authorize\.outputs\.authorized == 'true'/u);
