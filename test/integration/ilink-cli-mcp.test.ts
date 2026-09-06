@@ -88,7 +88,7 @@ test('non-TTY QR output reaches the Worker through private local MCP and cleans 
       begin() {
         calls.begin += 1;
         if (calls.begin > 1) throw new Error('iLink account limit reached');
-        return manager.offer({ kind: 'terminal' });
+        return manager.offer({ kind: 'terminal', sessionId: 'terminal-test' });
       },
       status(offerId) {
         calls.status += 1;

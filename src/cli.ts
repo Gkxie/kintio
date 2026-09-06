@@ -24,7 +24,7 @@ import {
   ensurePrivateDirectory,
 } from './lib/private-directory.ts';
 import { runIlinkCliLogin } from './ilink/cli-login.ts';
-import { controlWecom, hasRuntimeOperator, restartIlinkListeners } from './runtime/operator-client.ts';
+import { controlWecom, hasRuntimeOperator, restartIlinkListeners, RuntimeOperatorClient, type IlinkOperatorControl } from './runtime/operator-client.ts';
 import {
   readIlinkAccountSnapshot,
   resolveIlinkAccount,
@@ -103,6 +103,10 @@ interface CliRuntime {
   readonly stdoutIsTTY: boolean;
   readonly stdoutColumns: number;
   readonly ilinkLogin: typeof runIlinkCliLogin;
+  readonly ilinkConnect: (
+    config: Parameters<typeof RuntimeOperatorClient.connect>[0],
+    packageRoot: string,
+  ) => Promise<IlinkOperatorControl>;
   readonly ilinkAccount: typeof runIlinkAccountCommand;
   readonly ilinkSnapshot: typeof readIlinkAccountSnapshot;
   readonly ilinkPickAccount: typeof pickIlinkAccount;
@@ -193,6 +197,9 @@ Connect one iLink account, save its encrypted credentials, and exit. This
 command does not require setup, an environment file, Hono, or a running Kintio
 instance. By default, the QR code is rendered directly in an interactive
 terminal and expires after five minutes.
+Login reuses or starts the shared background owner. Other terminals can log in
+or manage channels while this terminal waits. With no active channel, the owner
+exits after the final login connection closes.
 
 The PNG option is required when stdout is not an interactive terminal. Whoever
 scans this locally issued QR receives the capabilities allowed by the host Agent
@@ -403,6 +410,7 @@ function runtimeDefaults(): CliRuntime {
     stdoutIsTTY: Boolean(process.stdout.isTTY),
     stdoutColumns: process.stdout.columns || 80,
     ilinkLogin: runIlinkCliLogin,
+    ilinkConnect: RuntimeOperatorClient.connect,
     wecomControl: controlWecom,
     ilinkRestart: restartIlinkListeners,
     ilinkAccount: runIlinkAccountCommand,
@@ -658,22 +666,28 @@ function assertDaemonInstance(
 async function withLifecycleLock<T>(
   location: InstanceLocation,
   task: () => Promise<T>,
+  waitSignal?: AbortSignal,
 ): Promise<T> {
   const dataDirectory = ensureContainedDirectory(
     location.home,
     path.join(location.home, 'data'),
   );
   let lock;
-  try {
-    lock = acquireSingleInstanceLock({
-      filePath: path.join(dataDirectory, 'lifecycle.lock'),
-      hasActiveDatabaseOwner: () => false,
-    });
-  } catch (error: unknown) {
-    if (error instanceof SingleInstanceLockError) {
-      throw new Error('Another Kintio lifecycle command is already running');
+  const deadline = Date.now() + 30_000;
+  while (!lock) {
+    waitSignal?.throwIfAborted();
+    try {
+      lock = acquireSingleInstanceLock({
+        filePath: path.join(dataDirectory, 'lifecycle.lock'),
+        hasActiveDatabaseOwner: () => false,
+      });
+    } catch (error: unknown) {
+      if (!(error instanceof SingleInstanceLockError)) throw error;
+      if (!waitSignal || Date.now() >= deadline) {
+        throw new Error('Another Kintio lifecycle command is already running');
+      }
+      await delay(50, undefined, { signal: waitSignal });
     }
-    throw error;
   }
   try {
     return await task();
@@ -915,21 +929,13 @@ async function startIlinkDaemonLocked(
 
 async function rollbackEmptyIlinkDaemonLocked(
   location: InstanceLocation,
-  runtime: CliRuntime,
-  config: ReturnType<typeof loadIlinkEnrollmentConfig>,
   started: { readonly created: boolean; readonly runId: string },
 ): Promise<void> {
   if (!started.created) return;
   const record = readDaemonRecord(location.home);
   if (!record || record.mode !== 'shared' || record.runId !== started.runId) return;
-  const snapshot = await runtime.ilinkSnapshot({
-    config,
-    packageRoot: runtime.packageRoot,
-    signal: AbortSignal.timeout(5_000),
-  });
-  if (snapshot.accounts.some((account) => account.runtimeEnabled)) return;
-  if ((await runtime.wecomControl(config, runtime.packageRoot, 'status')).running) return;
-  await stopDaemon(location, DAEMON_STOP_TIMEOUT_MS);
+  const decision = await requestControl(location.home, 'stop-if-unused', undefined, undefined, started.runId);
+  if (decision.idle) await waitForDaemonStopped(location, DAEMON_STOP_TIMEOUT_MS, started.runId);
 }
 
 async function waitUntilRunning(
@@ -961,34 +967,23 @@ async function waitUntilRunning(
   );
 }
 
-async function stopDaemon(
-  location: InstanceLocation,
-  timeoutMs: number,
-): Promise<number> {
-  const record = readDaemonRecord(location.home);
-  if (!record) return 0;
-  await requestControl(location.home, 'stop');
-  await waitForDaemonStopped(location, timeoutMs);
-  return 0;
-}
-
 async function waitForDaemonStopped(
   location: InstanceLocation,
   timeoutMs: number,
+  expectedRunId?: string,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   const daemonLock = path.join(location.home, 'data/daemon.lock');
-  while (
-    Date.now() < deadline &&
-    (readDaemonRecord(location.home) || fs.existsSync(daemonLock))
-  ) {
+  while (true) {
+    const record = readDaemonRecord(location.home);
+    if (expectedRunId !== undefined && record && record.runId !== expectedRunId) return;
+    if (!record && !fs.existsSync(daemonLock)) return;
+    if (Date.now() >= deadline) {
+      throw new Error('Kintio daemon did not stop within the shutdown budget');
+    }
     const waitMs = Math.min(50, deadline - Date.now());
     if (waitMs > 0) await delay(waitMs);
   }
-  if (readDaemonRecord(location.home) || fs.existsSync(daemonLock)) {
-    throw new Error('Kintio daemon did not stop within the shutdown budget');
-  }
-  removeDaemonMetadata(location);
 }
 
 type PendingKintioUpdate = Extract<
@@ -1494,6 +1489,7 @@ async function runConfiguredIlinkLogin(
   config: ReturnType<typeof loadIlinkEnrollmentConfig>,
   signal: AbortSignal,
   qrOutputPath?: string,
+  control?: () => Promise<IlinkOperatorControl>,
 ): Promise<number> {
   return await runtime.ilinkLogin({
     config,
@@ -1502,6 +1498,7 @@ async function runConfiguredIlinkLogin(
     stdoutIsTTY: runtime.stdoutIsTTY,
     stdoutColumns: runtime.stdoutColumns,
     ...(qrOutputPath ? { qrOutputPath } : {}),
+    ...(control ? { control } : {}),
     signal,
   });
 }
@@ -1632,213 +1629,286 @@ export async function runCli(
       const foreground = Boolean(parsed.values.foreground);
       const interactive = runtime.stdinIsTTY && runtime.stdoutIsTTY;
       const operation = () => runWithIlinkSignals(async (signal) => {
-        let automaticLoginSucceeded = false;
-        let preserveErrorAfterAbort = false;
-        try {
-          const enrollmentConfig = loadIlinkEnrollmentConfig({
-            environment: { ...runtime.env },
-            envFile: location.configFile,
-            root: location.home,
-          });
-          if (subcommand === 'login') {
-            return await runConfiguredIlinkLogin(
-              runtime,
-              enrollmentConfig,
-              signal,
-              qrOutputPath,
-            );
-          }
-          if (subcommand === 'list') {
-            await runtime.ilinkAccount({
-              command: 'list',
-              config: enrollmentConfig,
-              packageRoot: runtime.packageRoot,
-              signal,
-              stdout: runtime.stdout,
-            });
-            return 0;
-          }
-
-          let snapshot = await runtime.ilinkSnapshot({
-            config: enrollmentConfig,
-            packageRoot: runtime.packageRoot,
-            signal,
-          });
-          const selector = parsed.values.account;
-          if (
-            subcommand === 'start' &&
-            !selector &&
-            snapshot.accounts.length === 0
-          ) {
-            if (!interactive) {
-              throw new Error(
-                'No iLink account is enrolled; run "kintio ilink login" first',
-              );
-            }
-            const login = () => runConfiguredIlinkLogin(
-              runtime,
-              enrollmentConfig,
-              signal,
-            );
-            const loginResult = foreground
-              ? await login()
-              : await withLifecycleLock(location, login);
-            if (loginResult !== 0) return loginResult;
-            signal.throwIfAborted();
-            automaticLoginSucceeded = true;
-            snapshot = await runtime.ilinkSnapshot({
-              config: enrollmentConfig,
-              packageRoot: runtime.packageRoot,
-              signal,
-            });
-            if (snapshot.accounts.length === 0) {
-              throw new Error('iLink login completed without enrolling an account');
-            }
-          }
-
-          if (
-            subcommand === 'delete' &&
-            !interactive &&
-            (!selector || !parsed.values.yes)
-          ) {
-            throw new Error(
-              'Non-interactive iLink deletion requires --account and --yes',
-            );
-          }
-          const selected = selector || snapshot.accounts.length <= 1 || !interactive
-            ? resolveIlinkAccount(
-                snapshot.accounts,
-                selector,
-                snapshot.mode === 'runtime',
-              )
-            : await runtime.ilinkPickAccount({
-                accounts: snapshot.accounts,
-                command: subcommand as 'start' | 'stop' | 'delete',
-                runtimeActive: snapshot.mode === 'runtime',
-                signal,
+        let loginControl: IlinkOperatorControl | undefined;
+        let foregroundWorker: Promise<number> | undefined;
+        const foregroundStop = new AbortController();
+        const ensureLoginControl = async (config: ReturnType<typeof loadIlinkEnrollmentConfig>) => {
+          if (loginControl) return loginControl;
+          await withLifecycleLock(location, async () => {
+            let started: Awaited<ReturnType<typeof startIlinkDaemonLocked>> | undefined;
+            if (!hasRuntimeOperator(config.state)) {
+              const ownership = acquireSingleInstanceLock({
+                filePath: config.state.lockFile,
+                hasActiveDatabaseOwner: () => StatePersistence.hasActiveWriter(config.state.databaseFile),
               });
-          if (!selected) {
-            runtime.stdout('Cancelled; no changes made.\n');
-            return 0;
-          }
-          signal.throwIfAborted();
-
-          let confirmed = Boolean(parsed.values.yes);
-          if (subcommand === 'delete' && !confirmed) {
-            if (!interactive) {
-              throw new Error('Non-interactive iLink deletion requires --yes');
+              ownership.release();
+              if (foreground) {
+                const ready = Promise.withResolvers<void>();
+                foregroundWorker = runtime.ilinkStart({
+                  config: loadSharedRuntimeConfig({
+                    environment: { ...runtime.env }, envFile: location.configFile, root: location.home,
+                  }),
+                  signal: AbortSignal.any([signal, foregroundStop.signal]),
+                  stdout: runtime.stdout,
+                  onStarted() { ready.resolve(); },
+                });
+                void foregroundWorker.then(
+                  () => ready.reject(new Error('Kintio foreground runtime stopped before readiness')),
+                  ready.reject,
+                );
+                await ready.promise;
+              } else {
+                started = await startIlinkDaemonLocked(location, runtime);
+              }
             }
-            confirmed = await runtime.ilinkConfirmDelete({
-              account: selected,
-              signal,
-            });
-            if (!confirmed) {
-              runtime.stdout('Cancelled; no changes made.\n');
-              return 0;
-            }
-            signal.throwIfAborted();
-          }
-
-          const dispatchMutation = async <T>(mutation: () => Promise<T>): Promise<T> => {
-            signal.throwIfAborted();
-            let result: T;
             try {
-              result = await mutation();
-            } catch (error: unknown) {
-              if (signal.aborted) preserveErrorAfterAbort = true;
+              loginControl = await runtime.ilinkConnect(config, runtime.packageRoot);
+            } catch (error) {
+              if (started) {
+                try {
+                  await rollbackEmptyIlinkDaemonLocked(location, started);
+                } catch (rollbackError) {
+                  throw new AggregateError([error, rollbackError],
+                    `Could not attach iLink login control (${error instanceof Error ? error.message : String(error)}) or release its new runtime`);
+                }
+              }
               throw error;
             }
-            signal.throwIfAborted();
-            return result;
-          };
-          const mutate = async (): Promise<number> => {
-            const commandResult = await dispatchMutation(() => runtime.ilinkAccount({
-              command: subcommand as 'start' | 'stop' | 'delete',
-              expectedAccount: selected,
-              requiredMode: snapshot.mode,
-              confirmed,
-              config: enrollmentConfig,
-              packageRoot: runtime.packageRoot,
-              signal,
-              stdout: runtime.stdout,
-              ...(subcommand === 'start'
-                ? { deferStandaloneStart: !foreground }
-                : {}),
-            }));
-            if (subcommand !== 'start' || !commandResult.runtimeRequired) return 0;
-            const runtimeConfig = loadSharedRuntimeConfig({
+          }, signal);
+          return loginControl!;
+        };
+        const perform = async () => {
+          let automaticLoginSucceeded = false;
+          let preserveErrorAfterAbort = false;
+          try {
+            const enrollmentConfig = loadIlinkEnrollmentConfig({
               environment: { ...runtime.env },
               envFile: location.configFile,
               root: location.home,
             });
-            if (foreground) {
-              return await runtime.ilinkStart({
-                config: runtimeConfig,
+            if (subcommand !== 'list' && hasRuntimeOperator(enrollmentConfig.state)) {
+              loginControl = await runtime.ilinkConnect(enrollmentConfig, runtime.packageRoot);
+            }
+            if (subcommand === 'login') {
+              return await runConfiguredIlinkLogin(
+                runtime,
+                enrollmentConfig,
                 signal,
-                stdout: runtime.stdout,
-              });
+                qrOutputPath,
+                () => ensureLoginControl(enrollmentConfig),
+              );
             }
-            if (!commandResult.selectedAccountKey) {
-              throw new Error('iLink start did not resolve an account identity');
-            }
-            signal.throwIfAborted();
-            const started = await startIlinkDaemonLocked(location, runtime);
-            try {
-              signal.throwIfAborted();
-              await dispatchMutation(() => runtime.ilinkAccount({
-                command: 'start',
-                expectedAccount: selected,
-                requiredMode: 'runtime',
+            if (subcommand === 'list') {
+              await runtime.ilinkAccount({
+                command: 'list',
                 config: enrollmentConfig,
                 packageRoot: runtime.packageRoot,
                 signal,
                 stdout: runtime.stdout,
-              }));
-            } catch (error: unknown) {
-              try {
-                await rollbackEmptyIlinkDaemonLocked(
-                  location,
-                  runtime,
-                  enrollmentConfig,
-                  started,
-                );
-              } catch (rollbackError: unknown) {
-                if (signal.aborted) preserveErrorAfterAbort = true;
+              });
+              return 0;
+            }
+
+            let snapshot = await runtime.ilinkSnapshot({
+              config: enrollmentConfig,
+              packageRoot: runtime.packageRoot,
+              signal,
+              ...(loginControl ? { control: loginControl } : {}),
+            });
+            const selector = parsed.values.account;
+            if (
+              subcommand === 'start' &&
+              !selector &&
+              snapshot.accounts.length === 0
+            ) {
+              if (!interactive) {
                 throw new Error(
-                  `${error instanceof Error ? error.message : String(error)}; ` +
-                  `the newly started iLink Runtime could not be rolled back: ${
-                    rollbackError instanceof Error
-                      ? rollbackError.message
-                      : String(rollbackError)
-                  }`,
-                  { cause: error },
+                  'No iLink account is enrolled; run "kintio ilink login" first',
                 );
               }
-              throw error;
+              const loginResult = await runConfiguredIlinkLogin(
+                runtime,
+                enrollmentConfig,
+                signal,
+                undefined,
+                () => ensureLoginControl(enrollmentConfig),
+              );
+              if (loginResult !== 0) return loginResult;
+              signal.throwIfAborted();
+              automaticLoginSucceeded = true;
+              snapshot = await runtime.ilinkSnapshot({
+                config: enrollmentConfig,
+                packageRoot: runtime.packageRoot,
+                signal,
+                ...(loginControl ? { control: loginControl } : {}),
+              });
+              if (snapshot.accounts.length === 0) {
+                throw new Error('iLink login completed without enrolling an account');
+              }
             }
-            return 0;
-          };
-          return foreground || snapshot.mode === 'runtime'
-            ? await mutate()
-            : await withLifecycleLock(location, mutate);
-        } catch (error: unknown) {
-          if (
-            error instanceof IlinkPromptInterruptedError ||
-            (signal.aborted && !preserveErrorAfterAbort)
-          ) return 130;
-          if (automaticLoginSucceeded) {
-            throw new Error(
-              `${error instanceof Error ? error.message : String(error)}; ` +
-              'iLink login succeeded, retry "kintio ilink start" with the same instance options',
-              { cause: error },
-            );
+
+            if (foreground && subcommand === 'start' && snapshot.mode === 'standalone') {
+              await ensureLoginControl(enrollmentConfig);
+              snapshot = await runtime.ilinkSnapshot({ config: enrollmentConfig, packageRoot: runtime.packageRoot, signal, control: loginControl! });
+            }
+
+            if (
+              subcommand === 'delete' &&
+              !interactive &&
+              (!selector || !parsed.values.yes)
+            ) {
+              throw new Error(
+                'Non-interactive iLink deletion requires --account and --yes',
+              );
+            }
+            const selected = selector || snapshot.accounts.length <= 1 || !interactive
+              ? resolveIlinkAccount(
+                  snapshot.accounts,
+                  selector,
+                  snapshot.mode === 'runtime',
+                )
+              : await runtime.ilinkPickAccount({
+                  accounts: snapshot.accounts,
+                  command: subcommand as 'start' | 'stop' | 'delete',
+                  runtimeActive: snapshot.mode === 'runtime',
+                  signal,
+                });
+            if (!selected) {
+              runtime.stdout('Cancelled; no changes made.\n');
+              return 0;
+            }
+            signal.throwIfAborted();
+
+            let confirmed = Boolean(parsed.values.yes);
+            if (subcommand === 'delete' && !confirmed) {
+              if (!interactive) {
+                throw new Error('Non-interactive iLink deletion requires --yes');
+              }
+              confirmed = await runtime.ilinkConfirmDelete({
+                account: selected,
+                signal,
+              });
+              if (!confirmed) {
+                runtime.stdout('Cancelled; no changes made.\n');
+                return 0;
+              }
+              signal.throwIfAborted();
+            }
+
+            const dispatchMutation = async <T>(mutation: () => Promise<T>): Promise<T> => {
+              signal.throwIfAborted();
+              let result: T;
+              try {
+                result = await mutation();
+              } catch (error: unknown) {
+                if (signal.aborted) preserveErrorAfterAbort = true;
+                throw error;
+              }
+              signal.throwIfAborted();
+              return result;
+            };
+            const mutate = async (): Promise<number> => {
+              const commandResult = await dispatchMutation(() => runtime.ilinkAccount({
+                command: subcommand as 'start' | 'stop' | 'delete',
+                expectedAccount: selected,
+                requiredMode: snapshot.mode,
+                confirmed,
+                config: enrollmentConfig,
+                packageRoot: runtime.packageRoot,
+                signal,
+                stdout: runtime.stdout,
+                ...(loginControl ? { control: loginControl } : {}),
+                ...(subcommand === 'start'
+                  ? { deferStandaloneStart: !foreground }
+                  : {}),
+              }));
+              if (subcommand !== 'start' || !commandResult.runtimeRequired) return 0;
+              const runtimeConfig = loadSharedRuntimeConfig({
+                environment: { ...runtime.env },
+                envFile: location.configFile,
+                root: location.home,
+              });
+              if (foreground) {
+                if (foregroundWorker) return 0;
+                return await runtime.ilinkStart({
+                  config: runtimeConfig,
+                  signal,
+                  stdout: runtime.stdout,
+                });
+              }
+              if (!commandResult.selectedAccountKey) {
+                throw new Error('iLink start did not resolve an account identity');
+              }
+              signal.throwIfAborted();
+              const started = await startIlinkDaemonLocked(location, runtime);
+              try {
+                signal.throwIfAborted();
+                await dispatchMutation(() => runtime.ilinkAccount({
+                  command: 'start',
+                  expectedAccount: selected,
+                  requiredMode: 'runtime',
+                  config: enrollmentConfig,
+                  packageRoot: runtime.packageRoot,
+                  signal,
+                  stdout: runtime.stdout,
+                }));
+              } catch (error: unknown) {
+                try {
+                  await rollbackEmptyIlinkDaemonLocked(
+                    location,
+                    started,
+                  );
+                } catch (rollbackError: unknown) {
+                  if (signal.aborted) preserveErrorAfterAbort = true;
+                  throw new Error(
+                    `${error instanceof Error ? error.message : String(error)}; ` +
+                    `the newly started iLink Runtime could not be rolled back: ${
+                      rollbackError instanceof Error
+                        ? rollbackError.message
+                        : String(rollbackError)
+                    }`,
+                    { cause: error },
+                  );
+                }
+                throw error;
+              }
+              return 0;
+            };
+            return snapshot.mode === 'runtime'
+              ? await mutate()
+              : await withLifecycleLock(location, mutate);
+          } catch (error: unknown) {
+            if (
+              error instanceof IlinkPromptInterruptedError ||
+              (signal.aborted && !preserveErrorAfterAbort)
+            ) return 130;
+            if (automaticLoginSucceeded) {
+              throw new Error(
+                `${error instanceof Error ? error.message : String(error)}; ` +
+                'iLink login succeeded, retry "kintio ilink start" with the same instance options',
+                { cause: error },
+              );
+            }
+            throw error;
           }
-          throw error;
+        };
+        try {
+          const result = await perform();
+          await loginControl?.close();
+          loginControl = undefined;
+          if (!foregroundWorker) return result;
+          if (result !== 0) foregroundStop.abort();
+          const stopped = await foregroundWorker;
+          return result === 0 ? stopped : result;
+        } finally {
+          await loginControl?.close();
+          if (foregroundWorker) {
+            foregroundStop.abort();
+            await foregroundWorker.catch(() => undefined);
+          }
         }
       });
-      return subcommand === 'login' || (subcommand === 'start' && foreground)
-        ? await withLifecycleLock(location, operation)
-        : await operation();
+      return await operation();
     }
     if (lifecycleCommand === 'setup') return setup(location, runtime);
     if (lifecycleCommand === 'update' || lifecycleCommand === 'upgrade') {

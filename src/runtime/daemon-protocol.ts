@@ -8,7 +8,7 @@ import * as z from 'zod/v4';
 import { canonicalPath } from '../lib/path-identity.ts';
 import { ensurePrivateDirectory } from '../lib/private-directory.ts';
 
-export type ControlCommand = 'ping' | 'stop' | 'stop-if-idle';
+export type ControlCommand = 'ping' | 'stop' | 'stop-if-idle' | 'stop-if-unused';
 export type DaemonPhase = 'starting' | 'running' | 'backoff' | 'stopping' | 'failed';
 export type DaemonMode = 'shared';
 
@@ -47,7 +47,7 @@ const daemonRecordSchema = z.strictObject({
 
 const controlRequestSchema = z.strictObject({
   version: z.literal(1),
-  command: z.enum(['ping', 'stop', 'stop-if-idle']),
+  command: z.enum(['ping', 'stop', 'stop-if-idle', 'stop-if-unused']),
   token,
   updateIdentity: updateRuntimeIdentitySchema.optional(),
 }).superRefine((value, context) => {
@@ -71,12 +71,12 @@ const controlResponseSchema = z.strictObject({
 });
 
 const workerStopIfIdleRequestSchema = z.strictObject({
-  type: z.literal('stop-if-idle'),
+  type: z.enum(['stop-if-idle', 'stop-if-unused']),
   requestId: runId,
 });
 
 const workerStopIfIdleResponseSchema = z.strictObject({
-  type: z.literal('stop-if-idle-result'),
+  type: z.enum(['stop-if-idle-result', 'stop-if-unused-result']),
   requestId: runId,
   pid: positiveInteger,
   ok: z.boolean(),
@@ -345,8 +345,9 @@ export async function requestControl(
   command: ControlCommand,
   timeoutMs = CONTROL_TIMEOUT_MS,
   updateIdentity?: UpdateRuntimeIdentity,
+  expectedRunId?: string,
 ): Promise<ControlResponse> {
-  if (command !== 'ping' && command !== 'stop' && command !== 'stop-if-idle') {
+  if (!['ping', 'stop', 'stop-if-idle', 'stop-if-unused'].includes(command)) {
     throw new Error('control command is invalid');
   }
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
@@ -357,6 +358,9 @@ export async function requestControl(
   }
   const record = readDaemonRecord(home);
   if (!record) throw new Error('Kintio daemon record does not exist');
+  if (expectedRunId !== undefined && record.runId !== expectedRunId) {
+    throw new Error('Kintio daemon identity changed before the control request');
+  }
   const source = `${JSON.stringify({
     version: 1,
     command,
@@ -403,7 +407,7 @@ export async function requestControl(
         if (!response.ok) {
           throw new Error(response.message || 'Kintio control request was rejected');
         }
-        if (command === 'stop-if-idle') {
+        if (command === 'stop-if-idle' || command === 'stop-if-unused') {
           if (response.idle === undefined) {
             throw new Error('stop-if-idle response omitted the idle decision');
           }

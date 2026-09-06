@@ -35,17 +35,8 @@ export interface IlinkOperatorAccount {
   readonly runtimeEnabled: boolean;
 }
 
-export interface IlinkOperatorControl {
+export interface IlinkAccountControl {
   readonly mode: 'runtime' | 'standalone';
-  begin(signal: AbortSignal): Promise<{
-    readonly offerId: string;
-    readonly qrContent: string;
-    readonly expiresAt: number;
-  }>;
-  status(offerId: string, signal: AbortSignal): Promise<{
-    readonly status: IlinkLoginStatus;
-  }>;
-  cancel(offerId: string): Promise<boolean>;
   listAccounts(): Promise<readonly IlinkOperatorAccount[]>;
   setAccountRuntime(
     accountKey: `ia_${string}`,
@@ -57,6 +48,18 @@ export interface IlinkOperatorControl {
     expected: IlinkAccountRevision,
   ): Promise<{ readonly account: IlinkOperatorAccount; readonly runningCount: number }>;
   close(): Promise<void>;
+}
+
+export interface IlinkOperatorControl extends IlinkAccountControl {
+  begin(signal: AbortSignal): Promise<{
+    readonly offerId: string;
+    readonly qrContent: string;
+    readonly expiresAt: number;
+  }>;
+  status(offerId: string, signal: AbortSignal): Promise<{
+    readonly status: IlinkLoginStatus;
+  }>;
+  cancel(offerId: string): Promise<boolean>;
 }
 
 function record(value: unknown): Record<string, unknown> {

@@ -22,6 +22,7 @@ const shutdown = (): void => {
   resolveParentShutdown();
 };
 let stopIfIdleForUpdate: (() => boolean) | undefined;
+let stopIfUnused: (() => boolean) | undefined;
 
 process.once('SIGINT', shutdown);
 process.once('SIGTERM', shutdown);
@@ -32,7 +33,7 @@ const handleMessage = (message: unknown): void => {
   }
   if (
     !message || typeof message !== 'object' || !('type' in message) ||
-    message.type !== 'stop-if-idle'
+    (message.type !== 'stop-if-idle' && message.type !== 'stop-if-unused')
   ) return;
   let request;
   try {
@@ -42,17 +43,18 @@ const handleMessage = (message: unknown): void => {
   }
   let response: WorkerStopIfIdleResponse;
   try {
-    if (!stopIfIdleForUpdate) throw new Error('Kintio runtime is not ready');
+    const stop = request.type === 'stop-if-unused' ? stopIfUnused : stopIfIdleForUpdate;
+    if (!stop) throw new Error('Kintio runtime is not ready');
     response = {
-      type: 'stop-if-idle-result',
+      type: `${request.type}-result`,
       requestId: request.requestId,
       pid: process.pid,
       ok: true,
-      idle: stopIfIdleForUpdate(),
+      idle: stop(),
     };
   } catch (error: unknown) {
     response = {
-      type: 'stop-if-idle-result',
+      type: `${request.type}-result`,
       requestId: request.requestId,
       pid: process.pid,
       ok: false,
@@ -90,6 +92,7 @@ try {
     stdout: (text) => process.stdout.write(text),
     onStarted(control) {
       stopIfIdleForUpdate = control.stopIfIdleForUpdate;
+      stopIfUnused = control.stopIfUnused;
       if (!controller.signal.aborted && process.connected) {
         process.send?.({ type: 'ready', pid: process.pid }, (error) => { if (error) shutdown(); });
       }

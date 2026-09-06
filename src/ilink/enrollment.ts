@@ -12,11 +12,13 @@ export function createIlinkEnrollmentService({
   persistence,
   config,
   onAccountsChanged,
+  onPollingSettled,
   logger = console,
 }: {
   readonly persistence: StatePersistence;
   readonly config: IlinkEnrollmentConfig['ilink'];
   readonly onAccountsChanged?: () => void | Promise<void>;
+  readonly onPollingSettled?: () => void;
   readonly logger?: Logger;
 }) {
   const accounts = persistence.createIlinkStore();
@@ -41,6 +43,7 @@ export function createIlinkEnrollmentService({
       longPollTimeoutMs: config.longPollTimeoutMs,
     }),
     ...(onAccountsChanged ? { onAccountsChanged } : {}),
+    ...(onPollingSettled ? { onPollingSettled } : {}),
   });
   return Object.freeze({ accounts, offers, secretBox, manager });
 }

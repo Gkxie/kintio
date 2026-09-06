@@ -6,6 +6,7 @@ import type { IlinkEnrollmentConfig } from '../config.ts';
 import { assertTrustedDirectory } from '../lib/private-directory.ts';
 import {
   RuntimeOperatorClient,
+  type IlinkAccountControl,
   type IlinkOperatorAccount,
   type IlinkOperatorControl,
 } from '../runtime/operator-client.ts';
@@ -15,7 +16,6 @@ import {
   SingleInstanceLockError,
 } from '../runtime/single-instance-lock.ts';
 import { StatePersistence } from '../state/persistence.ts';
-import { createIlinkEnrollmentService } from './enrollment.ts';
 import {
   renderIlinkQrTerminal,
   renderIlinkRawQrPng,
@@ -43,6 +43,8 @@ export interface IlinkCliLoginOptions {
   readonly clock?: () => number;
   readonly sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   readonly openControl?: () => Promise<IlinkOperatorControl>;
+  /** A caller-owned connection retained across login and account activation. */
+  readonly control?: () => Promise<IlinkOperatorControl>;
 }
 
 interface TemporaryQrOutput {
@@ -152,24 +154,19 @@ function operatorAccountFromStored(
   });
 }
 
-class LocalIlinkOperatorControl implements IlinkOperatorControl {
+class LocalIlinkOperatorControl implements IlinkAccountControl {
   readonly mode = 'standalone' as const;
   readonly #persistence: StatePersistence;
   readonly #lock: InstanceLock;
-  readonly #config: Pick<IlinkEnrollmentConfig, 'state' | 'ilink'>;
   readonly #accounts: IlinkSqliteStore;
-  #enrollment: ReturnType<typeof createIlinkEnrollmentService> | undefined;
-  #enrollmentStarted: Promise<void> | undefined;
   #closed = false;
 
   private constructor(
     persistence: StatePersistence,
     lock: InstanceLock,
-    config: Pick<IlinkEnrollmentConfig, 'state' | 'ilink'>,
   ) {
     this.#persistence = persistence;
     this.#lock = lock;
-    this.#config = config;
     this.#accounts = persistence.createIlinkStore();
   }
 
@@ -184,7 +181,7 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
     let persistence: StatePersistence | undefined;
     try {
       persistence = new StatePersistence({ filePath: config.state.databaseFile });
-      return new LocalIlinkOperatorControl(persistence, lock, config);
+      return new LocalIlinkOperatorControl(persistence, lock);
     } catch (error: unknown) {
       const cleanupErrors: unknown[] = [];
       try { persistence?.close(); } catch (cleanupError: unknown) {
@@ -202,38 +199,11 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
       if (cleanupErrors.length) {
         throw new AggregateError(
           [error, ...cleanupErrors],
-          'Standalone iLink login initialization and cleanup both failed',
+          'Offline iLink account initialization and cleanup both failed',
         );
       }
       throw error;
     }
-  }
-
-  async #startEnrollment() {
-    this.#enrollment ||= createIlinkEnrollmentService({
-      persistence: this.#persistence,
-      config: this.#config.ilink,
-    });
-    this.#enrollmentStarted ||= this.#enrollment.manager.start();
-    await this.#enrollmentStarted;
-    return this.#enrollment;
-  }
-
-  async begin(signal?: AbortSignal) {
-    const enrollment = await this.#startEnrollment();
-    return enrollment.manager.offer(
-      { kind: 'terminal' },
-      signal ? { signal } : {},
-    );
-  }
-
-  status(offerId: string) {
-    if (!this.#enrollment) throw new Error('No iLink login is active');
-    return Promise.resolve(this.#enrollment.manager.status(offerId));
-  }
-
-  cancel(offerId: string) {
-    return Promise.resolve(this.#enrollment?.manager.cancel(offerId) || false);
   }
 
   listAccounts(): Promise<readonly IlinkOperatorAccount[]> {
@@ -292,11 +262,6 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
   async close(): Promise<void> {
     if (this.#closed) return;
     const errors: unknown[] = [];
-    if (this.#enrollment) {
-      try { await this.#enrollment.manager.close(); } catch (error: unknown) {
-        errors.push(error);
-      }
-    }
     try { this.#persistence.core.checkpoint('TRUNCATE'); } catch (error: unknown) {
       errors.push(error);
     }
@@ -314,7 +279,7 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
     }
     this.#closed = this.#persistence.closed;
     if (errors.length) {
-      throw new AggregateError(errors, 'Standalone iLink login cleanup failed');
+      throw new AggregateError(errors, 'Offline iLink account cleanup failed');
     }
   }
 }
@@ -324,7 +289,7 @@ export async function openIlinkOperatorControl(
   packageRoot: string,
   signal: AbortSignal,
   requiredMode?: 'runtime' | 'standalone',
-): Promise<IlinkOperatorControl> {
+): Promise<IlinkAccountControl> {
   if (requiredMode === 'runtime') {
     try {
       return await RuntimeOperatorClient.connect(config, packageRoot);
@@ -423,12 +388,12 @@ export async function runIlinkCliLogin(options: IlinkCliLoginOptions): Promise<n
   const clock = options.clock || Date.now;
   const sleep = options.sleep || defaultSleep;
   const openControl = options.openControl || (() =>
-    openIlinkOperatorControl(options.config, options.packageRoot, options.signal));
+    RuntimeOperatorClient.connect(options.config, options.packageRoot));
   let control: IlinkOperatorControl | undefined;
   let offerId = '';
   let qrOutput: TemporaryQrOutput | undefined;
   try {
-    control = await openControl();
+    control = options.control ? await options.control() : await openControl();
     const offer = await control.begin(options.signal);
     offerId = offer.offerId;
     if (options.qrOutputPath) {
@@ -507,7 +472,7 @@ export async function runIlinkCliLogin(options: IlinkCliLoginOptions): Promise<n
     try {
       if (qrOutput) removeQrOutput(qrOutput);
     } finally {
-      await control?.close();
+      if (!options.control) await control?.close();
     }
   }
 }

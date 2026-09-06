@@ -51,7 +51,7 @@ import { KINTIO_VERSION } from './version.ts';
 export interface Runtime {
   readonly failure: Promise<Error>;
   start(): Promise<void>;
-  stopAcceptingIfIdle(): boolean;
+  stopAcceptingIfIdle(options?: { readonly requireUnused?: boolean }): boolean;
   stopAccepting(): void;
   close(): Promise<void>;
   abort(): Promise<void>;
@@ -129,6 +129,10 @@ export async function createRuntime({
         config: ilink,
         logger,
         onAccountsChanged: () => ilinkListener?.refresh(),
+        onPollingSettled: () => {
+          if (toolsUnavailable || !ilinkEnrollment) return;
+          scheduleRuntimeStop(ilinkEnrollment, ilinkEnrollment.accounts.listRuntimeAccountsWithSecrets().length);
+        },
       });
       return ilinkEnrollment;
     };
@@ -142,10 +146,13 @@ export async function createRuntime({
     const ilinkSecretBox = activeIlinkEnrollment.secretBox;
     const ilinkStore = activeIlinkEnrollment.accounts;
     let terminalLoginBegins = 0;
+    const operatorClients = new Set<string>();
     let accountMutationEpoch = 0;
     let activeAccountMutations = 0;
+    let unusedStopRequested = false;
     const runAccountMutation = async <T>(operation: () => Promise<T>): Promise<T> => {
       if (toolsUnavailable) throw new Error('service unavailable');
+      unusedStopRequested = true;
       activeAccountMutations += 1;
       try {
         return await operation();
@@ -164,12 +171,12 @@ export async function createRuntime({
       enrollment: ReturnType<typeof ensureIlinkEnrollment>,
       runningCount: number,
     ): void => {
-      if (runningCount !== 0 || wecomServer || wecomChange || terminalLoginActive() || !onStopRequested) return;
+      if (!unusedStopRequested || runningCount !== 0 || wecomServer || wecomChange || operatorInUse() || !onStopRequested) return;
       const expectedEpoch = accountMutationEpoch;
       setImmediate(() => {
         if (
           toolsUnavailable ||
-          wecomServer || wecomChange || terminalLoginActive() || activeAccountMutations > 0 ||
+          wecomServer || wecomChange || operatorInUse() || activeAccountMutations > 0 ||
           expectedEpoch !== accountMutationEpoch ||
           enrollment.accounts.listRuntimeAccountsWithSecrets().length !== 0
         ) return;
@@ -177,8 +184,8 @@ export async function createRuntime({
         onStopRequested();
       });
     };
-    const terminalLoginActive = (): boolean =>
-      terminalLoginBegins > 0 ||
+    const operatorInUse = (): boolean =>
+      terminalLoginBegins > 0 || operatorClients.size > 0 ||
       Boolean(ilinkEnrollment?.manager.hasActiveLocalOperatorLogin());
     let wechatTools: WechatKfToolExecutor | undefined;
     const recoveredIlinkReservations = ilinkStore.recoverPendingAttempts();
@@ -212,19 +219,33 @@ export async function createRuntime({
         version: KINTIO_VERSION,
       }),
       operator: () => createIlinkLoginMcpServer({
+        connected(sessionId) {
+          if (toolsUnavailable) throw new Error('service unavailable');
+          operatorClients.add(sessionId);
+        },
         ...(config.codex.enabled ? { restartAccounts: () => runAccountMutation(async () => { await ilinkListener?.restart(); }) } : {}),
         wecomControl: (action, configFile) => changeWecom(action, configFile),
-        async begin(signal) {
+        disconnected(sessionId) {
+          if (!operatorClients.delete(sessionId)) return;
+          const enrollment = ensureIlinkEnrollment();
+          scheduleRuntimeStop(enrollment, enrollment.accounts.listRuntimeAccountsWithSecrets().length);
+        },
+        async begin(sessionId, signal) {
           if (toolsUnavailable) throw new Error('service unavailable');
+          unusedStopRequested = true;
           terminalLoginBegins += 1;
           try {
             const offer = await (await startIlinkEnrollment()).manager.offer(
-              { kind: 'terminal' },
+              { kind: 'terminal', sessionId },
               signal ? { signal } : {},
             );
             return offer;
           } finally {
             terminalLoginBegins -= 1;
+            if (!operatorClients.has(sessionId)) {
+              const enrollment = ensureIlinkEnrollment();
+              scheduleRuntimeStop(enrollment, enrollment.accounts.listRuntimeAccountsWithSecrets().length);
+            }
           }
         },
         status(offerId) {
@@ -406,6 +427,7 @@ export async function createRuntime({
       if (action === 'status') return Promise.resolve({ running: Boolean(wecomServer?.listening) });
       const operation = (wecomChange?.catch(() => undefined) || Promise.resolve()).then(async () => {
         if (toolsUnavailable) throw new Error('Kintio runtime is stopping');
+        unusedStopRequested = true;
         const stored = store.getWecomRuntime();
         const file = configFile || stored.configFile || path.join(config.home, 'wecom/.env');
         if (action === 'stop' || action === 'restart') {
@@ -637,11 +659,15 @@ export async function createRuntime({
         })();
         return starting;
       },
-      stopAcceptingIfIdle() {
+      stopAcceptingIfIdle({ requireUnused = false } = {}) {
+        if (requireUnused && (
+          store.getWecomRuntime().enabled ||
+          ilinkStore.listRuntimeAccountsWithSecrets().length > 0
+        )) return false;
         if (
           !accepting || startupRecoveryActive || deferredDrainRequested ||
           deferredDrain !== undefined || !processor.isIdle() ||
-          terminalLoginActive() ||
+          operatorInUse() ||
           activeAccountMutations > 0 || wecomChange || wecomRecovery ||
           !ilinkTools.isIdle() ||
           Boolean(wechatTools && !wechatTools.isIdle())
