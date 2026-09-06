@@ -385,7 +385,8 @@ export class ConversationProcessor {
   }
 
   #releaseIfInactive(record: InboundRecord): void {
-    if (!this.#pipeline.agent.activePrimary(conversationId(record))) {
+    const active = this.#activeConversations.get(this.#conversationKey(record));
+    if (!active?.turn && !this.#pipeline.agent.activePrimary(conversationId(record))) {
       this.#release(record);
     }
   }
@@ -462,7 +463,7 @@ export class ConversationProcessor {
         let record = this.#store.getInbound(messageKey);
         if (!record) return;
         if (this.#pausedChannels.has(record.channel)) {
-          if (!this.#activeConversations.get(this.#conversationKey(record))?.turn) this.#releaseIfInactive(record);
+          this.#releaseIfInactive(record);
           return;
         }
         const active = this.#activeConversations.get(this.#conversationKey(record));

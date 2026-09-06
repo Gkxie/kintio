@@ -214,6 +214,7 @@ async function createHarness(
     readonly token: string;
     readonly content: string;
   }) => void | Promise<void> = () => undefined,
+  maxConcurrentConversations = 10,
 ): Promise<PriorityHarness> {
   const temporary = await createTempSqlite(t, {
     prefix: 'ilink-priority-runtime-',
@@ -273,7 +274,7 @@ async function createHarness(
       'wm-working-two',
       'wm-downtime-backlog',
     ],
-    maxConcurrentConversations: 10,
+    maxConcurrentConversations,
     logger: { info() {}, warn() {}, error() {} },
   });
   const wecomCursors = new Map<string, string>();
@@ -1205,4 +1206,42 @@ test('a durable approval notice does not prevent backlog preemption or restore i
   await harness.agent.finish(liveKey, 'current response');
   await recovery;
   await harness.processor.waitForIdle();
+});
+
+test('a paused steering failure keeps a finishing turn slot until its tracked completion releases it', async (t) => {
+  const harness = await createHarness(t, () => undefined, 1);
+  const primary = harness.ingestWecom('still finishing', 'wm-working-one');
+  await harness.processor.enqueue(primary);
+  const conversation = harness.agent.inputs[0]!.conversationId;
+  const activePrimary = harness.agent.activePrimary.bind(harness.agent);
+  let finishing = false;
+  harness.agent.activePrimary = (key) => finishing && key === conversation ? undefined : activePrimary(key);
+  const entered = deferred<void>();
+  const steering = deferred<AgentSubmission>();
+  const submit = harness.agent.submit.bind(harness.agent);
+  harness.agent.submit = async (input) => {
+    if (input.mode === 'steer') { entered.resolve(); return steering.promise; }
+    return submit(input);
+  };
+  try {
+    const followup = harness.processor.enqueue(harness.ingestWecom('follow-up', 'wm-working-one'));
+    await entered.promise;
+    const otherKey = harness.ingestIlink(harness.registerIlink('waiting-for-finishing'), 'another conversation');
+    const other = harness.processor.enqueue(otherKey);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    finishing = true;
+    harness.processor.setChannelEnabled('wechat_kf', false);
+    steering.reject(new Error('Synthetic steering failure while paused'));
+    await followup;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(harness.agent.starts.length, 1, 'the unfinished tracked turn still owns the only slot');
+    await harness.agent.interrupt(conversation);
+    await other;
+    assert.equal(harness.agent.starts.length, 2);
+    assert.equal(harness.agent.maxActive, 1);
+    await harness.agent.finish(otherKey, 'The slot is now free');
+    await harness.processor.waitForIdle();
+  } finally {
+    steering.reject(new Error('Synthetic steering cleanup'));
+  }
 });
