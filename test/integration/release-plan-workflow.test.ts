@@ -3,12 +3,52 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { runInNewContext } from 'node:vm';
 import { afterEach, describe, test } from 'vitest';
 
 import { buildReleasePlanFiles } from '../../.github/scripts/release-plan.ts';
 
 const validator = path.resolve('.github/scripts/reconcile-release.ts');
 const temporaryDirectories: string[] = [];
+
+function releaseEvent(action: string, title = 'chore(release): prepare v0.7.0') {
+  return {
+    repository: 'Gkxie/kintio',
+    event_name: 'pull_request_target',
+    actor: 'kintio-release[bot]',
+    triggering_actor: 'kintio-release[bot]',
+    run_attempt: 1,
+    run_id: 1,
+    event: {
+      action,
+      changes: {} as Record<string, { from: string }>,
+      pull_request: {
+        number: 50,
+        draft: false,
+        title,
+        user: { login: 'kintio-release[bot]' },
+        base: { ref: 'master', repo: { full_name: 'Gkxie/kintio' } },
+        head: { ref: 'release/next', repo: { full_name: 'Gkxie/kintio' } },
+      },
+    },
+  };
+}
+
+function releaseWorkflow(github: ReturnType<typeof releaseEvent>) {
+  const workflow = fs.readFileSync('.github/workflows/release-codex.yml', 'utf8')
+    .replaceAll('\r\n', '\n');
+  const events = /^    types: \[([^\]]+)\]$/mu.exec(workflow)?.[1]?.split(', ');
+  const condition = /^    if: >-\n([\s\S]+?)(?=^    runs-on:)/mu.exec(workflow)?.[1];
+  const group = /^  group: (.+)$/mu.exec(workflow)?.[1];
+  assert.ok(events && condition && group, 'Release workflow must declare its event gate and concurrency');
+  // The checked-in gate uses only property reads, boolean/equality operators,
+  // and literals, which have the same semantics here as in Actions expressions.
+  const evaluate = (expression: string) => runInNewContext(expression, { github }) as unknown;
+  return {
+    eligible: events.includes(github.event.action) && Boolean(evaluate(condition)),
+    group: group.replace(/\$\{\{(.+?)\}\}/gu, (_match, expression: string) => String(evaluate(expression))),
+  };
+}
 
 type CommandResult = {
   status: number | null;
@@ -169,4 +209,65 @@ describe('Release plan check', () => {
     assert.match(result.stderr, /changed files outside the deterministic plan/u);
   });
 
+});
+
+describe('Release Codex event eligibility', () => {
+  test('revalidates a corrected title on the same candidate instead of requiring another commit', () => {
+    const { baseSha, repository } = fixture();
+    const headSha = git(repository, 'rev-parse', 'HEAD');
+    const synchronized = releaseEvent('synchronize', 'chore(release): prepare v0.6.2');
+    assert.equal(releaseWorkflow(synchronized).eligible, true);
+    assert.notEqual(verify(repository, baseSha, synchronized.event.pull_request.title).status, 0);
+
+    const corrected = releaseEvent('edited');
+    corrected.run_id = 2;
+    corrected.event.changes.title = { from: synchronized.event.pull_request.title };
+    assert.equal(releaseWorkflow(corrected).eligible, true);
+    assert.equal(releaseWorkflow(corrected).group, releaseWorkflow(synchronized).group);
+    const result = verify(repository, baseSha, corrected.event.pull_request.title);
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.equal(git(repository, 'rev-parse', 'HEAD'), headSha);
+    assert.equal(git(repository, 'status', '--porcelain'), '');
+  });
+
+  test('body-only edits neither request another approval nor cancel the candidate awaiting approval', () => {
+    const candidate = releaseEvent('synchronize');
+    const bodyEdit = releaseEvent('edited');
+    bodyEdit.run_id = 2;
+    bodyEdit.event.changes.body = { from: 'Previous Release notes' };
+    assert.equal(releaseWorkflow(bodyEdit).eligible, false);
+    assert.notEqual(releaseWorkflow(bodyEdit).group, releaseWorkflow(candidate).group);
+  });
+
+  test.each([
+    ['draft', (event: ReturnType<typeof releaseEvent>) => { event.event.pull_request.draft = true; }],
+    ['fork', (event: ReturnType<typeof releaseEvent>) => { event.event.pull_request.head.repo.full_name = 'elsewhere/kintio'; }],
+    ['wrong author', (event: ReturnType<typeof releaseEvent>) => { event.event.pull_request.user.login = 'Gkxie'; }],
+    ['wrong branch', (event: ReturnType<typeof releaseEvent>) => { event.event.pull_request.head.ref = 'feature/release'; }],
+    ['wrong base', (event: ReturnType<typeof releaseEvent>) => { event.event.pull_request.base.ref = 'other'; }],
+    ['untrusted actor', (event: ReturnType<typeof releaseEvent>) => { event.actor = 'other'; }],
+    ['different triggering actor', (event: ReturnType<typeof releaseEvent>) => { event.triggering_actor = 'Gkxie'; }],
+    ['rerun', (event: ReturnType<typeof releaseEvent>) => { event.run_attempt = 2; }],
+  ])('title edits remain ineligible for %s', (_reason, mutate) => {
+    const corrected = releaseEvent('edited');
+    corrected.event.changes.title = { from: 'Old title' };
+    mutate(corrected);
+    assert.equal(releaseWorkflow(corrected).eligible, false);
+  });
+
+  test('allows the owner to correct metadata, but still rejects a candidate based on stale master', () => {
+    const { baseSha, repository } = fixture();
+    const corrected = releaseEvent('edited');
+    corrected.actor = 'Gkxie';
+    corrected.triggering_actor = 'Gkxie';
+    corrected.event.changes.title = { from: 'Old title' };
+    assert.equal(releaseWorkflow(corrected).eligible, true);
+    git(repository, 'checkout', '-b', 'updated-master', baseSha);
+    git(repository, 'commit', '--allow-empty', '-m', 'docs: update master');
+    const updatedBase = git(repository, 'rev-parse', 'HEAD');
+    git(repository, 'checkout', 'master');
+    const result = verify(repository, updatedBase, corrected.event.pull_request.title);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /must directly follow current master/u);
+  });
 });

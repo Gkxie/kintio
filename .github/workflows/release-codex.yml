@@ -3,7 +3,7 @@ name: Release Codex validation
 on:
   pull_request_target:
     branches: [master]
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
     paths:
       - CHANGELOG.md
       - package.json
@@ -13,7 +13,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-codex-validation-${{ github.event.pull_request.number }}
+  # Body-only edits must not cancel a candidate waiting for Environment approval.
+  group: release-codex-validation-${{ github.event.pull_request.number }}-${{ github.event.action == 'edited' && !github.event.changes.title && github.run_id || 'candidate' }}
   cancel-in-progress: true
 
 jobs:
@@ -23,6 +24,7 @@ jobs:
       github.repository == 'Gkxie/kintio' &&
       github.event_name == 'pull_request_target' &&
       github.run_attempt == 1 &&
+      (github.event.action != 'edited' || github.event.changes.title) &&
       github.event.pull_request.draft == false &&
       github.event.pull_request.base.repo.full_name == github.repository &&
       github.event.pull_request.base.ref == 'master' &&
