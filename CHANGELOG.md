@@ -12,6 +12,10 @@ This file records important user-visible changes after the first public release.
   recorded channel outcomes still use the existing delivery path
   ([#102](https://github.com/Gkxie/kintio/issues/102)).
 
+- Live follow-ups now steer a recovering conversation immediately and promote
+  waiting recovery work, while independent historical requests keep their own
+  turns and wait for idle capacity ([#102](https://github.com/Gkxie/kintio/issues/102)).
+
 - Recheck current authorization and reply-window validity before recovery can
   use the Agent, retire superseded iLink work, and prevent prepared thread
   caches from reusing an archived or deleted thread. Backlog preparation and
