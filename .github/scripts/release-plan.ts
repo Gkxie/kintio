@@ -109,6 +109,97 @@ export function buildReleasePlanFiles(input: ReleasePlanInput): ReleasePlanFiles
   };
 }
 
+export function validateReleaseFiles(
+  files: readonly { filename: string; status: string }[],
+): void {
+  const required = ['CHANGELOG.md', 'package.json', 'src/version.ts'];
+  const allowed = new Set([...required, 'SECURITY.md']);
+  for (const file of required) {
+    if (!files.some((item) => item.filename === file)) {
+      throw new Error('Release PR must change ' + file);
+    }
+  }
+  for (const file of files) {
+    if (file.status === 'renamed') throw new Error('Release PR cannot rename files');
+    if (!allowed.has(file.filename)) throw new Error('Release PR changed ' + file.filename);
+  }
+}
+
+export function validateReleaseManifest(input: {
+  version: string;
+  packageSource: string;
+  runtimeSource: string;
+  basePackageSource: string;
+  baseRuntimeSource: string;
+}): void {
+  const packageJson = JSON.parse(input.packageSource) as Record<string, unknown>;
+  const basePackage = JSON.parse(input.basePackageSource) as Record<string, unknown>;
+  if (packageJson.name !== '@kin-tio/cli' || packageJson.version !== input.version) {
+    throw new Error('package identity does not match the Release PR');
+  }
+  const releasePackage = { ...packageJson };
+  const previousPackage = { ...basePackage };
+  delete releasePackage.version;
+  delete previousPackage.version;
+  if (JSON.stringify(releasePackage) !== JSON.stringify(previousPackage)) {
+    throw new Error('Release PR changed package.json beyond its version');
+  }
+  const baseRuntimeVersion = /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u
+    .exec(input.baseRuntimeSource)?.[1];
+  if (
+    baseRuntimeVersion !== basePackage.version ||
+    input.runtimeSource !== `export const KINTIO_VERSION = '${input.version}';\n`
+  ) throw new Error('runtime version does not match the Release PR');
+}
+
+export function validateFrozenChangelog(source: string, version: string): void {
+  const { lines, unreleased, start, nextSection } = releasedSection(source, version);
+  if (lines.slice(unreleased + 1, start).join('\n').trim()) {
+    throw new Error('Changelog does not freeze one empty Unreleased section');
+  }
+  if (!lines.slice(start + 1, nextSection).some((line) => line.startsWith('- '))) {
+    throw new Error('release Changelog section has no entries');
+  }
+}
+
+export function releaseNotes(source: string, version: string, latestPublished?: string): string {
+  const { lines, start, nextSection } = releasedSection(source, version);
+  const end = latestPublished && latestPublished !== version
+    ? findReleasedVersion(lines, latestPublished)
+    : nextSection;
+  if (end <= start) throw new Error('published changelog versions are not descending');
+  const notes = lines.slice(start + 1, end).join('\n').trim();
+  if (!notes.split('\n').some((line) => line.startsWith('- '))) {
+    throw new Error(`CHANGELOG.md has no unpublished entries for ${version}`);
+  }
+  return notes;
+}
+
+function releasedSection(source: string, version: string): {
+  lines: string[];
+  unreleased: number;
+  start: number;
+  nextSection: number;
+} {
+  const lines = source.split(/\r?\n/u);
+  const headings = lines.flatMap((line, index) => line === '## Unreleased' ? [index] : []);
+  if (headings.length !== 1) throw new Error('CHANGELOG.md requires one Unreleased section');
+  const unreleased = headings[0]!;
+  const start = findReleasedVersion(lines, version);
+  if (unreleased > start) throw new Error('Unreleased must precede released versions');
+  const nextSection = lines.findIndex((line, index) => index > start && line.startsWith('## '));
+  return { lines, unreleased, start, nextSection: nextSection < 0 ? lines.length : nextSection };
+}
+
+function findReleasedVersion(lines: readonly string[], version: string): number {
+  const dated = new RegExp('^## ' + version.replaceAll('.', '\\.') + ' - \\d{4}-\\d{2}-\\d{2}$', 'u');
+  const matches = lines.flatMap((line, index) =>
+    line === '## ' + version || dated.test(line) ? [index] : [],
+  );
+  if (matches.length !== 1) throw new Error(`CHANGELOG.md requires one section for ${version}`);
+  return matches[0]!;
+}
+
 function locateUnreleased(source: string): UnreleasedSection {
   const matches = [...source.matchAll(/^## Unreleased\r?$/gmu)];
   if (matches.length !== 1) {
@@ -190,4 +281,3 @@ function renderPackage(packageJson: Record<string, unknown>, original: string): 
   const finalEol = /\r?\n$/u.test(original) ? eol : '';
   return JSON.stringify(packageJson, undefined, indentation).replace(/\n/gu, eol) + finalEol;
 }
-

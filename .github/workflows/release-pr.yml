@@ -56,6 +56,11 @@ jobs:
         run: |
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
+          import {
+            validateFrozenChangelog,
+            validateReleaseFiles,
+            validateReleaseManifest,
+          } from './.github/scripts/release-plan.ts';
 
           const repository = process.env.REPOSITORY;
           const mergeSha = process.env.MERGE_SHA;
@@ -132,21 +137,7 @@ jobs:
           if (files.length !== pull.changed_files) {
             throw new Error('Release PR file enumeration is incomplete');
           }
-          const required = ['CHANGELOG.md', 'package.json', 'src/version.ts'];
-          const allowed = new Set([...required, 'SECURITY.md']);
-          for (const file of required) {
-            if (!files.some((item) => item.filename === file)) {
-              throw new Error('Release PR must change ' + file);
-            }
-          }
-          for (const file of files) {
-            if (file.status === 'renamed') {
-              throw new Error('Release PR cannot rename files');
-            }
-            if (!allowed.has(file.filename)) {
-              throw new Error('Release PR changed ' + file.filename);
-            }
-          }
+          validateReleaseFiles(files);
 
           const [packageSource, runtimeSource, changelog, basePackageSource, baseRuntime] = await Promise.all([
             readFile('package.json'),
@@ -155,68 +146,11 @@ jobs:
             readFile('package.json', pull.base.sha),
             readFile('src/version.ts', pull.base.sha),
           ]);
-          const packageJson = JSON.parse(packageSource);
-          const basePackage = JSON.parse(basePackageSource);
-          if (packageJson.name !== '@kin-tio/cli' || packageJson.version !== version) {
-            throw new Error('package identity does not match the Release PR');
-          }
-          const releasePackage = { ...packageJson };
-          const previousPackage = { ...basePackage };
-          delete releasePackage.version;
-          delete previousPackage.version;
-          if (JSON.stringify(releasePackage) !== JSON.stringify(previousPackage)) {
-            throw new Error('Release PR changed package.json beyond its version');
-          }
-          const runtimeVersion = /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u
-            .exec(runtimeSource)?.[1];
-          const baseRuntimeVersion = /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u
-            .exec(baseRuntime)?.[1];
-          if (
-            runtimeVersion !== version
-            || baseRuntimeVersion !== basePackage.version
-            || runtimeSource !== `export const KINTIO_VERSION = '${version}';\n`
-          ) {
-            throw new Error('runtime version does not match the Release PR');
-          }
-          const lines = changelog.split(/\r?\n/u);
-          const unreleased = lines.reduce(
-            (matches, line, index) => line === '## Unreleased'
-              ? [...matches, index]
-              : matches,
-            [],
-          );
-          const releaseSections = lines.reduce(
-            (matches, line, index) =>
-              (
-                line === '## ' + version
-                || new RegExp(
-                  '^## ' + version.replaceAll('.', '\\.')
-                    + ' - \\d{4}-\\d{2}-\\d{2}$',
-                  'u',
-                ).test(line)
-              )
-                ? [...matches, index]
-                : matches,
-            [],
-          );
-          if (
-            unreleased.length !== 1
-            || releaseSections.length !== 1
-            || unreleased[0] > releaseSections[0]
-            || lines.slice(unreleased[0] + 1, releaseSections[0]).join('\n').trim()
-          ) {
-            throw new Error('Changelog does not freeze one empty Unreleased section');
-          }
-          const nextSection = lines.findIndex(
-            (line, index) => index > releaseSections[0] && line.startsWith('## '),
-          );
-          const notes = lines.slice(
-            releaseSections[0] + 1,
-            nextSection < 0 ? lines.length : nextSection,
-          );
-          if (!notes.some((line) => line.startsWith('- '))) {
-            throw new Error('release Changelog section has no entries');
-          }
+          validateReleaseManifest({
+            version, packageSource, runtimeSource, basePackageSource,
+            baseRuntimeSource: baseRuntime,
+          });
+          validateFrozenChangelog(changelog, version);
 
           const parseVersion = (value) => {
             const match = /^v?(\d+)\.(\d+)\.(\d+)$/u.exec(value);
