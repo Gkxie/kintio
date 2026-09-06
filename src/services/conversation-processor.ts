@@ -23,10 +23,21 @@ import type {
   AgentRuntime,
   AgentSubmission,
 } from '../agent/runtime.ts';
+import { AgentTurnCancelledError } from '../agent/runtime.ts';
 import type { CoreState, InboundRecord } from '../state/sqlite-store.ts';
 
 type ChannelMessage = NormalizedMessage & { readonly messageKey: string };
 type WorkPriority = 'high' | 'low';
+type PendingTurn = {
+  readonly completion: Promise<void>;
+  boundaryMessageKey: string;
+};
+type AdmissionQueue = { tail: Promise<void>; live: number };
+type ActiveConversation = {
+  readonly record: InboundRecord;
+  priority: WorkPriority;
+  turn?: PendingTurn;
+};
 type SlotWaiter = {
   readonly key: string;
   readonly record: InboundRecord;
@@ -49,6 +60,10 @@ interface ProcessorOptions {
   readonly mediaGateway: MediaGateway;
   readonly channel: SendDrain;
   readonly agentAccess?: (record: ChannelIdentity) => AgentAccess;
+  readonly approvals?: {
+    readonly binding: (record: ChannelIdentity) => string | undefined;
+    readonly notify: (record: InboundRecord, content: string, signal: AbortSignal) => Promise<void>;
+  };
   readonly allowedUserIds?: readonly string[];
   readonly authorization?: {
     readonly trigger?: string;
@@ -67,6 +82,9 @@ type UnboundAgentInput = Omit<
   | 'conversationId'
   | 'threadId'
   | 'toolSessionToken'
+  | 'approvals'
+  | 'approvalCode'
+  | 'controlRefresh'
 >;
 
 function errorMessage(error: unknown): string {
@@ -125,7 +143,7 @@ export class ConversationProcessor {
   readonly #store: CoreState;
   readonly #pipeline: Pick<
     ProcessorOptions,
-    'agent' | 'mediaGateway' | 'channel' | 'agentAccess'
+    'agent' | 'mediaGateway' | 'channel' | 'agentAccess' | 'approvals'
   >;
   #allowedUsers: ReadonlySet<string>;
   #authorization: {
@@ -134,14 +152,11 @@ export class ConversationProcessor {
     readonly confirmationText: string;
   };
   readonly #logger: Logger;
-  readonly #queues = new Map<string, Promise<void>>();
+  readonly #queues = new Map<string, AdmissionQueue>();
   readonly #recoveries = new Map<string, Promise<void>>();
   readonly #background = new Set<Promise<void>>();
   readonly #onlineRetries = new Map<string, number>();
-  readonly #activeConversations = new Map<string, {
-    readonly record: InboundRecord;
-    readonly priority: WorkPriority;
-  }>();
+  readonly #activeConversations = new Map<string, ActiveConversation>();
   readonly #highWaiters: SlotWaiter[] = [];
   readonly #lowWaiters: SlotWaiter[] = [];
   readonly #queueNotified = new Set<string>();
@@ -205,6 +220,53 @@ export class ConversationProcessor {
     return this.#pipeline.agentAccess?.(record) === 'host' ? 'host' : 'restricted';
   }
 
+  #approvalBinding(record: ChannelIdentity): string | undefined {
+    return record.channel === 'weixin_ilink' && this.#agentAccess(record) === 'host'
+      ? this.#pipeline.approvals?.binding(record) : undefined;
+  }
+
+  #approvals(record: InboundRecord, boundaryMessageKey: string): AgentInput['approvals'] {
+    const binding = this.#approvalBinding(record);
+    const boundary = this.#store.getInbound(boundaryMessageKey);
+    if (!binding || !boundary || !this.#pipeline.approvals) return undefined;
+    const isAllowed = () => {
+      try {
+        return this.#accepting && !this.#pausedChannels.has(record.channel) &&
+          this.#approvalBinding(record) === binding &&
+          ['processing', 'preparing'].includes(this.#store.getInbound(record.messageKey)?.status || '');
+      } catch { return false; }
+    };
+    return {
+      isAllowed,
+      notify: async (content, signal) => {
+        if (signal.aborted || !isAllowed()) throw new Error('Approval conversation is no longer active');
+        await this.#pipeline.approvals!.notify(boundary, content, signal);
+      },
+    };
+  }
+
+  #authorized(record: ChannelIdentity): boolean {
+    return record.channel !== 'wechat_kf' || this.#allowedUsers.has(record.peerId) ||
+      this.#store.getAuthorization(record.peerId)?.authorized === true;
+  }
+
+  #admit(record: InboundRecord, boundaryMessageKey = record.messageKey): boolean {
+    if (this.#pausedChannels.has(record.channel)) {
+      this.#releaseIfInactive(record);
+      return false;
+    }
+    const reason = !this.#authorized(record)
+      ? 'authorization_revoked'
+      : !this.#store.getAgentSessionBoundary(record.messageKey, boundaryMessageKey)
+        ? 'reply_boundary_unavailable'
+        : '';
+    if (!reason) return true;
+    this.#store.closeAgentSessions(record.messageKey);
+    this.#store.suppressInbound(record.messageKey, reason);
+    this.#releaseIfInactive(record);
+    return false;
+  }
+
   #notifyQueued(record: InboundRecord): void {
     const key = this.#conversationKey(record);
     if (this.#queueNotified.has(key)) return;
@@ -262,7 +324,8 @@ export class ConversationProcessor {
     const [, active] = entry;
     const opaqueId = conversationId(active.record);
     const primary = this.#pipeline.agent.activePrimary(opaqueId);
-    if (!primary || this.#store.listMessageAttempts(primary).length) return;
+    if (!primary || this.#preempting.has(primary) || this.#store.listMessageAttempts(primary)
+      .some((attempt) => attempt.source !== 'agent_approval')) return;
     this.#preempting.add(primary);
     try {
       if (!await this.#pipeline.agent.interrupt(opaqueId)) {
@@ -279,7 +342,12 @@ export class ConversationProcessor {
   #acquire(record: InboundRecord, priority: WorkPriority): Promise<void> {
     if (this.#pausedChannels.has(record.channel)) return Promise.reject(new Error('Channel is stopped'));
     const key = this.#conversationKey(record);
-    if (this.#activeConversations.has(key)) return Promise.resolve();
+    if (this.#queues.get(key)?.live) priority = 'high';
+    const active = this.#activeConversations.get(key);
+    if (active?.turn && !this.#pipeline.agent.activePrimary(conversationId(record))) {
+      return active.turn.completion.then(() => this.#acquire(record, priority));
+    }
+    if (active) return Promise.resolve();
     const lowActive = [...this.#activeConversations.values()]
       .some((active) => active.priority === 'low');
     if (
@@ -317,41 +385,96 @@ export class ConversationProcessor {
   }
 
   #releaseIfInactive(record: InboundRecord): void {
-    if (!this.#pipeline.agent.activePrimary(conversationId(record))) {
+    const active = this.#activeConversations.get(this.#conversationKey(record));
+    if (!active?.turn && !this.#pipeline.agent.activePrimary(conversationId(record))) {
       this.#release(record);
     }
+  }
+
+  #yieldToLiveInput(record: InboundRecord): boolean {
+    if (
+      this.#activeConversations.get(this.#conversationKey(record))?.priority !== 'low' ||
+      !this.#highWaiters.length || !this.#store.deferActiveInbound(record.messageKey)
+    ) return false;
+    this.#release(record);
+    return true;
+  }
+
+  #promote(record: InboundRecord): void {
+    const key = this.#conversationKey(record);
+    const active = this.#activeConversations.get(key);
+    if (active) active.priority = 'high';
+    const index = this.#lowWaiters.findIndex((waiter) => waiter.key === key);
+    if (index !== -1) {
+      const waiter = this.#lowWaiters.splice(index, 1)[0]!;
+      this.#highWaiters.push({ ...waiter, priority: 'high' });
+      this.#wakeWaiters();
+      if (!this.#activeConversations.has(key)) {
+        this.#notifyQueued(record);
+        void this.#preemptLow(key);
+      }
+    } else if (active) {
+      this.#wakeWaiters();
+    }
+  }
+
+  #schedule(
+    record: InboundRecord,
+    prepare: () => Promise<PendingTurn | undefined>,
+    live = false,
+  ): Promise<PendingTurn | undefined> {
+    const key = this.#conversationKey(record);
+    const queue = this.#queues.get(key) || { tail: Promise.resolve(), live: 0 };
+    if (live) queue.live += 1;
+    const task = queue.tail.then(prepare);
+    const settled = task.then(() => undefined, () => undefined).finally(() => {
+      if (live) queue.live -= 1;
+    });
+    queue.tail = settled;
+    this.#queues.set(key, queue);
+    void settled.finally(() => {
+      if (queue.tail === settled) this.#queues.delete(key);
+    });
+    return task;
   }
 
   enqueue(messageKey: string): Promise<void> {
     if (!this.#accepting) return Promise.resolve();
     const record = this.#store.getInbound(messageKey) as InboundRecord | undefined;
     if (!record) return Promise.resolve();
-    const key = this.#conversationKey(record);
-    const task = (this.#queues.get(key) || this.#recoveries.get(key) || Promise.resolve())
-      .catch(() => undefined)
-      .then(() => this.#processRecoverably(record.messageKey))
+    const message = this.#message(record);
+    const live = Boolean(record.status === 'received' && message &&
+      isProcessableCustomerMessage(message) && this.#authorized(record));
+    if (live) this.#promote(record);
+    return this.#schedule(record, () => this.#processRecoverably(record.messageKey), live)
+      .then(() => undefined)
       .catch((error: unknown) => {
         this.#releaseIfInactive(record);
         this.#logger.error?.(
           `[processor] inbound processing failed message_key=${messageKey}: ${errorMessage(error)}`,
         );
       });
-    this.#queues.set(key, task);
-    void task.finally(() => {
-      if (this.#queues.get(key) === task) this.#queues.delete(key);
-    });
-    return task;
   }
 
-  async #processRecoverably(messageKey: string): Promise<void> {
+  async #processRecoverably(messageKey: string): Promise<PendingTurn | undefined> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         let record = this.#store.getInbound(messageKey);
-        if (!record || this.#pausedChannels.has(record.channel)) return;
-        if (record.status === 'received') {
-          await this.#process(messageKey);
+        if (!record) return;
+        if (this.#pausedChannels.has(record.channel)) {
+          this.#releaseIfInactive(record);
           return;
+        }
+        const active = this.#activeConversations.get(this.#conversationKey(record));
+        if (active && this.#preempting.has(active.record.messageKey)) {
+          await active.turn?.completion;
+          record = this.#store.getInbound(messageKey);
+          if (!record || this.#pausedChannels.has(record.channel)) return;
+        }
+        if (this.#pipeline.agent.activePrimary(conversationId(record)) === messageKey) return;
+        if (record.status === 'received') {
+          return await this.#process(messageKey);
         }
         if (record.status === 'failed') {
           record = this.#store.claimInbound({
@@ -371,8 +494,9 @@ export class ConversationProcessor {
           candidate.primaryMessageKey === messageKey ||
           (candidate.status === 'received' && candidate.inboxSeq > record.inboxSeq),
         );
-        await this.#recoverConversation(group, 'high');
-        return;
+        return await this.#recoverPrimary(record, group.filter((candidate) =>
+          candidate.messageKey === messageKey || candidate.primaryMessageKey === messageKey,
+        ), 'high', group.at(-1)?.messageKey);
       } catch (error: unknown) {
         const record = this.#store.getInbound(messageKey);
         if (record && this.#pausedChannels.has(record.channel)) {
@@ -388,8 +512,10 @@ export class ConversationProcessor {
     throw lastError;
   }
 
-  #track(task: Promise<void>, record: InboundRecord): Promise<void> {
+  #track(task: Promise<void>, record: InboundRecord, boundaryMessageKey: string): PendingTurn {
     const messageKey = record.messageKey;
+    const key = this.#conversationKey(record);
+    const active = this.#activeConversations.get(key);
     const guarded = task.catch((error: unknown) => {
       if (this.#preempting.delete(messageKey)) {
         this.#store.closeAgentSessions(messageKey);
@@ -402,6 +528,13 @@ export class ConversationProcessor {
         return;
       }
       const inbound = this.#store.getInbound(messageKey);
+      if (error instanceof AgentTurnCancelledError) {
+        this.#store.closeAgentSessions(messageKey);
+        this.#store.suppressInbound(messageKey, 'agent_approval_cancelled');
+        this.#onlineRetries.delete(messageKey);
+        return;
+      }
+      if (inbound && ['completed', 'ignored', 'suppressed', 'absorbed'].includes(inbound.status)) return;
       const superseded = inbound && this.#store.listPendingInbound({
         statuses: ['received'],
         channel: inbound.channel,
@@ -425,28 +558,42 @@ export class ConversationProcessor {
       this.#logger.error?.(
         `[processor] Codex completion failed message_key=${messageKey}: ${errorMessage(error)}`,
       );
-    }).finally(() => this.#release(record));
+    }).finally(() => {
+      if (this.#activeConversations.get(key) === active) this.#release(record);
+    });
+    const turn = { completion: guarded, boundaryMessageKey };
+    if (active) active.turn = turn;
     this.#background.add(guarded);
     void guarded.finally(() => this.#background.delete(guarded));
-    return guarded;
+    return turn;
   }
 
   async #submit(
     record: InboundRecord,
     input: UnboundAgentInput,
     options: {
-      readonly wait?: boolean;
       readonly boundaryMessageKey?: string;
       readonly recoveredArtifacts?: readonly AgentImageArtifact[];
       readonly started?: (submission: Extract<AgentSubmission, { kind: 'started' }>) => void;
       readonly priority?: WorkPriority;
+      readonly approvalReply?: { readonly code: string; readonly option: number };
+      readonly controlOnly?: boolean;
     } = {},
-  ): Promise<AgentSubmission> {
+  ): Promise<PendingTurn | undefined> {
+    const boundaryMessageKey = options.boundaryMessageKey || record.messageKey;
+    if (!this.#admit(record, boundaryMessageKey)) return;
     const opaqueConversationId = conversationId(record);
     const agentAccess = this.#agentAccess(record);
-    const activePrimary = options.wait
+    const approval = options.approvalReply
+      ? this.#pipeline.agent.pendingApproval?.(opaqueConversationId, options.approvalReply.code, options.approvalReply.option)
+      : undefined;
+    const activePrimary = approval?.primaryMessageKey || (options.approvalReply
       ? undefined
-      : this.#pipeline.agent.activePrimary(opaqueConversationId);
+      : this.#pipeline.agent.activePrimary(opaqueConversationId, options.controlOnly));
+    if ((options.approvalReply || options.controlOnly) && !activePrimary) {
+      this.#store.markInboundIgnored(record.messageKey);
+      return;
+    }
     if (activePrimary) {
       this.#store.beginInboundSteering({
         messageKey: record.messageKey,
@@ -470,6 +617,8 @@ export class ConversationProcessor {
           agentAccess,
           channel: record.channel,
           mode: 'steer',
+          ...(options.approvalReply ? { approvalCode: options.approvalReply.code } : {}),
+          ...(options.controlOnly ? { controlRefresh: true } : {}),
           conversationId: opaqueConversationId,
           threadId: this.#store.getConversation(
             record.channel,
@@ -478,6 +627,7 @@ export class ConversationProcessor {
           )?.threadId || '',
           ...(memoryThreadId ? { archivedThreadId: memoryThreadId } : {}),
           toolSessionToken: session.token,
+          approvals: this.#approvals(primary, record.messageKey),
           publishArtifact: async (artifact) => this.#store.registerAgentArtifact({
             sessionToken: session.token,
             bytes: artifact.bytes,
@@ -489,13 +639,38 @@ export class ConversationProcessor {
         if (submission.kind !== 'steered') {
           throw new Error('Active Agent turn did not accept steering');
         }
+        if (approval && submission.turnId !== approval.turnId) {
+          throw new Error('Approval steering acknowledged a different turn');
+        }
         this.#store.confirmInboundSteered(record.messageKey, {
           codexTurnId: submission.turnId,
         });
-        return submission;
+        const turn = this.#activeConversations.get(this.#conversationKey(record))?.turn;
+        if (turn) turn.boundaryMessageKey = record.messageKey;
+        if (options.approvalReply) {
+          try {
+            this.#store.getAgentSession(session.token);
+            if (!this.#pipeline.agent.respondApproval?.(opaqueConversationId, options.approvalReply.code, options.approvalReply.option, () => {
+              try { this.#store.getAgentSession(session.token); return true; }
+              catch { return false; }
+            })) {
+              this.#pipeline.agent.cancelApprovals?.(opaqueConversationId);
+            }
+          } catch {
+            this.#pipeline.agent.cancelApprovals?.(opaqueConversationId);
+          }
+        }
+        return;
       } catch (error) {
+        if (options.approvalReply) this.#pipeline.agent.cancelApprovals?.(opaqueConversationId);
         this.#store.closeAgentSession(session.token);
         this.#store.requeueInboundSteering(record.messageKey, activePrimary);
+        if (options.controlOnly) {
+          this.#store.suppressInbound(activePrimary, 'approval_control_refresh_failed');
+          this.#store.markInboundIgnored(record.messageKey);
+          await this.#pipeline.agent.interrupt?.(opaqueConversationId);
+          return;
+        }
         throw error;
       }
     }
@@ -504,11 +679,12 @@ export class ConversationProcessor {
       this.#release(record);
       throw new Error('Channel is stopped');
     }
+    if (!this.#admit(record, boundaryMessageKey)) return;
     this.#store.claimInbound({
       messageKey: record.messageKey,
       clientInputId: input.clientInputId || record.messageKey,
     });
-    const boundaryMessageKey = options.boundaryMessageKey || record.messageKey;
+    if (this.#yieldToLiveInput(record)) return;
     const conversationBefore = this.#store.getConversation(
       record.channel,
       record.accountKey,
@@ -536,6 +712,7 @@ export class ConversationProcessor {
       record.accountKey,
       record.peerId,
     )?.memoryThreadId || '';
+    if (!this.#admit(record, boundaryMessageKey) || this.#yieldToLiveInput(record)) return;
     const session = this.#store.createAgentSession({
       messageKey: record.messageKey,
       boundaryMessageKey,
@@ -562,6 +739,7 @@ export class ConversationProcessor {
         threadId: ensuredThreadId,
         ...(memoryThreadId ? { archivedThreadId: memoryThreadId } : {}),
         toolSessionToken: session.token,
+        approvals: this.#approvals(record, boundaryMessageKey),
         publishArtifact: async (artifact) => this.#store.registerAgentArtifact({
           sessionToken: session.token,
           bytes: artifact.bytes,
@@ -581,22 +759,23 @@ export class ConversationProcessor {
     void submission.completion.catch(() => undefined);
     this.#store.markInboundPreparing(record.messageKey, submission.turnId);
     options.started?.(submission);
-    const completion = this.#track(
+    const turn = this.#track(
       submission.completion.then((result) => this.#complete(record, result)),
       record,
+      boundaryMessageKey,
     );
-    if (options.wait) await completion;
-    return submission;
+    const liveWaiter = this.#highWaiters[0];
+    if (liveWaiter) void this.#preemptLow(liveWaiter.key);
+    return turn;
   }
 
   async #process(
     messageKey: string,
     priority: WorkPriority = 'high',
     {
-      wait = false,
       boundaryMessageKey,
-    }: { wait?: boolean; boundaryMessageKey?: string } = {},
-  ): Promise<void> {
+    }: { boundaryMessageKey?: string } = {},
+  ): Promise<PendingTurn | undefined> {
     const record = this.#store.getInbound(messageKey) as InboundRecord | undefined;
     if (!record || record.status !== 'received' || this.#pausedChannels.has(record.channel)) return;
     const message = this.#message(record);
@@ -610,11 +789,7 @@ export class ConversationProcessor {
       this.#store.markInboundIgnored(messageKey);
       return;
     }
-    if (
-      channel === 'wechat_kf' &&
-      !this.#allowedUsers.has(peerId) &&
-      this.#store.getAuthorization(peerId)?.authorized !== true
-    ) {
+    if (!this.#authorized(record)) {
       const isTrigger = Boolean(this.#authorization.trigger) &&
         message.type === COMMON_MESSAGE_TYPES.TEXT &&
         message.text === this.#authorization.trigger;
@@ -637,8 +812,35 @@ export class ConversationProcessor {
       this.#store.markInboundIgnored(messageKey);
       return;
     }
+    if (!this.#admit(record, boundaryMessageKey)) return;
+
+    if (message.type === COMMON_MESSAGE_TYPES.TEXT && /^\/kintio approval(?:\s|$)/u.test(message.text)) {
+      const reply = /^\/kintio approval ([A-F0-9]{12}) ([1-3])$/u.exec(message.text.trim());
+      const key = conversationId(record);
+      if (!reply || !this.#approvalBinding(record) || !this.#pipeline.agent.pendingApproval?.(key, reply[1]!, Number(reply[2]))) {
+        if (this.#approvalBinding(record)) {
+          const previousPrimary = this.#pipeline.agent.activePrimary(key, true);
+          await this.#submit(record, {
+            message: agentMessage(message),
+            contextText: 'An invalid or expired approval control message was received. It grants no permission and is not a new task. Continue the previously requested work with this refreshed channel session.',
+          }, { priority, controlOnly: true });
+          const cancelled = previousPrimary && this.#store.getInbound(previousPrimary)?.errorMessage === 'approval_control_refresh_failed';
+          await this.#pipeline.approvals?.notify(record, cancelled
+            ? 'No action was approved. The running task was cancelled because its delivery session could not be refreshed. Send a new instruction to continue.'
+            : 'This approval code or option is invalid, expired, or already used. No action was approved.', new AbortController().signal);
+        } else this.#store.markInboundIgnored(record.messageKey);
+        return;
+      }
+      await this.#submit(record, {
+        message: agentMessage(message),
+        contextText: 'The participant explicitly answered a pending host approval. Use the refreshed channel session below; the host returns the approval decision separately. This control reply is not a new task.',
+      }, { priority, approvalReply: { code: reply[1]!, option: Number(reply[2]) } });
+      return;
+    }
+    this.#pipeline.agent.cancelApprovals?.(conversationId(record));
 
     await this.#acquire(record, priority);
+    if (!this.#admit(record, boundaryMessageKey)) return;
     if (message.attachments.length) {
       this.#store.rememberInboundMedia({
         messageKey,
@@ -657,7 +859,7 @@ export class ConversationProcessor {
       attempt.metadata?.tool === 'generated_image' &&
       ['accepted', 'uncertain'].includes(attempt.status),
     );
-    await this.#submit(record, {
+    return this.#submit(record, {
       message: agentMessage(message),
       resolvedMedia: await this.#pipeline.mediaGateway.resolveForCodex(message),
       mediaCatalog,
@@ -673,7 +875,7 @@ export class ConversationProcessor {
             },
           }
         : {}),
-    }, { priority, wait, ...(boundaryMessageKey ? { boundaryMessageKey } : {}) });
+    }, { priority, ...(boundaryMessageKey ? { boundaryMessageKey } : {}) });
   }
 
   async #complete(
@@ -790,7 +992,10 @@ export class ConversationProcessor {
       conversations.set(key, group);
     }
     const tasks = [...conversations.entries()].map(([key, group]) => {
-      const task = this.#recoverConversation(group, priority).catch((error: unknown) => {
+      const previous = this.#recoveries.get(key);
+      const task = (previous
+        ? previous.then(() => this.#recoverConversation(group, priority))
+        : this.#recoverConversation(group, priority)).catch((error: unknown) => {
         const first = group[0];
         if (first) this.#releaseIfInactive(first);
         this.#logger.error?.(
@@ -819,7 +1024,7 @@ export class ConversationProcessor {
         continue;
       }
       if (isSystemEvent(message)) {
-        await this.#process(record.messageKey, priority);
+        await this.#schedule(record, () => this.#process(record.messageKey, priority));
         record.status = this.#store.getInbound(record.messageKey)?.status || record.status;
       }
     }
@@ -827,7 +1032,7 @@ export class ConversationProcessor {
       ['failed', 'processing', 'preparing'].includes(record.status) &&
       !record.primaryMessageKey,
     );
-    const recoveryBoundary = [...ordered].reverse().find((record) => {
+    let recoveryBoundary = [...ordered].reverse().find((record) => {
       if (['completed', 'ignored', 'absorbed', 'suppressed'].includes(record.status)) {
         return false;
       }
@@ -835,20 +1040,38 @@ export class ConversationProcessor {
       record.status = this.#store.getInbound(record.messageKey)?.status || record.status;
       return false;
     })?.messageKey;
-    for (const primary of primaries) {
-      const group = ordered.filter((record) =>
-        record.messageKey === primary.messageKey ||
-        record.primaryMessageKey === primary.messageKey,
-      );
-      await this.#recoverPrimary(primary, group, priority, recoveryBoundary);
-    }
-    for (const record of ordered) {
-      if (record.status === 'received') {
-        await this.#process(record.messageKey, priority, {
-          wait: true,
-          ...(recoveryBoundary ? { boundaryMessageKey: recoveryBoundary } : {}),
+    const units = [...primaries, ...ordered.filter((record) => record.status === 'received')];
+    for (const unit of units) {
+      let retry: boolean;
+      do {
+        retry = false;
+        const pending = await this.#schedule(unit, async () => {
+          const active = this.#activeConversations.get(this.#conversationKey(unit));
+          if (active?.turn) {
+            retry = true;
+            return active.turn;
+          }
+          const current = this.#store.getInbound(unit.messageKey);
+          if (!current) return;
+          if (current.status === 'received') {
+            return this.#process(current.messageKey, priority, {
+              ...(recoveryBoundary ? { boundaryMessageKey: recoveryBoundary } : {}),
+            });
+          }
+          if (!['failed', 'processing', 'preparing'].includes(current.status) || current.primaryMessageKey) return;
+          const group = this.#store.listPendingInbound({
+            channel: current.channel, accountKey: current.accountKey, peerId: current.peerId,
+            statuses: ['failed', 'processing', 'preparing', 'steering', 'steered'], limit: 1000,
+          }).filter((record) => record.messageKey === current.messageKey || record.primaryMessageKey === current.messageKey);
+          return this.#recoverPrimary(current, group, priority, recoveryBoundary);
         });
-      }
+        // Historical units remain separate, but completion never owns the live-input queue.
+        await pending?.completion;
+        if (
+          pending && (this.#store.getInbound(pending.boundaryMessageKey)?.inboxSeq || 0) >
+            (this.#store.getInbound(recoveryBoundary || unit.messageKey)?.inboxSeq || 0)
+        ) recoveryBoundary = pending.boundaryMessageKey;
+      } while (retry);
     }
   }
 
@@ -857,13 +1080,7 @@ export class ConversationProcessor {
     group: InboundRecord[],
     priority: WorkPriority,
     recoveryBoundary?: string,
-  ): Promise<void> {
-    if (primary.status === 'failed') {
-      primary = this.#store.claimInbound({
-        messageKey: primary.messageKey,
-        clientInputId: primary.clientInputId || primary.messageKey,
-      });
-    }
+  ): Promise<PendingTurn | undefined> {
     const decoded = group.flatMap((record) => {
       const message = this.#message(record);
       return message ? [{ record, message }] : [];
@@ -873,6 +1090,17 @@ export class ConversationProcessor {
     )?.message;
     if (!primaryMessage) return;
     const validGroup = decoded.map(({ record }) => record);
+    const boundaryMessageKey =
+      recoveryBoundary || validGroup.at(-1)?.messageKey || primary.messageKey;
+    if (!this.#admit(primary, boundaryMessageKey)) return;
+    await this.#acquire(primary, priority);
+    if (!this.#admit(primary, boundaryMessageKey) || this.#yieldToLiveInput(primary)) return;
+    if (primary.status === 'failed') {
+      primary = this.#store.claimInbound({
+        messageKey: primary.messageKey,
+        clientInputId: primary.clientInputId || primary.messageKey,
+      });
+    }
     const conversation = this.#store.getConversation(
       primary.channel,
       primary.accountKey,
@@ -891,6 +1119,7 @@ export class ConversationProcessor {
           primary.channel,
         )
       : undefined;
+    if (!this.#admit(primary, boundaryMessageKey) || this.#yieldToLiveInput(primary)) return;
     const missingInput = steering.some((record) => {
       const clientId = record.clientInputId || record.messageKey;
       if (!inspection?.foundClientInputIds.has(clientId)) return true;
@@ -915,6 +1144,7 @@ export class ConversationProcessor {
             ? { executedAttemptIds: inspection.executedAttemptIds }
             : {}),
         });
+        this.#releaseIfInactive(primary);
         return;
       }
     }
@@ -945,9 +1175,7 @@ export class ConversationProcessor {
     const resolvedMedia = (await Promise.all(
       decoded.map(({ message }) => this.#pipeline.mediaGateway.resolveForCodex(message)),
     )).flat() as ResolvedImage[];
-    const boundaryMessageKey =
-      recoveryBoundary || validGroup.at(-1)?.messageKey || primary.messageKey;
-    await this.#submit(primary, {
+    return this.#submit(primary, {
       message: agentMessage(primaryMessage),
       resolvedMedia,
       mediaCatalog,
@@ -962,7 +1190,6 @@ export class ConversationProcessor {
       allowNoAction,
       clientInputId: `${primary.messageKey}-recovery`,
     }, {
-      wait: true,
       boundaryMessageKey,
       ...(recoveredArtifacts.length
         ? { recoveredArtifacts }
@@ -986,7 +1213,7 @@ export class ConversationProcessor {
     ) {
       await Promise.allSettled([
         ...this.#recoveries.values(),
-        ...this.#queues.values(),
+        ...[...this.#queues.values()].map((queue) => queue.tail),
         ...this.#background,
       ]);
     }
@@ -1009,6 +1236,7 @@ export class ConversationProcessor {
     if (enabled) this.#pausedChannels.delete(channel);
     else {
       this.#pausedChannels.add(channel);
+      this.#pipeline.agent.invalidateApprovals?.();
       for (const waiters of [this.#highWaiters, this.#lowWaiters]) {
         for (let index = waiters.length - 1; index >= 0; index -= 1) {
           if (waiters[index]?.record.channel === channel) waiters.splice(index, 1)[0]!.resolve();
@@ -1021,7 +1249,8 @@ export class ConversationProcessor {
   async waitForChannelIdle(channel: ChatChannel): Promise<void> {
     const prefix = `${channel}\0`;
     while (true) {
-      const pending = [...this.#queues, ...this.#recoveries]
+      const pending = [...this.#queues].map(([key, queue]) => [key, queue.tail] as const)
+        .concat([...this.#recoveries])
         .filter(([key]) => key.startsWith(prefix)).map(([, task]) => task);
       if (pending.length) await Promise.allSettled(pending);
       else if ([...this.#activeConversations.values()].some(({ record }) => record.channel === channel)) {
@@ -1032,6 +1261,7 @@ export class ConversationProcessor {
 
   stopAccepting(): void {
     this.#accepting = false;
+    this.#pipeline.agent.invalidateApprovals?.();
   }
 
   async close(): Promise<void> {

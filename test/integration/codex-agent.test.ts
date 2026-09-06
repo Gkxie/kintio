@@ -12,6 +12,8 @@ import {
 import type { AgentInput, AgentMessage } from '../../src/agent/runtime.ts';
 import type {
   CodexBoundary,
+  CodexApprovalRequest,
+  CodexApprovalResult,
   CodexInput,
   CodexRun,
   CodexThread,
@@ -92,6 +94,7 @@ function agentInput(
 }
 
 class FakeBoundary implements CodexBoundary {
+  approvalHandler?: (request: CodexApprovalRequest) => Promise<CodexApprovalResult>;
   readonly startOptions: CodexThreadOptions[] = [];
   readonly runCalls: { input: CodexInput; options?: { clientUserMessageId?: string } }[] = [];
   readonly steerCalls: CodexInput[] = [];
@@ -135,6 +138,10 @@ class FakeBoundary implements CodexBoundary {
 
   async close(): Promise<void> {
     this.closed = true;
+  }
+
+  setApprovalHandler(handler: (request: CodexApprovalRequest) => Promise<CodexApprovalResult>): void {
+    this.approvalHandler = handler;
   }
 }
 
@@ -220,6 +227,40 @@ test('host-authorized iLink uses a separate unrestricted Codex boundary', async 
   assert.match(instructions, /host owner.*full Agent authorization/su);
   assert.doesNotMatch(instructions, /Never read|Never access localhost|Never use shell/u);
   assert.match(String(trusted.runCalls[0]?.input), /weixin_ilink tools/u);
+});
+
+test('host approval is explicit, scoped to its active conversation, and consumed once', async (t) => {
+  const boundary = new FakeBoundary([]);
+  const completed = deferred<CodexTurnResult>();
+  boundary.thread.startRun = async () => ({ turnId: 'approval-turn', completion: completed.promise });
+  t.onTestFinished(() => completed.resolve({ items: [executedIlinkText('done', 'sa_done', 1)] }));
+  const agent = createAgent(t, boundary);
+  let prompt = '';
+  const submission = await agent.submit(agentInput('approval-primary', {
+    channel: 'weixin_ilink', agentAccess: 'host', approvals: {
+      isAllowed: () => true,
+      async notify(content) { prompt = content; },
+    },
+  }));
+  assert.ok(boundary.approvalHandler);
+  const pending = boundary.approvalHandler({
+    id: 'request-one', kind: 'command', threadId: 'thread-test', turnId: 'approval-turn',
+    params: { command: 'git status', cwd: '/workspace' }, signal: new AbortController().signal,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const code = /\/kintio approval ([A-Z0-9]+) 1/u.exec(prompt)?.[1];
+  assert.ok(code);
+  assert.equal(agent.pendingApproval('different-conversation', code), undefined);
+  assert.deepEqual(agent.pendingApproval('cv-test', code), { primaryMessageKey: 'approval-primary', turnId: 'approval-turn' });
+  assert.equal(agent.respondApproval('different-conversation', code, 1, () => true), false);
+  assert.equal(agent.respondApproval('cv-test', code, 99, () => true), false);
+  assert.equal(agent.respondApproval('cv-test', code, 1, () => true), true);
+  const accepted = await pending;
+  assert.equal(typeof accepted === 'object' && accepted.decision, 'accept');
+  assert.equal(typeof accepted === 'object' && accepted.isAllowed(), true);
+  assert.equal(agent.respondApproval('cv-test', code, 1, () => true), false);
+  completed.resolve({ items: [executedIlinkText('done', 'sa_done', 1)] });
+  if (submission.kind === 'started') await submission.completion;
 });
 
 test('one Agent adapter preserves channel workspaces and restricted versus host access when ensuring threads', async (t) => {
@@ -319,6 +360,58 @@ test('archived thread starts fresh with memory binding while deleted thread star
   assert.notEqual(await agent.ensureThread('cv-deleted', deleted), deleted);
   assert.equal(agent.takePendingMemoryThread('cv-deleted'), '');
   assert.deepEqual(calls, { starts: 2, resumes: [active] });
+});
+
+for (const state of ['archived', 'missing'] as const) {
+  test(`a prepared thread cannot override its ${state} state`, async (t) => {
+    let current: 'active' | 'archived' | 'missing' = 'active';
+    const resumed: string[] = [];
+    let starts = 0;
+    const thread = (id: string): CodexThread => ({
+      id: null,
+      async ensure() { return id; },
+      async startRun() { throw new Error('not expected'); },
+      async steer() { throw new Error('not expected'); },
+    });
+    const agent = createAgent(t, {
+      startThread() { starts += 1; return thread(`new-thread-${starts}`); },
+      resumeThread(id) { resumed.push(id); return thread(id); },
+      async getThreadState() { return current; },
+      async readThread() { return {}; },
+      async close() {},
+    });
+    assert.equal(await agent.ensureThread('conversation', 'old-thread'), 'old-thread');
+    assert.equal(await agent.ensureThread('conversation', 'old-thread'), 'old-thread');
+    assert.deepEqual(resumed, ['old-thread']);
+
+    current = state;
+    assert.equal(await agent.ensureThread('conversation', 'old-thread'), 'new-thread-1');
+    assert.equal(starts, 1);
+    assert.deepEqual(resumed, ['old-thread']);
+    assert.equal(agent.takePendingMemoryThread('conversation'), state === 'archived' ? 'old-thread' : '');
+  });
+}
+
+test('a prepared thread cannot override a changed conversation binding', async (t) => {
+  const resumed: string[] = [];
+  const agent = createAgent(t, {
+    startThread() { throw new Error('not expected'); },
+    resumeThread(id) {
+      resumed.push(id);
+      return {
+        id: null,
+        async ensure() { return id; },
+        async startRun() { throw new Error('not expected'); },
+        async steer() { throw new Error('not expected'); },
+      };
+    },
+    async getThreadState() { return 'active'; },
+    async readThread() { return {}; },
+    async close() {},
+  });
+  await agent.ensureThread('conversation', 'old-thread');
+  assert.equal(await agent.ensureThread('conversation', 'other-thread'), 'other-thread');
+  assert.deepEqual(resumed, ['old-thread', 'other-thread']);
 });
 
 test('keeps only executed MCP attempts after the last steering boundary', () => {
@@ -472,7 +565,7 @@ test('generated cleanup rejects symlinked roots and escape components', async (t
   await fs.access(linkedFile);
 });
 
-test('explicit image edit discards premature failure text and forces exactly one generation retry', async (t) => {
+test('an image produced after generic delivery correction is still registered and sent', async (t) => {
   const png = Buffer.from('89504e470d0a1a0a03030303', 'hex');
   const boundary = new FakeBoundary([
     { items: [{ id: 'premature-text', type: 'agentMessage', status: 'completed', text: '图片处理失败' }] },
@@ -510,11 +603,16 @@ test('explicit image edit discards premature failure text and forces exactly one
   assert.deepEqual(completed.executedAttemptIds, ['sa_retried_image']);
   assert.deepEqual(published, [png]);
   assert.equal(boundary.runCalls.length, 3);
-  assert.match(String(boundary.runCalls[1]?.input), /image generation.*host runtime.*artifact/isu);
+  assert.match(String(boundary.runCalls[1]?.input), /No deliverable message has been sent/u);
+  assert.doesNotMatch(String(boundary.runCalls[1]?.input), /image generation only/u);
   assert.match(String(boundary.runCalls[2]?.input), /artifact:0.*send_image/su);
 });
 
-test('image descriptions do not treat action substrings as generation intent', async (t) => {
+test.for([
+  'Describe the image address shown here.',
+  'Do not edit this photo; only describe its content.',
+  '这张照片不要修改，只分析内容。',
+])('missing delivery is corrected without overriding image intent: %s', async (text, t) => {
   const png = Buffer.from('89504e470d0a1a0a03030303', 'hex');
   const boundary = new FakeBoundary([
     { items: [{ id: 'draft', type: 'agentMessage', text: 'draft' }] },
@@ -524,10 +622,10 @@ test('image descriptions do not treat action substrings as generation intent', a
   const submission = await agent.submit(agentInput('im-image-description', {
     message: {
       ...message('im-image-description'),
-      text: 'Describe the image address shown here.',
-      summary: 'Describe the image address shown here.',
+      text,
+      summary: text,
     },
-    contextText: 'Describe the image address shown here.',
+    contextText: text,
     resolvedMedia: [{ kind: 'image', bytes: png, contentType: 'image/png' }],
   }));
   assert.equal(submission.kind, 'started');
@@ -662,38 +760,57 @@ test('history inspection joins generated output with its later artifact send tur
   assert.deepEqual(inspection.executedAttemptIds, ['sa_history_image']);
 });
 
-test('current and legacy recovery no-action markers finish without another tool call', async (t) => {
-  for (const marker of [
-    '[[KINTIO_NO_ADDITIONAL_ACTION]]',
-    '[[TALKFERRY_NO_ADDITIONAL_ACTION]]',
-    '[[HARNESS_NO_ADDITIONAL_ACTION]]',
-  ]) {
-    const boundary = new FakeBoundary([{
-      items: [{
-        id: 'no-action',
-        type: 'agentMessage',
-        status: 'completed',
-        text: marker,
-      }],
-    }]);
+test('the current no-action marker requires host-confirmed terminal channel facts', async (t) => {
+  const noAction = {
+    items: [{ type: 'agentMessage', text: '[[KINTIO_NO_ADDITIONAL_ACTION]]' }],
+  };
+  for (const allowNoAction of [false, true]) {
+    const boundary = new FakeBoundary([
+      noAction,
+      { items: [executedText('required-reply', 'sa_required_reply', 2)] },
+    ]);
     const agent = createAgent(t, boundary);
-    const submission = await agent.submit(agentInput(`no-action-${marker}`, {
-      contextText: '恢复已有渠道事实',
-      allowNoAction: true,
-    }));
+    const submission = await agent.submit(agentInput('no-action', { allowNoAction }));
     assert.equal(submission.kind, 'started');
     if (submission.kind !== 'started') continue;
-    assert.deepEqual(await submission.completion, {
-      decision: 'no_action',
-    });
-    assert.equal(boundary.runCalls.length, 1);
+    assert.deepEqual(await submission.completion, allowNoAction
+      ? { decision: 'no_action' }
+      : { executedAttemptIds: ['sa_required_reply'] });
+    assert.equal(boundary.runCalls.length, allowNoAction ? 1 : 2);
   }
 });
 
-test('performs at most one format retry', async (t) => {
+test.for([
+  '[[TALKFERRY_NO_ADDITIONAL_ACTION]]',
+  '[[HARNESS_NO_ADDITIONAL_ACTION]]',
+])('obsolete no-action markers do not bypass delivery: %s', async (marker, t) => {
+  const boundary = new FakeBoundary([
+    { items: [{ type: 'agentMessage', text: marker }] },
+    { items: [executedText('reply', 'sa_required_reply', 2)] },
+  ]);
+  const agent = createAgent(t, boundary);
+  const submission = await agent.submit(agentInput('old-no-action', { allowNoAction: true }));
+  assert.equal(submission.kind, 'started');
+  if (submission.kind !== 'started') return;
+  assert.deepEqual(await submission.completion, { executedAttemptIds: ['sa_required_reply'] });
+  assert.equal(boundary.runCalls.length, 2);
+});
+
+test.for([false, true])('performs at most one delivery correction, with image input: %s', async (withImage, t) => {
   const boundary = new FakeBoundary([{ items: [] }, { items: [] }]);
   const agent = createAgent(t, boundary);
-  const submission = await agent.submit(agentInput('im-retry', { contextText: '请回答' }));
+  const text = '请编辑这张图片';
+  const submission = await agent.submit(agentInput('im-retry', {
+    contextText: text,
+    message: { ...message('im-retry'), text, summary: text },
+    ...(withImage ? {
+      resolvedMedia: [{
+        kind: 'image' as const,
+        bytes: Buffer.from('89504e470d0a1a0a03030303', 'hex'),
+        contentType: 'image/png',
+      }],
+    } : {}),
+  }));
   assert.equal(submission.kind, 'started');
   if (submission.kind !== 'started') return;
   await assert.rejects(

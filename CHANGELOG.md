@@ -4,6 +4,36 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.9.0
+
+- Added explicit, one-use command/file approval handling for trusted iLink
+  conversations through `/kintio approval CODE OPTION`, with expiring prompts,
+  identity checks, and reply-window refresh. Cancelling an approval does not
+  restart the task ([#102](https://github.com/Gkxie/kintio/issues/102)).
+
+- Allow simultaneous iLink CLI logins through the shared runtime. Each terminal
+  has its own expiring QR offer, channel controls remain available while waiting,
+  and unused login runtimes exit without enabling new account listeners
+  ([#102](https://github.com/Gkxie/kintio/issues/102)).
+
+- Restart the supervised worker after a fatal Agent process or protocol failure
+  instead of leaving chat listeners attached to a permanently closed executor.
+
+- Removed keyword-based image-edit retries so delivery correction cannot override
+  a request to describe an image or cancel an edit. Generated artifacts and
+  recorded channel outcomes still use the existing delivery path
+  ([#102](https://github.com/Gkxie/kintio/issues/102)).
+
+- Live follow-ups now steer a recovering conversation immediately and promote
+  waiting recovery work, while independent historical requests keep their own
+  turns and wait for idle capacity ([#102](https://github.com/Gkxie/kintio/issues/102)).
+
+- Recheck current authorization and reply-window validity before recovery can
+  use the Agent, retire superseded iLink work, and prevent prepared thread
+  caches from reusing an archived or deleted thread. Backlog preparation and
+  history inspection now follow the same live-message priority as model turns
+  ([#100](https://github.com/Gkxie/kintio/issues/100)).
+
 - **Breaking:** move callback-channel commands under `kintio wecom` and remove
   ungrouped startup. WeCom configuration lives in `~/.kintio/wecom`; iLink keeps
   `~/.kintio`. A shared worker owns SQLite, recovery, and the global scheduler;

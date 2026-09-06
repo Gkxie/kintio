@@ -3,6 +3,7 @@ name: Release Codex validation
 on:
   pull_request_target:
     branches: [master]
+    # Metadata is checked by Release plan, not by the paid source-validation gate.
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - CHANGELOG.md
@@ -64,12 +65,11 @@ jobs:
           HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_TITLE: ${{ github.event.pull_request.title }}
           RELEASE_BOT_LOGIN: kintio-release[bot]
         run: |
           test "$(git rev-parse HEAD)" = "$HEAD_SHA"
           node --experimental-strip-types \
-            ../trusted/.github/scripts/reconcile-release.ts verify
+            ../trusted/.github/scripts/reconcile-release.ts verify-source
           printf 'authorized=true\nhead_sha=%s\n' "$HEAD_SHA" >> "$GITHUB_OUTPUT"
 
   validate:

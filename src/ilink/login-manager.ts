@@ -70,6 +70,7 @@ export class IlinkLoginManager {
   readonly #baseUrl: string;
   readonly #clock: () => number;
   readonly #onAccountsChanged: () => void | Promise<void>;
+  readonly #onPollingSettled: () => void;
   readonly #sleep: IlinkLoginSleep;
   readonly #running = new Map<string, {
     controller: AbortController;
@@ -87,6 +88,7 @@ export class IlinkLoginManager {
     maxAccounts = 20,
     clock = Date.now,
     onAccountsChanged = () => undefined,
+    onPollingSettled = () => undefined,
     logger = console,
     sleep: sleepFunction = sleep,
   }: {
@@ -98,6 +100,7 @@ export class IlinkLoginManager {
     maxAccounts?: number;
     clock?: () => number;
     onAccountsChanged?: () => void | Promise<void>;
+    onPollingSettled?: () => void;
     logger?: Logger;
     sleep?: IlinkLoginSleep;
   }) {
@@ -109,6 +112,7 @@ export class IlinkLoginManager {
     this.#maxAccounts = maxAccounts;
     this.#clock = clock;
     this.#onAccountsChanged = onAccountsChanged;
+    this.#onPollingSettled = onPollingSettled;
     this.#logger = logger;
     this.#sleep = sleepFunction;
   }
@@ -221,6 +225,7 @@ export class IlinkLoginManager {
       if (this.#running.get(offer.offerId)?.controller === controller) {
         this.#running.delete(offer.offerId);
       }
+      this.#onPollingSettled();
     });
     this.#running.set(offer.offerId, {
       controller,

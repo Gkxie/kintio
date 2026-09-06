@@ -32,17 +32,24 @@ kintio ilink commands ───┘                                 ├── WeC
                                                           └── Agent CLI + stdio MCP children
 ```
 
-The first background start launches the daemon and worker. Starting another
-channel attaches to that worker instead of creating another database owner.
-iLink login can still run temporarily without any background worker or WeCom
-configuration. Operator tools are available only over private local IPC;
+The first background start or iLink login launches the daemon and worker.
+Other terminals and channels attach to that worker instead of creating another
+database owner. Login needs no WeCom configuration. Each terminal's operator
+connection owns its QR offer; waiting for a scan does not hold the lifecycle
+lock. Operator tools are available only over private local IPC;
 conversation Agents receive scoped delivery tools, never lifecycle controls.
+The shared CLI operator client is in
+[src/runtime/operator-client.ts](../src/runtime/operator-client.ts); QR rendering
+and login interaction remain in `src/ilink/cli-login.ts`. Neither
+channel owns the other channel's control transport.
 
 WeCom start loads its own configuration, installs its Skill, and binds its HTTP
 listener. iLink alone does not load that configuration or bind a TCP port.
 Repeated WeCom start is idempotent. Stopping or restarting a listener does not
 restart the shared worker or another channel's listeners. When the last channel
-is stopped, the worker drains and asks its daemon to exit.
+is stopped and no operator connection is in use, the worker drains and asks its
+daemon to exit. A login connection stays open until its terminal has observed the
+result, so confirming a QR cannot shut down its status response prematurely.
 
 SQLite retains the WeCom enabled flag and each iLink account's enabled flag.
 A whole-worker restart restores only those choices. Startup recovery closes
@@ -218,7 +225,9 @@ The exact recovery, race, and idempotency transitions are specified by these tes
 | Change agent context or steering | `src/services/codex-agent.ts`, `conversation-processor.ts` | `test/integration/codex-*`, `conversation-*` |
 | Change provider send capabilities | `src/mcp/`, `src/domain/send-contract.ts` | `test/integration/*-mcp.test.ts` |
 | Change authorization, queues, or recovery | `src/state/sqlite-store.ts`, `conversation-processor.ts` | `test/recovery/`, `sqlite-*` |
-| Change installation or process lifecycle | `cli.ts`, `daemon.ts`, `src/cli.ts`, `src/runtime/native-daemon.ts`, `worker.ts` | `test/unit/cli.test.ts`, `test/unit/daemon-protocol.test.ts`, `test/recovery/cli-daemon.test.ts` |
+| Change command parsing and interaction | `src/cli.ts` | `test/unit/cli.test.ts`, `test/integration/ilink-cli-*` |
+| Change shared process lifecycle | `src/runtime/daemon-client.ts`, `src/runtime/native-daemon.ts`, `worker.ts` | `test/unit/daemon-protocol.test.ts`, `test/recovery/native-daemon.test.ts`, `test/integration/ilink-cli-login-rollback.test.ts` |
+| Change installation or update recovery | `src/update/runtime-update.ts`, `src/update/self-update.ts`, `src/update/global-install.ts` | `test/unit/cli.test.ts`, `test/unit/self-update.test.ts`, `test/recovery/cli-daemon.test.ts` |
 | Change HTTP callbacks or runtime shutdown | `src/app.ts`, `src/runtime.ts`, `worker.ts` | `test/integration/callback.test.ts`, `runtime-*` |
 
 To add a messaging adapter, first implement its listener, identity model, and provider reply window. Then reuse the common Inbox, agent runtime, and MCP receipt contract. Do not leak its payloads or error codes into another adapter, and do not build a generalized framework for hypothetical integrations.

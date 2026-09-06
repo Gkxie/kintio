@@ -1534,6 +1534,33 @@ export class SqliteStore {
     return mapInbound(this.#inboundRow(messageKey));
   }
 
+  getAgentSessionBoundary(
+    messageKey: string,
+    boundaryMessageKey = messageKey,
+  ): { inboxSeq: number; replyWindowId: number } | undefined {
+    const inbound = this.#inboundRow(messageKey);
+    const boundary = this.#inboundRow(boundaryMessageKey);
+    if (
+      !inbound || !boundary ||
+      boundary.open_kfid !== inbound.open_kfid ||
+      boundary.external_userid !== inbound.external_userid ||
+      boundary.channel !== inbound.channel
+    ) {
+      throw new AgentSessionError('Agent session boundary is outside the conversation');
+    }
+    if (inbound.channel !== 'weixin_ilink') {
+      return { inboxSeq: boundary.inbox_seq, replyWindowId: 0 };
+    }
+    const window = rowAs<{ reply_window_id: number }>(this.#database.prepare(`
+      SELECT reply_window_id FROM ilink_reply_windows
+      WHERE source_message_key = ? AND account_key = ? AND peer_id = ?
+        AND source_inbox_seq = ? AND state = 'open' AND expires_at > ?
+    `).get(boundary.message_key, inbound.open_kfid, inbound.external_userid, boundary.inbox_seq, this.#now()));
+    return window
+      ? { inboxSeq: boundary.inbox_seq, replyWindowId: window.reply_window_id }
+      : undefined;
+  }
+
   createAgentSession({
     messageKey,
     boundaryMessageKey = messageKey,
@@ -1548,15 +1575,8 @@ export class SqliteStore {
       if (!inbound || !['processing', 'preparing'].includes(inbound.status)) {
         throw new AgentSessionError('Agent session requires an active inbound message');
       }
-      const boundary = this.#inboundRow(boundaryMessageKey);
-      if (
-        !boundary ||
-        boundary.open_kfid !== inbound.open_kfid ||
-        boundary.external_userid !== inbound.external_userid ||
-        boundary.channel !== inbound.channel
-      ) {
-        throw new AgentSessionError('Agent session boundary is outside the conversation');
-      }
+      const boundary = this.getAgentSessionBoundary(messageKey, boundaryMessageKey);
+      if (!boundary) throw new AgentSessionError('Reply boundary is no longer available', 'reply_boundary_unavailable');
       const boundedTtl = Math.max(1_000, Math.min(Number(ttlMs) || 0, 60 * 60 * 1000));
       const memoryThreadId = this.getConversation(
         inbound.channel,
@@ -1564,15 +1584,6 @@ export class SqliteStore {
         inbound.external_userid,
       )?.memoryThreadId || '';
       const now = this.#now();
-      const replyWindowId = inbound.channel === 'weixin_ilink'
-        ? Number(rowAs<{ reply_window_id: number }>(this.#database.prepare(`
-            SELECT reply_window_id FROM ilink_reply_windows
-            WHERE source_message_key = ?
-          `).get(boundary.message_key))?.reply_window_id || 0)
-        : 0;
-      if (inbound.channel === 'weixin_ilink' && !replyWindowId) {
-        throw new AgentSessionError('iLink message has no reply window');
-      }
       const token = `ws_${randomBytes(24).toString('base64url')}`;
       this.#database.prepare(`
         UPDATE agent_sessions SET closed_at = ?, updated_at = ?
@@ -1600,8 +1611,8 @@ export class SqliteStore {
         inbound.open_kfid,
         inbound.external_userid,
         inbound.channel,
-        replyWindowId || null,
-        boundary.inbox_seq,
+        boundary.replyWindowId || null,
+        boundary.inboxSeq,
         memoryThreadId,
         encodeJson(this.listRecentMedia({
           channel: inbound.channel,
@@ -2377,7 +2388,7 @@ export class SqliteStore {
     return this.#transaction(() => {
       const attempts = rowAs<{ count: number }>(this.#database.prepare(`
         SELECT COUNT(*) AS count FROM send_attempts
-        WHERE source_message_key = ?
+        WHERE source_message_key = ? AND source <> 'agent_approval'
       `).get(messageKey));
       if (Number(attempts?.count || 0) > 0) return false;
       const now = this.#now();

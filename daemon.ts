@@ -18,7 +18,6 @@ try {
   await runNativeDaemon({
     home: path.resolve(home),
     configFile: path.resolve(configFile),
-    mode,
     packageRoot: resolveProjectRoot(import.meta.url),
   });
 } catch (error: unknown) {

@@ -4,7 +4,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import type { TestContext } from 'vitest';
-import { test } from 'vitest';
+import { test, vi } from 'vitest';
 
 import {
   controlAddress,
@@ -318,6 +318,38 @@ test('control client authenticates lifecycle commands over one local IPC message
     idle: true,
   }));
   assert.deepEqual(commands, ['ping', 'stop', 'stop-if-idle']);
+});
+
+test('a run-bound control request never connects to a replacement daemon', async (t) => {
+  const home = await temporaryHome(t);
+  writeDaemonRecord(home, daemon());
+  let calls = 0;
+  await listen(t, home, () => {
+    calls += 1;
+    return `${JSON.stringify(response({ phase: 'stopping', idle: true }))}\n`;
+  });
+  await assert.rejects(
+    requestControl(home, 'stop-if-unused', undefined, undefined, 'previous_run'),
+    /identity changed/u,
+  );
+  assert.equal(calls, 0);
+});
+
+test('a control request keeps the address and token from its one validated record snapshot', async (t) => {
+  const home = await temporaryHome(t);
+  writeDaemonRecord(home, daemon());
+  const replacement = daemon({ runId: 'next_run', token: 'b'.repeat(43) });
+  await listen(t, home, (request) => {
+    assert.equal(parseControlRequest(request).token, TOKEN);
+    return `${JSON.stringify(response({ phase: 'stopping', idle: true }))}\n`;
+  });
+  const connect = net.createConnection;
+  vi.spyOn(net, 'createConnection').mockImplementation(((...args: Parameters<typeof net.createConnection>) => {
+    writeDaemonRecord(home, replacement);
+    return connect(...args);
+  }) as typeof net.createConnection);
+  assert.equal((await requestControl(home, 'stop-if-unused', undefined, undefined, 'run_1')).runId, 'run_1');
+  assert.equal(readDaemonRecord(home)?.runId, 'next_run');
 });
 
 test('stop-if-idle client fails closed on omitted or contradictory decisions', async (t) => {

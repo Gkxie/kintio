@@ -3,7 +3,7 @@ import { emitKeypressEvents, type Key } from 'node:readline';
 import { PassThrough } from 'node:stream';
 import { stripVTControlCharacters } from 'node:util';
 
-import type { IlinkOperatorAccount } from './cli-login.ts';
+import type { IlinkOperatorAccount } from '../runtime/operator-client.ts';
 
 type InputListener = (...args: unknown[]) => void;
 

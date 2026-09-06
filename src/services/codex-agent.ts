@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { randomBytes } from 'node:crypto';
 import path from 'node:path';
 
 import type {
@@ -6,11 +7,10 @@ import type {
   AgentCompletion,
   AgentImageArtifact,
   AgentInput,
-  AgentMediaCapability,
-  AgentMessage,
   AgentSubmission,
   HistoryInspection,
 } from '../agent/runtime.ts';
+import { AgentTurnCancelledError } from '../agent/runtime.ts';
 import type { CodexConfig } from '../config.ts';
 import type { LocalMcpLaunches, McpRelayLaunch } from '../mcp/ipc-host.ts';
 import type { ChatChannel } from '../types.ts';
@@ -26,7 +26,11 @@ import { withStagedImages } from './image-stager.ts';
 import {
   CodexAppServer,
   type CodexBoundary,
+  type CodexApprovalDecision,
+  type CodexApprovalRequest,
+  type CodexApprovalResult,
   type CodexInput,
+  type CodexRun,
   type CodexThread,
   type CodexThreadOptions,
   type CodexTurnResult,
@@ -35,11 +39,6 @@ import {
 
 const MAX_CONTEXT_CHARACTERS = 16_000;
 const NO_ACTION_MARKER = '[[KINTIO_NO_ADDITIONAL_ACTION]]';
-const NO_ACTION_MARKERS: ReadonlySet<string> = new Set([
-  NO_ACTION_MARKER,
-  '[[TALKFERRY_NO_ADDITIONAL_ACTION]]',
-  '[[HARNESS_NO_ADDITIONAL_ACTION]]',
-]);
 const CHANNEL_AGENT_PROFILES: Readonly<Record<ChatChannel, {
   readonly tools: readonly string[];
   readonly prompt: string;
@@ -101,17 +100,16 @@ interface AgentOptions {
 
 interface ActiveState {
   readonly thread: CodexThread;
+  readonly boundary: CodexBoundary;
   readonly primaryMessageKey: string;
-  latestMessage: AgentMessage;
+  approvals?: AgentInput['approvals'];
+  approvalTurn?: Promise<string>;
   latestClientInputId: string;
-  mediaCatalog: readonly AgentMediaCapability[];
   rawCompletion?: Promise<CodexTurnResult>;
   completion?: Promise<AgentCompletion>;
   pendingSteer?: Promise<void>;
-  imageRequested: boolean;
-  hasImageInput: boolean;
-  imageRetryUsed: boolean;
   finishing: boolean;
+  cancelling: boolean;
   toolSessionToken: string;
   publishArtifact?: AgentInput['publishArtifact'];
   allowNoAction: boolean;
@@ -120,6 +118,7 @@ interface ActiveState {
 
 interface PreparedState {
   readonly thread: CodexThread;
+  readonly threadId: string;
   readonly agentAccess: AgentAccess;
 }
 
@@ -383,22 +382,50 @@ function containsClientId(value: unknown, clientId: string): boolean {
   return Object.values(record).some((child) => containsClientId(child, clientId));
 }
 
-function requestsImageGeneration(message: AgentMessage): boolean {
-  const text = `${message.text}\n${message.summary}`;
-  const hasImageSubject =
-    /(?:图|图片|照片|画面|人物|脸|头发|表情|背景|构图)/u.test(text) ||
-    /\b(?:image|photo|picture|portrait|face|hair|expression|background|composition)\b/iu.test(text);
-  const hasGenerationAction =
-    /(?:生成|创作|编辑|修改|调整|替换|移除|添加|融合|合成|换)/u.test(text) ||
-    /\b(?:generate|create|edit|modify|adjust|replace|remove|add|blend|merge|swap)\b/iu.test(text);
-  return hasImageSubject && hasGenerationAction;
-}
-
 function choseNoAction(result: CodexTurnResult): boolean {
   return result.items.some((item) =>
     item.type === 'agentMessage' &&
-    NO_ACTION_MARKERS.has(String(item.text || '').trim()),
+    String(item.text || '').trim() === NO_ACTION_MARKER,
   );
+}
+
+function approvalPreview(request: CodexApprovalRequest): string {
+  const { params, item } = request;
+  if (params.reason != null && typeof params.reason !== 'string') throw new Error('Invalid approval reason');
+  const lines: string[] = [];
+  if (request.kind === 'command') {
+    if ((params.kind && params.kind !== 'command') || params.networkApprovalContext || params.additionalPermissions) {
+      throw new Error('This approval type requires the host interface');
+    }
+    const command = params.command ?? item?.command;
+    const cwd = params.cwd ?? item?.cwd;
+    if (typeof command !== 'string' || !command || typeof cwd !== 'string' || !cwd) {
+      throw new Error('Missing full command preview');
+    }
+    lines.push('Command approval', `Command:\n${command}`, `Working directory: ${JSON.stringify(cwd)}`);
+  } else {
+    if (item?.type !== 'fileChange' || !Array.isArray(item.changes) || !item.changes.length) {
+      throw new Error('Missing full file-change preview');
+    }
+    lines.push('File-change approval');
+    for (const value of item.changes) {
+      const change = asRecord(value);
+      const kind = asRecord(change?.kind);
+      if (typeof change?.path !== 'string' || typeof change.diff !== 'string' ||
+        !['add', 'delete', 'update'].includes(String(kind?.type))) {
+        throw new Error('Invalid file-change preview');
+      }
+      lines.push(`${JSON.stringify(change.path)} ${JSON.stringify(change.kind)}\n${change.diff}`);
+    }
+    if (params.grantRoot != null && typeof params.grantRoot !== 'string') throw new Error('Invalid requested write root');
+    if (params.grantRoot) lines.push(`Requested write root: ${JSON.stringify(params.grantRoot)}`);
+  }
+  if (params.reason) lines.push(`Reason: ${String(params.reason)}`);
+  const text = lines.join('\n\n');
+  if (/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\u202a-\u202e\u2066-\u2069]/u.test(text)) {
+    throw new Error('Approval preview contains control characters');
+  }
+  return text;
 }
 
 export class CodexAgent {
@@ -409,12 +436,145 @@ export class CodexAgent {
   readonly #active = new Map<string, ActiveState>();
   readonly #prepared = new Map<string, PreparedState>();
   readonly #pendingMemoryThreads = new Map<string, string>();
+  readonly #approvals = new Map<string, {
+    delivered: boolean;
+    isCurrent?: () => boolean;
+    readonly state: ActiveState;
+    readonly turn: Promise<string>;
+    readonly request: CodexApprovalRequest;
+    readonly choices: readonly CodexApprovalDecision[];
+    readonly allowed: () => boolean;
+    readonly resolve: (decision: CodexApprovalDecision) => void;
+  }>();
 
   constructor({ codex, trustedCodex = codex, config, channelConfig }: AgentOptions) {
     this.#codex = codex;
     this.#trustedCodex = trustedCodex;
     this.#config = config;
     this.#channelConfig = channelConfig || (() => config);
+    for (const boundary of new Set([codex, trustedCodex])) {
+      boundary.setApprovalHandler?.((request) => this.#requestApproval(boundary, request));
+    }
+  }
+
+  async #requestApproval(boundary: CodexBoundary, request: CodexApprovalRequest): Promise<CodexApprovalResult> {
+    const state = [...this.#active.values()].find((entry) =>
+      entry.boundary === boundary && entry.thread.id === request.threadId,
+    );
+    const turn = state?.approvalTurn;
+    const approvals = state?.approvals;
+    if (!state || !turn || !approvals || request.signal.aborted ||
+      await turn !== request.turnId || state.approvalTurn !== turn || !approvals.isAllowed()) return 'cancel';
+    const code = randomBytes(6).toString('hex').toUpperCase();
+    const labels = { accept: 'Approve this action', decline: 'Reject', cancel: 'Cancel current task' } as const;
+    const choices = (['accept', 'decline', 'cancel'] as const).filter((choice) =>
+      !Array.isArray(request.params.availableDecisions) || request.params.availableDecisions.includes(choice),
+    );
+    let content: string;
+    try {
+      if (!choices.length) throw new Error('No supported approval decisions');
+      content = `${approvalPreview(request)}\n\n${choices.map((choice, index) => `${index + 1}. ${labels[choice]}`).join('\n')}\n\nReply: /kintio approval ${code} 1\nExpires within 5 minutes. No reply means no approval.`;
+      if (Buffer.byteLength(content, 'utf8') > 2_000) throw new Error('Approval preview exceeds channel limit');
+    } catch {
+      await approvals.notify('This action was not approved: its complete approval preview or request type cannot be displayed here. Review it on the host.', request.signal);
+      return 'decline';
+    }
+    const answer = deferred<CodexApprovalDecision>();
+    const pending = { state, turn, request, choices, allowed: approvals.isAllowed, resolve: answer.resolve, delivered: false,
+      isCurrent: () => false,
+    };
+    const cancel = () => {
+      if (request.signal.reason instanceof AgentTurnCancelledError && state.approvalTurn === turn) {
+        state.cancelling = true;
+        state.finishing = true;
+      }
+      if (this.#approvals.get(code) === pending) this.#approvals.delete(code);
+      answer.resolve('cancel');
+    };
+    this.#approvals.set(code, pending);
+    request.signal.addEventListener('abort', cancel, { once: true });
+    try {
+      if (request.signal.aborted || !pending.allowed()) return 'cancel';
+      await approvals.notify(content, request.signal);
+      if (request.signal.aborted || !pending.allowed()) return 'cancel';
+      pending.delivered = true;
+      const decision = await answer.promise;
+      return { decision, isAllowed: () => !request.signal.aborted && state.approvalTurn === turn && pending.allowed() && pending.isCurrent() };
+    } catch (error) {
+      state.cancelling = true;
+      state.finishing = true;
+      throw error;
+    } finally {
+      // Keep observing until the protocol writes its decision: its final
+      // freshness check can still turn a deferred acceptance into cancellation.
+      if (request.signal.aborted) request.signal.removeEventListener('abort', cancel);
+      if (this.#approvals.get(code) === pending) this.#approvals.delete(code);
+    }
+  }
+
+  pendingApproval(conversationId: string, code: string, option?: number): { primaryMessageKey: string; turnId: string } | undefined {
+    const pending = this.#approvals.get(code);
+    return pending?.delivered && (option === undefined || Number.isInteger(option) && pending.choices[option - 1]) &&
+      this.#active.get(conversationId) === pending.state &&
+      !pending.state.cancelling && pending.state.approvalTurn === pending.turn && !pending.request.signal.aborted && pending.allowed()
+      ? { primaryMessageKey: pending.state.primaryMessageKey, turnId: pending.request.turnId } : undefined;
+  }
+
+  respondApproval(conversationId: string, code: string, option: number, isCurrent: () => boolean): boolean {
+    const pending = this.#approvals.get(code);
+    const decision = pending?.choices[option - 1];
+    if (!pending || !decision || !this.pendingApproval(conversationId, code)) return false;
+    if (decision === 'cancel') {
+      pending.state.cancelling = true;
+      pending.state.finishing = true;
+    }
+    pending.isCurrent = isCurrent;
+    this.#approvals.delete(code);
+    pending.resolve(decision);
+    return true;
+  }
+
+  cancelApprovals(conversationId: string): void {
+    const state = this.#active.get(conversationId);
+    for (const [code, pending] of this.#approvals) {
+      if (pending.state !== state) continue;
+      state.cancelling = true;
+      state.finishing = true;
+      this.#approvals.delete(code);
+      pending.resolve('cancel');
+    }
+  }
+
+  invalidateApprovals(): void {
+    for (const [code, pending] of this.#approvals) {
+      if (pending.allowed()) continue;
+      pending.state.cancelling = true;
+      pending.state.finishing = true;
+      this.#approvals.delete(code);
+      pending.resolve('cancel');
+    }
+  }
+
+  async #run(thread: CodexThread, input: CodexInput, clientInputId: string, state: ActiveState): Promise<CodexRun> {
+    const ready = deferred<string>();
+    state.approvalTurn = ready.promise;
+    try {
+      const run = await thread.startRun(input, { clientUserMessageId: clientInputId });
+      ready.resolve(run.turnId);
+      void run.completion.finally(() => {
+        if (state.approvalTurn === ready.promise) delete state.approvalTurn;
+        for (const [code, pending] of this.#approvals) {
+          if (pending.turn !== ready.promise) continue;
+          this.#approvals.delete(code);
+          pending.resolve('cancel');
+        }
+      }).catch(() => undefined);
+      return run;
+    } catch (error) {
+      ready.resolve('');
+      if (state.approvalTurn === ready.promise) delete state.approvalTurn;
+      throw error;
+    }
   }
 
   #boundary(agentAccess: AgentAccess): CodexBoundary {
@@ -441,7 +601,8 @@ export class CodexAgent {
           }),
     };
     const prepared = this.#prepared.get(key);
-    const thread = prepared?.agentAccess === agentAccess
+    const thread = !startFresh && prepared?.agentAccess === agentAccess &&
+      prepared.threadId === input.threadId
       ? prepared.thread
       : input.threadId && !startFresh
         ? this.#boundary(agentAccess).resumeThread(input.threadId, options)
@@ -473,7 +634,7 @@ export class CodexAgent {
     } else {
       this.#pendingMemoryThreads.delete(conversationId);
     }
-    this.#prepared.set(conversationId, { thread, agentAccess });
+    this.#prepared.set(conversationId, { thread, threadId: ensured, agentAccess });
     return ensured;
   }
 
@@ -522,34 +683,8 @@ export class CodexAgent {
     if (state.allowNoAction && choseNoAction(result)) {
       return { decision: 'no_action' };
     }
-    if (state.imageRequested && state.hasImageInput && !state.imageRetryUsed) {
-      state.imageRetryUsed = true;
-      const retry = await thread.startRun(
-        'The participant explicitly requested image generation or editing, and this turn includes image input. Perform image generation only and wait for the host runtime to register an artifact; do not send placeholder text first.',
-        { clientUserMessageId: `${state.latestClientInputId}-image-retry` },
-      );
-      const retryResult = await retry.completion;
-      const retryImage = await generatedCandidate(
-        retryResult,
-        this.#channelConfig(state.toolServer).generatedImageDirectory,
-      );
-      const retryAttempts = executedAttemptIds(retryResult, state.toolServer);
-      if (retryImage) {
-        return {
-          executedAttemptIds: [...new Set([
-            ...retryAttempts,
-            ...await this.#sendArtifact(thread, retryImage, state),
-          ])],
-        };
-      }
-      if (retryAttempts.length) {
-        return { executedAttemptIds: retryAttempts };
-      }
-    }
     const correction = `No deliverable message has been sent. Use the ${state.toolServer} tools now to complete the response.`;
-    const retry = await thread.startRun(correction, {
-      clientUserMessageId: `${state.latestClientInputId}-format-retry`,
-    });
+    const retry = await this.#run(thread, correction, `${state.latestClientInputId}-format-retry`, state);
     const retryResult = await retry.completion;
     const retryImage = await generatedCandidate(retryResult, this.#channelConfig(state.toolServer).generatedImageDirectory);
     const retryAttempts = executedAttemptIds(retryResult, state.toolServer);
@@ -574,9 +709,9 @@ export class CodexAgent {
   ): Promise<string[]> {
     if (!state.publishArtifact) throw new Error('Agent artifact publisher is unavailable');
     const ref = await state.publishArtifact(artifact);
-    const run = await thread.startRun(
+    const run = await this.#run(thread,
       `The generated image is registered as ${ref}. Call send_image with the current session ${state.toolSessionToken} to deliver the artifact, then decide any next action from the tool result.`,
-      { clientUserMessageId: `${state.latestClientInputId}-artifact-send` },
+      `${state.latestClientInputId}-artifact-send`, state,
     );
     const attempts = executedAttemptIds(await run.completion, state.toolServer);
     if (!attempts.length) throw new Error('Agent did not execute send_image for its artifact');
@@ -584,18 +719,17 @@ export class CodexAgent {
   }
 
   async #start(input: AgentInput): Promise<Extract<AgentSubmission, { kind: 'started' }>> {
-    const { message, mediaCatalog = [] } = input;
+    const { message } = input;
     const { key, thread } = await this.#thread(input);
     const state: ActiveState = {
       thread,
+      boundary: this.#boundary(input.agentAccess || 'restricted'),
+      ...(input.agentAccess === 'host' && input.channel === 'weixin_ilink' && input.approvals
+        ? { approvals: input.approvals } : {}),
       primaryMessageKey: message.messageKey,
-      latestMessage: message,
       latestClientInputId: input.clientInputId || message.messageKey,
-      mediaCatalog,
-      imageRequested: requestsImageGeneration(message),
-      hasImageInput: Boolean(input.resolvedMedia?.length),
-      imageRetryUsed: false,
       finishing: false,
+      cancelling: false,
       toolSessionToken: input.toolSessionToken,
       allowNoAction: input.allowNoAction === true,
       toolServer: channelProfile(input.channel).server,
@@ -606,9 +740,7 @@ export class CodexAgent {
     const completion = this.#withImages(
       input,
       async (turnInput): Promise<AgentCompletion> => {
-        const run = await thread.startRun(turnInput, {
-          clientUserMessageId: input.clientInputId || message.messageKey,
-        });
+        const run = await this.#run(thread, turnInput, input.clientInputId || message.messageKey, state);
         state.rawCompletion = run.completion;
         accepted.resolve(run.turnId);
         const result = await run.completion;
@@ -647,17 +779,21 @@ export class CodexAgent {
   async #steer(
     state: ActiveState,
     input: AgentInput,
+    control = false,
   ): Promise<Extract<AgentSubmission, { kind: 'steered' }>> {
     const { message } = input;
-    if (state.finishing) throw new Error('Codex active turn already completed');
-    state.latestMessage = message;
+    if (state.cancelling || state.finishing && !control) throw new Error('Codex active turn already completed');
+    if (control) {
+      const turn = state.approvalTurn;
+      if (!turn || !await turn || state.approvalTurn !== turn || state.cancelling) {
+        throw new Error('Codex control turn is no longer active');
+      }
+    }
     state.latestClientInputId = input.clientInputId || message.messageKey;
-    state.mediaCatalog = input.mediaCatalog || state.mediaCatalog;
     state.toolSessionToken = input.toolSessionToken;
     state.publishArtifact = input.publishArtifact || state.publishArtifact;
     state.allowNoAction = input.allowNoAction === true;
-    state.imageRequested ||= requestsImageGeneration(message);
-    state.hasImageInput ||= Boolean(input.resolvedMedia?.length);
+    state.approvals = input.agentAccess === 'host' && input.channel === 'weixin_ilink' ? input.approvals : undefined;
     const confirmed = deferred<string>();
     state.pendingSteer = confirmed.promise.then(() => undefined, () => undefined);
     const steeringOperation = this.#withImages(
@@ -692,18 +828,25 @@ export class CodexAgent {
       if (active) await active.completion?.catch(() => undefined);
       return this.#start(input);
     }
-    if (!active || active.finishing) throw new Error('Agent turn is no longer steerable');
-    return this.#steer(active, input);
+    const control = Boolean(input.approvalCode && this.pendingApproval(key, input.approvalCode)) ||
+      Boolean(input.controlRefresh && input.agentAccess === 'host' && input.channel === 'weixin_ilink');
+    if (!active || active.cancelling || active.finishing && !control) throw new Error('Agent turn is no longer steerable');
+    return this.#steer(active, input, control);
   }
 
-  activePrimary(conversationId: string): string | undefined {
+  activePrimary(conversationId: string, includeFinishing = false): string | undefined {
     const active = this.#active.get(conversationId);
-    return active && !active.finishing ? active.primaryMessageKey : undefined;
+    return active && !active.cancelling && (!active.finishing || includeFinishing && active.approvalTurn)
+      ? active.primaryMessageKey : undefined;
   }
 
   async interrupt(conversationId: string): Promise<boolean> {
     const active = this.#active.get(conversationId);
-    if (!active || active.finishing || !active.thread.interrupt) return false;
+    const turn = active?.approvalTurn;
+    if (!active || !turn || !active.thread.interrupt) return false;
+    await turn;
+    if (active.approvalTurn !== turn) return false;
+    this.cancelApprovals(conversationId);
     const interrupted = await active.thread.interrupt();
     if (interrupted) await active.completion?.catch(() => undefined);
     return interrupted;
@@ -775,6 +918,7 @@ export class CodexAgent {
   }
 
   async close(): Promise<void> {
+    for (const id of this.#active.keys()) this.cancelApprovals(id);
     await Promise.allSettled(
       [...this.#active.values()].flatMap((state) =>
         state.completion ? [state.completion] : [],
@@ -789,6 +933,7 @@ export class CodexAgent {
   }
 
   async abort(): Promise<void> {
+    for (const id of this.#active.keys()) this.cancelApprovals(id);
     this.#active.clear();
     this.#pendingMemoryThreads.clear();
     await Promise.allSettled([...new Set([

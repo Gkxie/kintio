@@ -2,23 +2,20 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-
 import type { IlinkEnrollmentConfig } from '../config.ts';
 import { assertTrustedDirectory } from '../lib/private-directory.ts';
 import {
-  findMcpDescriptorFile,
-  operatorMcpInstanceKey,
-} from '../mcp/ipc-protocol.ts';
-import { KINTIO_VERSION } from '../version.ts';
+  RuntimeOperatorClient,
+  type IlinkAccountControl,
+  type IlinkOperatorAccount,
+  type IlinkOperatorControl,
+} from '../runtime/operator-client.ts';
 import {
   acquireSingleInstanceLock,
   type InstanceLock,
   SingleInstanceLockError,
 } from '../runtime/single-instance-lock.ts';
 import { StatePersistence } from '../state/persistence.ts';
-import { createIlinkEnrollmentService } from './enrollment.ts';
 import {
   renderIlinkQrTerminal,
   renderIlinkRawQrPng,
@@ -35,52 +32,6 @@ import {
 } from './store-types.ts';
 
 const STATUS_POLL_MS = 1_000;
-const OFFER_ID = /^qo_[A-Za-z0-9_-]{1,128}$/u;
-const ACCOUNT_KEY = /^ia_[0-9a-f]{40}$/u;
-const LOGIN_STATUSES = new Set<IlinkLoginStatus>([
-  'waiting',
-  'scanned',
-  'confirmed',
-  'expired',
-  'failed',
-  'cancelled',
-  'already_connected',
-  'verification_required',
-  'unknown',
-]);
-
-export interface IlinkOperatorAccount {
-  readonly accountKey: `ia_${string}`;
-  readonly generation: number;
-  readonly incarnation: `ii_${string}`;
-  readonly providerAccountId: string;
-  readonly runtimeEnabled: boolean;
-}
-
-export interface IlinkOperatorControl {
-  readonly mode: 'runtime' | 'standalone';
-  begin(signal: AbortSignal): Promise<{
-    readonly offerId: string;
-    readonly qrContent: string;
-    readonly expiresAt: number;
-  }>;
-  status(offerId: string, signal: AbortSignal): Promise<{
-    readonly status: IlinkLoginStatus;
-  }>;
-  cancel(offerId: string): Promise<boolean>;
-  listAccounts(): Promise<readonly IlinkOperatorAccount[]>;
-  setAccountRuntime(
-    accountKey: `ia_${string}`,
-    enabled: boolean,
-    expected: IlinkAccountRevision,
-  ): Promise<{ readonly account: IlinkOperatorAccount; readonly runningCount: number }>;
-  deleteAccount(
-    accountKey: `ia_${string}`,
-    expected: IlinkAccountRevision,
-  ): Promise<{ readonly account: IlinkOperatorAccount; readonly runningCount: number }>;
-  close(): Promise<void>;
-}
-
 export interface IlinkCliLoginOptions {
   readonly config: Pick<IlinkEnrollmentConfig, 'state' | 'ilink'>;
   readonly packageRoot: string;
@@ -92,6 +43,8 @@ export interface IlinkCliLoginOptions {
   readonly clock?: () => number;
   readonly sleep?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
   readonly openControl?: () => Promise<IlinkOperatorControl>;
+  /** A caller-owned connection retained across login and account activation. */
+  readonly control?: () => Promise<IlinkOperatorControl>;
 }
 
 interface TemporaryQrOutput {
@@ -189,53 +142,6 @@ function removeQrOutput(output: TemporaryQrOutput): void {
   fs.unlinkSync(output.filePath);
 }
 
-function record(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('Invalid response from the Kintio runtime');
-  }
-  return value as Record<string, unknown>;
-}
-
-function resultError(result: Record<string, unknown>): never {
-  const content = Array.isArray(result.content) ? result.content : [];
-  const first = content.find((item) =>
-    item && typeof item === 'object' && 'type' in item && item.type === 'text');
-  const message = first && typeof first === 'object' && 'text' in first
-    ? String(first.text || '')
-    : '';
-  throw new Error(message || 'The Kintio runtime rejected the iLink login operation');
-}
-
-function structured(result: unknown): Record<string, unknown> {
-  const response = record(result);
-  if (response.isError) resultError(response);
-  return record(response.structuredContent);
-}
-
-function operatorAccount(value: unknown): IlinkOperatorAccount {
-  const account = record(value);
-  const accountKey = String(account.accountKey || '');
-  const generation = Number(account.generation);
-  const incarnation = String(account.incarnation || '');
-  const providerAccountId = String(account.providerAccountId || '');
-  if (
-    !ACCOUNT_KEY.test(accountKey) ||
-    !Number.isSafeInteger(generation) || generation < 1 ||
-    !/^ii_[0-9a-f]{64}$/u.test(incarnation) ||
-    !providerAccountId || Buffer.byteLength(providerAccountId, 'utf8') > 512 ||
-    typeof account.runtimeEnabled !== 'boolean'
-  ) {
-    throw new Error('Invalid iLink account response from the Kintio runtime');
-  }
-  return Object.freeze({
-    accountKey: accountKey as `ia_${string}`,
-    generation,
-    incarnation: incarnation as `ii_${string}`,
-    providerAccountId,
-    runtimeEnabled: account.runtimeEnabled,
-  });
-}
-
 function operatorAccountFromStored(
   stored: IlinkAccountWithSecret,
 ): IlinkOperatorAccount {
@@ -248,224 +154,19 @@ function operatorAccountFromStored(
   });
 }
 
-function accountMutation(value: Record<string, unknown>) {
-  const runningCount = Number(value.runningCount);
-  if (!Number.isSafeInteger(runningCount) || runningCount < 0) {
-    throw new Error('Invalid iLink runtime count from the Kintio runtime');
-  }
-  return Object.freeze({
-    account: operatorAccount(value.account),
-    runningCount,
-  });
-}
-
-export function hasRuntimeOperator(state: IlinkEnrollmentConfig['state']): boolean {
-  try {
-    findMcpDescriptorFile(path.dirname(state.lockFile), operatorMcpInstanceKey(state.lockFile));
-    return true;
-  } catch (error) {
-    if (error instanceof Error && error.message === 'Kintio runtime is not running') return false;
-    throw error;
-  }
-}
-
-export async function controlWecom(
-  config: Pick<IlinkEnrollmentConfig, 'state'>,
-  packageRoot: string,
-  action: 'start' | 'stop' | 'restart' | 'status',
-  configFile?: string,
-): Promise<{ running: boolean }> {
-  const control = await McpIlinkOperatorControl.connect(config, packageRoot);
-  try { return await control.wecom(action, configFile); }
-  finally { await control.close(); }
-}
-
-export async function restartIlinkListeners(config: Pick<IlinkEnrollmentConfig, 'state'>, packageRoot: string): Promise<void> {
-  const control = await McpIlinkOperatorControl.connect(config, packageRoot);
-  try { await control.restart(); }
-  finally { await control.close(); }
-}
-
-class McpIlinkOperatorControl implements IlinkOperatorControl {
-  readonly mode = 'runtime' as const;
-  readonly #client: Client;
-  readonly #transport: StdioClientTransport;
-
-  private constructor(client: Client, transport: StdioClientTransport) {
-    this.#client = client;
-    this.#transport = transport;
-  }
-
-  static async connect(
-    config: Pick<IlinkEnrollmentConfig, 'state'>,
-    packageRoot: string,
-  ): Promise<McpIlinkOperatorControl> {
-    const descriptorFile = findMcpDescriptorFile(
-      path.dirname(config.state.lockFile),
-      operatorMcpInstanceKey(config.state.lockFile),
-    );
-    if (!fs.existsSync(descriptorFile)) {
-      throw new Error('Kintio runtime has no local iLink operator control');
-    }
-    const sourceRelay = path.join(packageRoot, 'mcp-relay.ts');
-    const relayFile = fs.existsSync(sourceRelay)
-      ? sourceRelay
-      : path.join(packageRoot, 'dist/mcp-relay.js');
-    const transport = new StdioClientTransport({
-      command: process.execPath,
-      args: [
-        relayFile,
-        '--descriptor',
-        descriptorFile,
-        '--route',
-        'operator',
-      ],
-      stderr: 'pipe',
-    });
-    const stderr = transport.stderr;
-    if (stderr && 'resume' in stderr && typeof stderr.resume === 'function') stderr.resume();
-    const client = new Client({ name: 'kintio-cli', version: KINTIO_VERSION });
-    try {
-      await client.connect(transport);
-      return new McpIlinkOperatorControl(client, transport);
-    } catch (error) {
-      try { await transport.close(); } catch {}
-      throw new Error('Kintio runtime is not available for iLink operator control', {
-        cause: error,
-      });
-    }
-  }
-
-  async wecom(action: 'start' | 'stop' | 'restart' | 'status', configFile?: string): Promise<{ running: boolean }> {
-    const result = await this.#client.callTool({ name: 'wecom_control', arguments: { action, ...(configFile ? { configFile } : {}) } }, undefined, { timeout: 130_000 });
-    if (result.isError) {
-      const content = result.content as { type: string; text?: string }[];
-      throw new Error(content.find((item) => item.type === 'text')?.text || 'WeCom operation failed');
-    }
-    const value = structured(result);
-    if (typeof value.running !== 'boolean') throw new Error('Invalid WeCom listener state');
-    return { running: value.running };
-  }
-
-  async restart(): Promise<void> {
-    structured(await this.#client.callTool({ name: 'restart_accounts', arguments: {} }, undefined, { timeout: 130_000 }));
-  }
-
-  async begin(signal: AbortSignal) {
-    const value = structured(await this.#client.callTool(
-      { name: 'begin_login', arguments: {} },
-      undefined,
-      { signal, timeout: 30_000 },
-    ));
-    const offerId = String(value.offerId || '');
-    const qrContent = String(value.qrContent || '');
-    const expiresAt = Number(value.expiresAt || 0);
-    if (
-      !OFFER_ID.test(offerId) || !qrContent ||
-      Buffer.byteLength(qrContent, 'utf8') > 2_048 ||
-      !Number.isSafeInteger(expiresAt) || expiresAt <= 0
-    ) throw new Error('Invalid iLink login offer from the Kintio runtime');
-    return { offerId, qrContent, expiresAt };
-  }
-
-  async status(offerId: string, signal: AbortSignal) {
-    const value = structured(await this.#client.callTool(
-      { name: 'login_status', arguments: { offerId } },
-      undefined,
-      { signal, timeout: 5_000 },
-    ));
-    const status = String(value.status || '') as IlinkLoginStatus;
-    if (!LOGIN_STATUSES.has(status)) {
-      throw new Error('Invalid iLink login status from the Kintio runtime');
-    }
-    return { status };
-  }
-
-  async cancel(offerId: string): Promise<boolean> {
-    const value = structured(await this.#client.callTool(
-      { name: 'cancel_login', arguments: { offerId } },
-      undefined,
-      { timeout: 5_000 },
-    ));
-    if (typeof value.cancelled !== 'boolean') {
-      throw new Error('Invalid iLink cancellation response from the Kintio runtime');
-    }
-    return value.cancelled;
-  }
-
-  async listAccounts(): Promise<readonly IlinkOperatorAccount[]> {
-    const value = structured(await this.#client.callTool(
-      { name: 'list_accounts', arguments: {} },
-      undefined,
-      { timeout: 5_000 },
-    ));
-    if (!Array.isArray(value.accounts) || value.accounts.length > 1_000) {
-      throw new Error('Invalid iLink account list from the Kintio runtime');
-    }
-    return Object.freeze(value.accounts.map(operatorAccount));
-  }
-
-  async setAccountRuntime(
-    accountKey: `ia_${string}`,
-    enabled: boolean,
-    expected: IlinkAccountRevision,
-  ) {
-    return accountMutation(structured(await this.#client.callTool(
-      {
-        name: enabled ? 'start_account' : 'stop_account',
-        arguments: {
-          accountKey,
-          expectedGeneration: expected.generation,
-          expectedIncarnation: expected.incarnation,
-        },
-      },
-      undefined,
-      { timeout: 10_000 },
-    )));
-  }
-
-  async deleteAccount(
-    accountKey: `ia_${string}`,
-    expected: IlinkAccountRevision,
-  ) {
-    return accountMutation(structured(await this.#client.callTool(
-      {
-        name: 'delete_account',
-        arguments: {
-          accountKey,
-          expectedGeneration: expected.generation,
-          expectedIncarnation: expected.incarnation,
-        },
-      },
-      undefined,
-      { timeout: 10_000 },
-    )));
-  }
-
-  async close(): Promise<void> {
-    try { await this.#client.close(); } catch {}
-    try { await this.#transport.close(); } catch {}
-  }
-}
-
-class LocalIlinkOperatorControl implements IlinkOperatorControl {
+class LocalIlinkOperatorControl implements IlinkAccountControl {
   readonly mode = 'standalone' as const;
   readonly #persistence: StatePersistence;
   readonly #lock: InstanceLock;
-  readonly #config: Pick<IlinkEnrollmentConfig, 'state' | 'ilink'>;
   readonly #accounts: IlinkSqliteStore;
-  #enrollment: ReturnType<typeof createIlinkEnrollmentService> | undefined;
-  #enrollmentStarted: Promise<void> | undefined;
   #closed = false;
 
   private constructor(
     persistence: StatePersistence,
     lock: InstanceLock,
-    config: Pick<IlinkEnrollmentConfig, 'state' | 'ilink'>,
   ) {
     this.#persistence = persistence;
     this.#lock = lock;
-    this.#config = config;
     this.#accounts = persistence.createIlinkStore();
   }
 
@@ -480,7 +181,7 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
     let persistence: StatePersistence | undefined;
     try {
       persistence = new StatePersistence({ filePath: config.state.databaseFile });
-      return new LocalIlinkOperatorControl(persistence, lock, config);
+      return new LocalIlinkOperatorControl(persistence, lock);
     } catch (error: unknown) {
       const cleanupErrors: unknown[] = [];
       try { persistence?.close(); } catch (cleanupError: unknown) {
@@ -498,38 +199,11 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
       if (cleanupErrors.length) {
         throw new AggregateError(
           [error, ...cleanupErrors],
-          'Standalone iLink login initialization and cleanup both failed',
+          'Offline iLink account initialization and cleanup both failed',
         );
       }
       throw error;
     }
-  }
-
-  async #startEnrollment() {
-    this.#enrollment ||= createIlinkEnrollmentService({
-      persistence: this.#persistence,
-      config: this.#config.ilink,
-    });
-    this.#enrollmentStarted ||= this.#enrollment.manager.start();
-    await this.#enrollmentStarted;
-    return this.#enrollment;
-  }
-
-  async begin(signal?: AbortSignal) {
-    const enrollment = await this.#startEnrollment();
-    return enrollment.manager.offer(
-      { kind: 'terminal' },
-      signal ? { signal } : {},
-    );
-  }
-
-  status(offerId: string) {
-    if (!this.#enrollment) throw new Error('No iLink login is active');
-    return Promise.resolve(this.#enrollment.manager.status(offerId));
-  }
-
-  cancel(offerId: string) {
-    return Promise.resolve(this.#enrollment?.manager.cancel(offerId) || false);
   }
 
   listAccounts(): Promise<readonly IlinkOperatorAccount[]> {
@@ -588,11 +262,6 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
   async close(): Promise<void> {
     if (this.#closed) return;
     const errors: unknown[] = [];
-    if (this.#enrollment) {
-      try { await this.#enrollment.manager.close(); } catch (error: unknown) {
-        errors.push(error);
-      }
-    }
     try { this.#persistence.core.checkpoint('TRUNCATE'); } catch (error: unknown) {
       errors.push(error);
     }
@@ -610,7 +279,7 @@ class LocalIlinkOperatorControl implements IlinkOperatorControl {
     }
     this.#closed = this.#persistence.closed;
     if (errors.length) {
-      throw new AggregateError(errors, 'Standalone iLink login cleanup failed');
+      throw new AggregateError(errors, 'Offline iLink account cleanup failed');
     }
   }
 }
@@ -620,10 +289,10 @@ export async function openIlinkOperatorControl(
   packageRoot: string,
   signal: AbortSignal,
   requiredMode?: 'runtime' | 'standalone',
-): Promise<IlinkOperatorControl> {
+): Promise<IlinkAccountControl> {
   if (requiredMode === 'runtime') {
     try {
-      return await McpIlinkOperatorControl.connect(config, packageRoot);
+      return await RuntimeOperatorClient.connect(config, packageRoot);
     } catch (error: unknown) {
       throw new Error('The iLink Runtime changed; select the account again', {
         cause: error,
@@ -640,7 +309,7 @@ export async function openIlinkOperatorControl(
     }
   }
   try {
-    return await McpIlinkOperatorControl.connect(config, packageRoot);
+    return await RuntimeOperatorClient.connect(config, packageRoot);
   } catch (ipcError: unknown) {
     try {
       return await LocalIlinkOperatorControl.open(config);
@@ -651,7 +320,7 @@ export async function openIlinkOperatorControl(
         while (!signal.aborted && Date.now() < deadline) {
           await delay(100, undefined, { signal });
           try {
-            return await McpIlinkOperatorControl.connect(config, packageRoot);
+            return await RuntimeOperatorClient.connect(config, packageRoot);
           } catch {}
         }
       }
@@ -719,12 +388,12 @@ export async function runIlinkCliLogin(options: IlinkCliLoginOptions): Promise<n
   const clock = options.clock || Date.now;
   const sleep = options.sleep || defaultSleep;
   const openControl = options.openControl || (() =>
-    openIlinkOperatorControl(options.config, options.packageRoot, options.signal));
+    RuntimeOperatorClient.connect(options.config, options.packageRoot));
   let control: IlinkOperatorControl | undefined;
   let offerId = '';
   let qrOutput: TemporaryQrOutput | undefined;
   try {
-    control = await openControl();
+    control = options.control ? await options.control() : await openControl();
     const offer = await control.begin(options.signal);
     offerId = offer.offerId;
     if (options.qrOutputPath) {
@@ -803,7 +472,7 @@ export async function runIlinkCliLogin(options: IlinkCliLoginOptions): Promise<n
     try {
       if (qrOutput) removeQrOutput(qrOutput);
     } finally {
-      await control?.close();
+      if (!options.control) await control?.close();
     }
   }
 }

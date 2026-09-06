@@ -407,23 +407,41 @@ export class IlinkSendExecutor implements IlinkToolExecutor {
     messageKey: string,
     content = 'Your conversation is queued. Please wait.',
   ): Promise<void> {
+    const result = await this.#sendSystemText(messageKey, content, 'queue_notice');
+    if (result.status === 'failed') throw new Error('iLink queue notice failed');
+  }
+
+  async notifyApproval(messageKey: string, content: string, signal: AbortSignal): Promise<void> {
+    const result = await this.#sendSystemText(messageKey, content, 'agent_approval', signal);
+    if (result.status !== 'accepted') throw new Error('iLink approval notice was not confirmed');
+  }
+
+  async #sendSystemText(
+    messageKey: string,
+    content: string,
+    source: 'queue_notice' | 'agent_approval',
+    signal?: AbortSignal,
+  ): Promise<IlinkToolReceipt> {
+    if (signal?.aborted || !content || Buffer.byteLength(content, 'utf8') > 2_000) {
+      throw new Error('iLink system notice is unavailable or too large');
+    }
     const window = this.#ilink.getReplyWindowSecretBySource(messageKey);
-    if (!window) throw new Error('iLink queue notice has no reply window');
-    await this.#serialize(window.accountKey, async () => {
+    if (!window) throw new Error('iLink system notice has no reply window');
+    return this.#serialize(window.accountKey, async () => {
+      if (signal?.aborted) throw new Error('iLink system notice was cancelled');
       const delivery = this.#deliveryContext(window.replyWindowId);
       const clientId = `il_${randomBytes(16).toString('base64url')}`;
       const attempt = this.#ilink.reserveStartedSystemAttempt({
         messageKey,
         sentType: 'text',
-        source: 'queue_notice',
+        source,
         payload: { content, clientId },
-        metadata: { tool: 'queue_notice' },
+        metadata: { tool: source },
       });
-      const result = await this.#transmit(attempt, delivery, {
+      return this.#transmit(attempt, delivery, {
         type: IlinkMessageItemType.TEXT,
         text_item: { text: content },
       }, clientId);
-      if (result.status === 'failed') throw new Error('iLink queue notice failed');
     });
   }
 

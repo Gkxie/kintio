@@ -252,6 +252,7 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(releaseCodex, /^  pull_request_target:\n    branches: \[master\]$/mu);
   assert.doesNotMatch(releaseCodex, /^  (?:pull_request|push|workflow_dispatch|schedule):/mu);
   assert.match(releaseCodex, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
+  assert.doesNotMatch(releaseCodex, /github\.event\.changes|PR_TITLE:/u);
   for (const file of ['CHANGELOG.md', 'package.json', 'src/version.ts']) {
     assert.match(
       releaseCodex,
@@ -283,7 +284,7 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(authorizeJob, /path: candidate/u);
   assert.match(authorizeJob, /working-directory: candidate/u);
   assert.match(authorizeJob, /test "\$\(git rev-parse HEAD\)" = "\$HEAD_SHA"/u);
-  assert.match(authorizeJob, /\.\.\/trusted\/\.github\/scripts\/reconcile-release\.ts verify/u);
+  assert.match(authorizeJob, /\.\.\/trusted\/\.github\/scripts\/reconcile-release\.ts verify-source$/mu);
   assert.match(authorizeJob, /authorized=true\\nhead_sha=%s\\n/u);
   assert.match(validateJob, /needs: authorize/u);
   assert.match(validateJob, /if: needs\.authorize\.outputs\.authorized == 'true'/u);
@@ -334,7 +335,9 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(release, /pull\.head\?\.ref === 'release\/next'/u);
   assert.match(release, /releasePull\.merged_by\?\.login !== process\.env\.REPOSITORY_OWNER/u);
   assert.match(release, /tag commit is not an authorized merged Release PR/u);
-  assert.match(release, /allowedReleaseFiles/u);
+  assert.match(release, /validateReleaseFiles\(releaseFiles\)/u);
+  assert.match(release, /validateReleaseManifest\(\{/u);
+  assert.match(release, /from '\.\/\.github\/scripts\/release-plan\.ts'/u);
   assert.match(release, /Release tags must be annotated tags/u);
   assert.match(release, /contents: read[\s\S]+contents: write/u);
   assert.match(release, /scripts\/prepare-package\.ts/u);
@@ -394,15 +397,15 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(releasePr, /actions: write[\s\S]+contents: write[\s\S]+pull-requests: write/u);
   assert.match(releasePr, /ref: \$\{\{ github\.event\.pull_request\.merge_commit_sha \}\}/u);
   assert.match(releasePr, /persist-credentials: false/u);
-  assert.match(releasePr, /const required = \['CHANGELOG\.md', 'package\.json', 'src\/version\.ts'\]/u);
-  assert.match(releasePr, /new Set\(\[\.\.\.required, 'SECURITY\.md'\]\)/u);
-  assert.match(releasePr, /file\.status === 'renamed'/u);
+  assert.match(releasePr, /validateReleaseFiles\(files\)/u);
+  assert.match(releasePr, /validateReleaseManifest\(\{/u);
+  assert.match(releasePr, /validateFrozenChangelog\(changelog, version\)/u);
+  assert.match(releasePr, /from '\.\/\.github\/scripts\/release-plan\.ts'/u);
   assert.match(releasePr, /'\/git\/tags'/u);
   assert.match(releasePr, /'\/git\/refs'/u);
   assert.match(releasePr, /'\/actions\/workflows\/release\.yml\/dispatches'/u);
   assert.match(releasePr, /workflow_runs\?\.find/u);
   assert.match(releasePr, /\.github\/scripts\/report-release\.ts/u);
-  assert.match(releasePr, /Release PR changed package\.json beyond its version/u);
   assert.match(releasePr, /Release PR file enumeration is incomplete/u);
   assert.doesNotMatch(releasePr, /secrets\.|NPM_TOKEN|NODE_AUTH_TOKEN/u);
 });

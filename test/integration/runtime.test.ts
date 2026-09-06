@@ -5,7 +5,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'vitest';
 
-import { createConfig, loadSharedRuntimeConfig } from '../../src/config.ts';
+import { loadSharedRuntimeConfig } from '../../src/config.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
@@ -65,17 +65,11 @@ test('runtime never mutates the host Codex configuration', async (t) => {
     else process.env.CODEX_HOME = originalCodexHome;
   });
 
-  const config = createConfig({
-    WECOM_CALLBACK_TOKEN: 'CallbackToken123',
-    WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
-    WECOM_CORP_ID: 'ww-runtime-test',
-    WECOM_KF_SECRET: 'runtime-secret',
-    ILINK_ENABLED: 'false',
-    WECOM_ALLOWED_USER_IDS: 'wm-runtime-test',
+  const config = loadSharedRuntimeConfig({ root: temporary.directory, environment: {
     KINTIO_DB_FILE: temporary.filePath,
     CODEX_WORKING_DIRECTORY: path.join(temporary.directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(temporary.directory, 'image-inputs'),
-  }, temporary.directory);
+  } });
   const runtime = await createRuntime({
     config,
     logger: { info() {}, warn() {}, error() {} },
@@ -85,7 +79,7 @@ test('runtime never mutates the host Codex configuration', async (t) => {
     if (!closed) await runtime.close();
   });
 
-  assert.ok(runtime.messageProcessor);
+  assert.deepEqual(await runtime.wecomControl('status'), { running: false });
   if (process.platform === 'win32') {
     assert.equal((await fs.stat(temporary.filePath)).isFile(), true);
   } else {

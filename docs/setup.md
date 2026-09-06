@@ -185,7 +185,11 @@ the capabilities exposed by the host Agent configuration, including any local, n
 tool, approval, or multi-agent powers enabled there. Only show the terminal QR code to a
 person authorized to control that host Agent.
 
-The login command exits after persisting credentials and starts no listener. Run
+Login starts or reuses the shared background owner, without enabling the newly
+enrolled account's listener. Multiple terminals may log in independently; existing
+channel controls remain available while a terminal waits. The login command exits
+after persisting credentials, and an owner with no active channels or operator
+connections exits afterward. Run
 `kintio ilink start` to process iLink messages in the background without Hono, or use
 `kintio ilink start --foreground` under an external service manager. Start the callback channel separately with `kintio wecom start` when needed.
 
@@ -302,7 +306,7 @@ one exact version, and restores an idle background instance after verification:
 kintio update
 ```
 
-Active Agent work, a foreground Runtime, an active standalone login, an unknown
+Active Agent work, a foreground Runtime, an active login connection, an unknown
 installation layout, or an ambiguous package-manager root fails before the
 package is changed. The updater coordinates the shared runtime and restores its enabled channels
 and accounts. A selected custom home cannot hide a running default home. Stop

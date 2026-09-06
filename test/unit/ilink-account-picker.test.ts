@@ -12,7 +12,7 @@ import {
   truncateTerminalText,
   type IlinkPickerTerminal,
 } from '../../src/ilink/account-picker.ts';
-import type { IlinkOperatorAccount } from '../../src/ilink/cli-login.ts';
+import type { IlinkOperatorAccount } from '../../src/runtime/operator-client.ts';
 
 class FakeInput extends EventEmitter {
   readonly isTTY = true;

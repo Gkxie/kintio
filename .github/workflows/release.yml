@@ -49,20 +49,20 @@ jobs:
           git tag --list 'v*' > "$RUNNER_TEMP/version-tags.txt"
           node --input-type=module <<'NODE'
           import fs from 'node:fs';
+          import {
+            releaseNotes,
+            validateReleaseFiles,
+            validateReleaseManifest,
+          } from './.github/scripts/release-plan.ts';
 
           const tag = process.env.RELEASE_TAG || '';
-          const packageJson = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const packageSource = fs.readFileSync('package.json', 'utf8');
+          const packageJson = JSON.parse(packageSource);
           const version = String(packageJson.version || '');
           if (!/^\d+\.\d+\.\d+$/u.test(version) || tag !== `v${version}`) {
             throw new Error(`tag ${tag} does not match package version ${version}`);
           }
           const runtimeVersion = fs.readFileSync('src/version.ts', 'utf8');
-          const runtimeVersionMatch = /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u.exec(
-            runtimeVersion,
-          );
-          if (runtimeVersionMatch?.[1] !== version) {
-            throw new Error(`runtime version does not match ${version}`);
-          }
 
           const [owner, repository] = (process.env.GITHUB_REPOSITORY || '').split('/');
           const github = async (route) => {
@@ -125,18 +125,7 @@ jobs:
           if (releaseFiles.length !== releasePull.changed_files) {
             throw new Error('Release PR file enumeration is incomplete');
           }
-          const requiredReleaseFiles = ['CHANGELOG.md', 'package.json', 'src/version.ts'];
-          const allowedReleaseFiles = new Set([...requiredReleaseFiles, 'SECURITY.md']);
-          for (const file of requiredReleaseFiles) {
-            if (!releaseFiles.some((item) => item.filename === file)) {
-              throw new Error('Release PR did not change ' + file);
-            }
-          }
-          for (const file of releaseFiles) {
-            if (file.status === 'renamed' || !allowedReleaseFiles.has(file.filename)) {
-              throw new Error('Release PR changed a forbidden file');
-            }
-          }
+          validateReleaseFiles(releaseFiles);
 
           const readFile = async (file, ref) => {
             const result = await github(
@@ -152,22 +141,10 @@ jobs:
             readFile('package.json', releasePull.base.sha),
             readFile('src/version.ts', releasePull.base.sha),
           ]);
-          const releasePackage = { ...packageJson };
-          const basePackage = JSON.parse(basePackageSource);
-          const previousPackage = { ...basePackage };
-          delete releasePackage.version;
-          delete previousPackage.version;
-          if (JSON.stringify(releasePackage) !== JSON.stringify(previousPackage)) {
-            throw new Error('Release PR changed package.json beyond its version');
-          }
-          const baseRuntimeVersion = /^export const KINTIO_VERSION = ['"]([^'"]+)['"];\r?\n?$/u
-            .exec(baseRuntimeSource)?.[1];
-          if (
-            baseRuntimeVersion !== basePackage.version
-            || runtimeVersion !== `export const KINTIO_VERSION = '${version}';\n`
-          ) {
-            throw new Error('Release PR changed the runtime version file unexpectedly');
-          }
+          validateReleaseManifest({
+            version, packageSource, runtimeSource: runtimeVersion,
+            basePackageSource, baseRuntimeSource,
+          });
 
           const releases = [];
           for (let page = 1; page <= 100; page += 1) {
@@ -214,45 +191,7 @@ jobs:
             throw new Error(`${version} must be newer than published ${latestPublished}`);
           }
 
-          const lines = fs.readFileSync('CHANGELOG.md', 'utf8').split(/\r?\n/u);
-          const unreleased = lines.reduce(
-            (indexes, line, index) => line === '## Unreleased' ? [...indexes, index] : indexes,
-            [],
-          );
-          if (unreleased.length !== 1) throw new Error('CHANGELOG.md requires one Unreleased section');
-          const findVersion = (target) => {
-            const escaped = target.replaceAll('.', '\\.');
-            const matches = lines.reduce(
-              (indexes, line, index) =>
-                (
-                  line === `## ${target}`
-                  || new RegExp(
-                    `^## ${escaped} - \\d{4}-\\d{2}-\\d{2}$`,
-                    'u',
-                  ).test(line)
-                )
-                  ? [...indexes, index]
-                  : indexes,
-              [],
-            );
-            if (matches.length !== 1) {
-              throw new Error(`CHANGELOG.md requires one section for ${target}`);
-            }
-            return matches[0];
-          };
-          const start = findVersion(version);
-          if (unreleased[0] > start) throw new Error('Unreleased must precede released versions');
-          const nextSection = lines.findIndex(
-            (line, index) => index > start && line.startsWith('## '),
-          );
-          const end = latestPublished && latestPublished !== version
-            ? findVersion(latestPublished)
-            : (nextSection < 0 ? lines.length : nextSection);
-          if (end <= start) throw new Error('published changelog versions are not descending');
-          const notes = lines.slice(start + 1, end).join('\n').trim();
-          if (!notes.split('\n').some((line) => line.startsWith('- '))) {
-            throw new Error(`CHANGELOG.md has no unpublished entries for ${version}`);
-          }
+          const notes = releaseNotes(fs.readFileSync('CHANGELOG.md', 'utf8'), version, latestPublished);
           fs.writeFileSync(`${process.env.RUNNER_TEMP}/release-notes.md`, `${notes}\n`);
           NODE
 

@@ -11,7 +11,7 @@ import {
 import type {
   IlinkOperatorAccount,
   IlinkOperatorControl,
-} from '../../src/ilink/cli-login.ts';
+} from '../../src/runtime/operator-client.ts';
 
 const ACCOUNT_A: IlinkOperatorAccount = {
   accountKey: `ia_${'a'.repeat(40)}`,

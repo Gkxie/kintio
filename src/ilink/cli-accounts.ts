@@ -1,11 +1,8 @@
 import fs from 'node:fs';
 
 import type { IlinkEnrollmentConfig } from '../config.ts';
-import {
-  openIlinkOperatorControl,
-  type IlinkOperatorAccount,
-  type IlinkOperatorControl,
-} from './cli-login.ts';
+import { openIlinkOperatorControl } from './cli-login.ts';
+import type { IlinkOperatorAccount, IlinkOperatorControl, IlinkAccountControl } from '../runtime/operator-client.ts';
 import { assertIlinkAccountRevision } from './store-types.ts';
 
 export type IlinkAccountCommand = 'list' | 'start' | 'stop' | 'delete';
@@ -62,16 +59,18 @@ export async function readIlinkAccountSnapshot({
   packageRoot,
   signal,
   openControl,
+  control: borrowedControl,
 }: {
   readonly config: Pick<IlinkEnrollmentConfig, 'state' | 'ilink'>;
   readonly packageRoot: string;
   readonly signal: AbortSignal;
   readonly openControl?: () => Promise<IlinkOperatorControl>;
+  readonly control?: IlinkAccountControl;
 }): Promise<IlinkAccountSnapshot> {
-  if (!openControl && !fs.existsSync(config.state.databaseFile)) {
+  if (!borrowedControl && !openControl && !fs.existsSync(config.state.databaseFile)) {
     return Object.freeze({ accounts: Object.freeze([]), mode: 'standalone' });
   }
-  const control = await (openControl?.() ||
+  const control = borrowedControl || await (openControl?.() ||
     openIlinkOperatorControl(config, packageRoot, signal));
   try {
     return Object.freeze({
@@ -79,7 +78,7 @@ export async function readIlinkAccountSnapshot({
       mode: control.mode,
     });
   } finally {
-    await control.close();
+    if (!borrowedControl) await control.close();
   }
 }
 
@@ -94,6 +93,7 @@ export async function runIlinkAccountCommand({
   signal,
   stdout,
   openControl,
+  control: borrowedControl,
   deferStandaloneStart = false,
 }: {
   readonly command: IlinkAccountCommand;
@@ -106,16 +106,17 @@ export async function runIlinkAccountCommand({
   readonly signal: AbortSignal;
   readonly stdout: (text: string) => void;
   readonly openControl?: () => Promise<IlinkOperatorControl>;
+  readonly control?: IlinkAccountControl;
   readonly deferStandaloneStart?: boolean;
 }): Promise<IlinkAccountCommandResult> {
-  if (!openControl && !fs.existsSync(config.state.databaseFile)) {
+  if (!borrowedControl && !openControl && !fs.existsSync(config.state.databaseFile)) {
     if (command === 'list') {
       stdout('No iLink accounts enrolled.\n');
       return { runtimeRequired: false, runningCount: 0 };
     }
     throw new Error('No iLink account is enrolled; run "kintio ilink login" first');
   }
-  const control = await (openControl?.() ||
+  const control = borrowedControl || await (openControl?.() ||
     openIlinkOperatorControl(config, packageRoot, signal, requiredMode));
   try {
     if (requiredMode && control.mode !== requiredMode) {
@@ -177,6 +178,6 @@ export async function runIlinkAccountCommand({
       ...(command === 'start' ? { selectedAccountKey: account.accountKey } : {}),
     };
   } finally {
-    await control.close();
+    if (!borrowedControl) await control.close();
   }
 }

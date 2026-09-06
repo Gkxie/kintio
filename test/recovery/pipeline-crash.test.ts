@@ -214,7 +214,7 @@ if (mode === '--seed') {
       agent: new SimulatedToolAgent({ inner: agent, tools: activeChannel }),
       mediaGateway: { resolveForCodex: async () => [] },
       channel: activeChannel,
-      allowedUserIds: ['wm-crash'],
+      allowedUserIds: ['wm-crash', 'wm-crash-two'],
       logger: { info() {}, warn() {}, error() {} },
     });
     await processor.recover(store.recoverStartup().inbound);
