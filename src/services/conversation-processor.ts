@@ -27,6 +27,16 @@ import type { CoreState, InboundRecord } from '../state/sqlite-store.ts';
 
 type ChannelMessage = NormalizedMessage & { readonly messageKey: string };
 type WorkPriority = 'high' | 'low';
+type PendingTurn = {
+  readonly completion: Promise<void>;
+  boundaryMessageKey: string;
+};
+type AdmissionQueue = { tail: Promise<void>; live: number };
+type ActiveConversation = {
+  readonly record: InboundRecord;
+  priority: WorkPriority;
+  turn?: PendingTurn;
+};
 type SlotWaiter = {
   readonly key: string;
   readonly record: InboundRecord;
@@ -134,14 +144,11 @@ export class ConversationProcessor {
     readonly confirmationText: string;
   };
   readonly #logger: Logger;
-  readonly #queues = new Map<string, Promise<void>>();
+  readonly #queues = new Map<string, AdmissionQueue>();
   readonly #recoveries = new Map<string, Promise<void>>();
   readonly #background = new Set<Promise<void>>();
   readonly #onlineRetries = new Map<string, number>();
-  readonly #activeConversations = new Map<string, {
-    readonly record: InboundRecord;
-    readonly priority: WorkPriority;
-  }>();
+  readonly #activeConversations = new Map<string, ActiveConversation>();
   readonly #highWaiters: SlotWaiter[] = [];
   readonly #lowWaiters: SlotWaiter[] = [];
   readonly #queueNotified = new Set<string>();
@@ -301,7 +308,12 @@ export class ConversationProcessor {
   #acquire(record: InboundRecord, priority: WorkPriority): Promise<void> {
     if (this.#pausedChannels.has(record.channel)) return Promise.reject(new Error('Channel is stopped'));
     const key = this.#conversationKey(record);
-    if (this.#activeConversations.has(key)) return Promise.resolve();
+    if (this.#queues.get(key)?.live) priority = 'high';
+    const active = this.#activeConversations.get(key);
+    if (active?.turn && !this.#pipeline.agent.activePrimary(conversationId(record))) {
+      return active.turn.completion.then(() => this.#acquire(record, priority));
+    }
+    if (active) return Promise.resolve();
     const lowActive = [...this.#activeConversations.values()]
       .some((active) => active.priority === 'low');
     if (
@@ -353,36 +365,77 @@ export class ConversationProcessor {
     return true;
   }
 
+  #promote(record: InboundRecord): void {
+    const key = this.#conversationKey(record);
+    const active = this.#activeConversations.get(key);
+    if (active) active.priority = 'high';
+    const index = this.#lowWaiters.findIndex((waiter) => waiter.key === key);
+    if (index !== -1) {
+      const waiter = this.#lowWaiters.splice(index, 1)[0]!;
+      this.#highWaiters.push({ ...waiter, priority: 'high' });
+      this.#wakeWaiters();
+      if (!this.#activeConversations.has(key)) {
+        this.#notifyQueued(record);
+        void this.#preemptLow(key);
+      }
+    } else if (active) {
+      this.#wakeWaiters();
+    }
+  }
+
+  #schedule(
+    record: InboundRecord,
+    prepare: () => Promise<PendingTurn | undefined>,
+    live = false,
+  ): Promise<PendingTurn | undefined> {
+    const key = this.#conversationKey(record);
+    const queue = this.#queues.get(key) || { tail: Promise.resolve(), live: 0 };
+    if (live) queue.live += 1;
+    const task = queue.tail.then(prepare);
+    const settled = task.then(() => undefined, () => undefined).finally(() => {
+      if (live) queue.live -= 1;
+    });
+    queue.tail = settled;
+    this.#queues.set(key, queue);
+    void settled.finally(() => {
+      if (queue.tail === settled) this.#queues.delete(key);
+    });
+    return task;
+  }
+
   enqueue(messageKey: string): Promise<void> {
     if (!this.#accepting) return Promise.resolve();
     const record = this.#store.getInbound(messageKey) as InboundRecord | undefined;
     if (!record) return Promise.resolve();
-    const key = this.#conversationKey(record);
-    const task = (this.#queues.get(key) || this.#recoveries.get(key) || Promise.resolve())
-      .catch(() => undefined)
-      .then(() => this.#processRecoverably(record.messageKey))
+    const message = this.#message(record);
+    const live = Boolean(record.status === 'received' && message &&
+      isProcessableCustomerMessage(message) && this.#authorized(record));
+    if (live) this.#promote(record);
+    return this.#schedule(record, () => this.#processRecoverably(record.messageKey), live)
+      .then(() => undefined)
       .catch((error: unknown) => {
         this.#releaseIfInactive(record);
         this.#logger.error?.(
           `[processor] inbound processing failed message_key=${messageKey}: ${errorMessage(error)}`,
         );
       });
-    this.#queues.set(key, task);
-    void task.finally(() => {
-      if (this.#queues.get(key) === task) this.#queues.delete(key);
-    });
-    return task;
   }
 
-  async #processRecoverably(messageKey: string): Promise<void> {
+  async #processRecoverably(messageKey: string): Promise<PendingTurn | undefined> {
     let lastError: unknown;
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         let record = this.#store.getInbound(messageKey);
         if (!record || this.#pausedChannels.has(record.channel)) return;
+        const active = this.#activeConversations.get(this.#conversationKey(record));
+        if (active && this.#preempting.has(active.record.messageKey)) {
+          await active.turn?.completion;
+          record = this.#store.getInbound(messageKey);
+          if (!record || this.#pausedChannels.has(record.channel)) return;
+        }
+        if (this.#pipeline.agent.activePrimary(conversationId(record)) === messageKey) return;
         if (record.status === 'received') {
-          await this.#process(messageKey);
-          return;
+          return await this.#process(messageKey);
         }
         if (record.status === 'failed') {
           record = this.#store.claimInbound({
@@ -402,8 +455,9 @@ export class ConversationProcessor {
           candidate.primaryMessageKey === messageKey ||
           (candidate.status === 'received' && candidate.inboxSeq > record.inboxSeq),
         );
-        await this.#recoverConversation(group, 'high');
-        return;
+        return await this.#recoverPrimary(record, group.filter((candidate) =>
+          candidate.messageKey === messageKey || candidate.primaryMessageKey === messageKey,
+        ), 'high', group.at(-1)?.messageKey);
       } catch (error: unknown) {
         const record = this.#store.getInbound(messageKey);
         if (record && this.#pausedChannels.has(record.channel)) {
@@ -419,8 +473,10 @@ export class ConversationProcessor {
     throw lastError;
   }
 
-  #track(task: Promise<void>, record: InboundRecord): Promise<void> {
+  #track(task: Promise<void>, record: InboundRecord, boundaryMessageKey: string): PendingTurn {
     const messageKey = record.messageKey;
+    const key = this.#conversationKey(record);
+    const active = this.#activeConversations.get(key);
     const guarded = task.catch((error: unknown) => {
       if (this.#preempting.delete(messageKey)) {
         this.#store.closeAgentSessions(messageKey);
@@ -456,30 +512,31 @@ export class ConversationProcessor {
       this.#logger.error?.(
         `[processor] Codex completion failed message_key=${messageKey}: ${errorMessage(error)}`,
       );
-    }).finally(() => this.#release(record));
+    }).finally(() => {
+      if (this.#activeConversations.get(key) === active) this.#release(record);
+    });
+    const turn = { completion: guarded, boundaryMessageKey };
+    if (active) active.turn = turn;
     this.#background.add(guarded);
     void guarded.finally(() => this.#background.delete(guarded));
-    return guarded;
+    return turn;
   }
 
   async #submit(
     record: InboundRecord,
     input: UnboundAgentInput,
     options: {
-      readonly wait?: boolean;
       readonly boundaryMessageKey?: string;
       readonly recoveredArtifacts?: readonly AgentImageArtifact[];
       readonly started?: (submission: Extract<AgentSubmission, { kind: 'started' }>) => void;
       readonly priority?: WorkPriority;
     } = {},
-  ): Promise<AgentSubmission | undefined> {
+  ): Promise<PendingTurn | undefined> {
     const boundaryMessageKey = options.boundaryMessageKey || record.messageKey;
     if (!this.#admit(record, boundaryMessageKey)) return;
     const opaqueConversationId = conversationId(record);
     const agentAccess = this.#agentAccess(record);
-    const activePrimary = options.wait
-      ? undefined
-      : this.#pipeline.agent.activePrimary(opaqueConversationId);
+    const activePrimary = this.#pipeline.agent.activePrimary(opaqueConversationId);
     if (activePrimary) {
       this.#store.beginInboundSteering({
         messageKey: record.messageKey,
@@ -525,7 +582,9 @@ export class ConversationProcessor {
         this.#store.confirmInboundSteered(record.messageKey, {
           codexTurnId: submission.turnId,
         });
-        return submission;
+        const turn = this.#activeConversations.get(this.#conversationKey(record))?.turn;
+        if (turn) turn.boundaryMessageKey = record.messageKey;
+        return;
       } catch (error) {
         this.#store.closeAgentSession(session.token);
         this.#store.requeueInboundSteering(record.messageKey, activePrimary);
@@ -616,24 +675,23 @@ export class ConversationProcessor {
     void submission.completion.catch(() => undefined);
     this.#store.markInboundPreparing(record.messageKey, submission.turnId);
     options.started?.(submission);
-    const completion = this.#track(
+    const turn = this.#track(
       submission.completion.then((result) => this.#complete(record, result)),
       record,
+      boundaryMessageKey,
     );
     const liveWaiter = this.#highWaiters[0];
     if (liveWaiter) void this.#preemptLow(liveWaiter.key);
-    if (options.wait) await completion;
-    return submission;
+    return turn;
   }
 
   async #process(
     messageKey: string,
     priority: WorkPriority = 'high',
     {
-      wait = false,
       boundaryMessageKey,
-    }: { wait?: boolean; boundaryMessageKey?: string } = {},
-  ): Promise<void> {
+    }: { boundaryMessageKey?: string } = {},
+  ): Promise<PendingTurn | undefined> {
     const record = this.#store.getInbound(messageKey) as InboundRecord | undefined;
     if (!record || record.status !== 'received' || this.#pausedChannels.has(record.channel)) return;
     const message = this.#message(record);
@@ -692,7 +750,7 @@ export class ConversationProcessor {
       attempt.metadata?.tool === 'generated_image' &&
       ['accepted', 'uncertain'].includes(attempt.status),
     );
-    await this.#submit(record, {
+    return this.#submit(record, {
       message: agentMessage(message),
       resolvedMedia: await this.#pipeline.mediaGateway.resolveForCodex(message),
       mediaCatalog,
@@ -708,7 +766,7 @@ export class ConversationProcessor {
             },
           }
         : {}),
-    }, { priority, wait, ...(boundaryMessageKey ? { boundaryMessageKey } : {}) });
+    }, { priority, ...(boundaryMessageKey ? { boundaryMessageKey } : {}) });
   }
 
   async #complete(
@@ -825,7 +883,10 @@ export class ConversationProcessor {
       conversations.set(key, group);
     }
     const tasks = [...conversations.entries()].map(([key, group]) => {
-      const task = this.#recoverConversation(group, priority).catch((error: unknown) => {
+      const previous = this.#recoveries.get(key);
+      const task = (previous
+        ? previous.then(() => this.#recoverConversation(group, priority))
+        : this.#recoverConversation(group, priority)).catch((error: unknown) => {
         const first = group[0];
         if (first) this.#releaseIfInactive(first);
         this.#logger.error?.(
@@ -854,7 +915,7 @@ export class ConversationProcessor {
         continue;
       }
       if (isSystemEvent(message)) {
-        await this.#process(record.messageKey, priority);
+        await this.#schedule(record, () => this.#process(record.messageKey, priority));
         record.status = this.#store.getInbound(record.messageKey)?.status || record.status;
       }
     }
@@ -862,7 +923,7 @@ export class ConversationProcessor {
       ['failed', 'processing', 'preparing'].includes(record.status) &&
       !record.primaryMessageKey,
     );
-    const recoveryBoundary = [...ordered].reverse().find((record) => {
+    let recoveryBoundary = [...ordered].reverse().find((record) => {
       if (['completed', 'ignored', 'absorbed', 'suppressed'].includes(record.status)) {
         return false;
       }
@@ -870,20 +931,38 @@ export class ConversationProcessor {
       record.status = this.#store.getInbound(record.messageKey)?.status || record.status;
       return false;
     })?.messageKey;
-    for (const primary of primaries) {
-      const group = ordered.filter((record) =>
-        record.messageKey === primary.messageKey ||
-        record.primaryMessageKey === primary.messageKey,
-      );
-      await this.#recoverPrimary(primary, group, priority, recoveryBoundary);
-    }
-    for (const record of ordered) {
-      if (record.status === 'received') {
-        await this.#process(record.messageKey, priority, {
-          wait: true,
-          ...(recoveryBoundary ? { boundaryMessageKey: recoveryBoundary } : {}),
+    const units = [...primaries, ...ordered.filter((record) => record.status === 'received')];
+    for (const unit of units) {
+      let retry: boolean;
+      do {
+        retry = false;
+        const pending = await this.#schedule(unit, async () => {
+          const active = this.#activeConversations.get(this.#conversationKey(unit));
+          if (active?.turn) {
+            retry = true;
+            return active.turn;
+          }
+          const current = this.#store.getInbound(unit.messageKey);
+          if (!current) return;
+          if (current.status === 'received') {
+            return this.#process(current.messageKey, priority, {
+              ...(recoveryBoundary ? { boundaryMessageKey: recoveryBoundary } : {}),
+            });
+          }
+          if (!['failed', 'processing', 'preparing'].includes(current.status) || current.primaryMessageKey) return;
+          const group = this.#store.listPendingInbound({
+            channel: current.channel, accountKey: current.accountKey, peerId: current.peerId,
+            statuses: ['failed', 'processing', 'preparing', 'steering', 'steered'], limit: 1000,
+          }).filter((record) => record.messageKey === current.messageKey || record.primaryMessageKey === current.messageKey);
+          return this.#recoverPrimary(current, group, priority, recoveryBoundary);
         });
-      }
+        // Historical units remain separate, but completion never owns the live-input queue.
+        await pending?.completion;
+        if (
+          pending && (this.#store.getInbound(pending.boundaryMessageKey)?.inboxSeq || 0) >
+            (this.#store.getInbound(recoveryBoundary || unit.messageKey)?.inboxSeq || 0)
+        ) recoveryBoundary = pending.boundaryMessageKey;
+      } while (retry);
     }
   }
 
@@ -892,7 +971,7 @@ export class ConversationProcessor {
     group: InboundRecord[],
     priority: WorkPriority,
     recoveryBoundary?: string,
-  ): Promise<void> {
+  ): Promise<PendingTurn | undefined> {
     const decoded = group.flatMap((record) => {
       const message = this.#message(record);
       return message ? [{ record, message }] : [];
@@ -987,7 +1066,7 @@ export class ConversationProcessor {
     const resolvedMedia = (await Promise.all(
       decoded.map(({ message }) => this.#pipeline.mediaGateway.resolveForCodex(message)),
     )).flat() as ResolvedImage[];
-    await this.#submit(primary, {
+    return this.#submit(primary, {
       message: agentMessage(primaryMessage),
       resolvedMedia,
       mediaCatalog,
@@ -1002,7 +1081,6 @@ export class ConversationProcessor {
       allowNoAction,
       clientInputId: `${primary.messageKey}-recovery`,
     }, {
-      wait: true,
       boundaryMessageKey,
       ...(recoveredArtifacts.length
         ? { recoveredArtifacts }
@@ -1026,7 +1104,7 @@ export class ConversationProcessor {
     ) {
       await Promise.allSettled([
         ...this.#recoveries.values(),
-        ...this.#queues.values(),
+        ...[...this.#queues.values()].map((queue) => queue.tail),
         ...this.#background,
       ]);
     }
@@ -1061,7 +1139,8 @@ export class ConversationProcessor {
   async waitForChannelIdle(channel: ChatChannel): Promise<void> {
     const prefix = `${channel}\0`;
     while (true) {
-      const pending = [...this.#queues, ...this.#recoveries]
+      const pending = [...this.#queues].map(([key, queue]) => [key, queue.tail] as const)
+        .concat([...this.#recoveries])
         .filter(([key]) => key.startsWith(prefix)).map(([, task]) => task);
       if (pending.length) await Promise.allSettled(pending);
       else if ([...this.#activeConversations.values()].some(({ record }) => record.channel === channel)) {

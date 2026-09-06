@@ -59,7 +59,7 @@ async function waitUntil(
 }
 
 interface ControlledTurn {
-  readonly input: AgentInput;
+  input: AgentInput;
   readonly completion: Deferred<AgentCompletion>;
   settled: boolean;
 }
@@ -101,7 +101,17 @@ class ControlledAgent implements AgentRuntime {
 
   async submit(input: AgentInput): Promise<AgentSubmission> {
     if (this.#aborted) throw new Error('Controlled Agent is aborted');
-    if (input.mode !== 'start') throw new Error('Unexpected steering in priority test');
+    if (input.mode === 'steer') {
+      const turn = this.#active.get(input.conversationId);
+      if (!turn) throw new Error('No active turn to steer');
+      this.inputs.push(input);
+      turn.input = { ...input, message: turn.input.message };
+      return {
+        kind: 'steered',
+        primaryMessageKey: turn.input.message.messageKey,
+        turnId: `priority-turn-${this.#sequence}`,
+      };
+    }
     const completion = deferred<AgentCompletion>();
     const turn: ControlledTurn = { input, completion, settled: false };
     this.starts.push({
@@ -128,7 +138,7 @@ class ControlledAgent implements AgentRuntime {
     };
   }
 
-  async finish(messageKey: string, content: string): Promise<string> {
+  async finish(messageKey: string, content: string, expectedStatus = 'accepted'): Promise<string> {
     const turn = this.#turns.find(
       (candidate) => candidate.input.message.messageKey === messageKey,
     );
@@ -142,7 +152,7 @@ class ControlledAgent implements AgentRuntime {
           session: turn.input.toolSessionToken,
           content,
         });
-    assert.equal(receipt.status, 'accepted');
+    assert.equal(receipt.status, expectedStatus);
     assert.ok(receipt.attemptId);
     turn.settled = true;
     turn.completion.resolve({ executedAttemptIds: [receipt.attemptId] });
@@ -544,6 +554,371 @@ test('recovery rechecks current WeCom authorization before inspecting or startin
   assert.equal(harness.store.getInbound(messageKey)?.status, 'suppressed');
   assert.equal(harness.store.getInbound(messageKey)?.errorMessage, 'authorization_revoked');
   assert.deepEqual(harness.store.listRecoverableInbound('wechat_kf'), []);
+});
+
+test('a live follow-up steers an active recovered turn before its completion', async (t) => {
+  const harness = await createHarness(t);
+  const oldKey = harness.ingestWecom('active-recovery', 'wm-downtime-backlog');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'the recovered turn to start');
+
+  const liveKey = harness.ingestWecom('new direction', 'wm-downtime-backlog');
+  const online = harness.processor.enqueue(liveKey);
+  await waitUntil(() => harness.agent.inputs.length === 2, 'live steering before recovery completion');
+  await online;
+  assert.deepEqual(harness.agent.inputs.map((input) => input.mode), ['start', 'steer']);
+  assert.equal(harness.agent.starts.length, 1);
+  assert.deepEqual(harness.agent.interruptedMessageKeys, []);
+  await harness.agent.finish(oldKey, 'the latest direction');
+  await recovery;
+  await harness.processor.waitForIdle();
+  assert.equal(harness.store.getInbound(oldKey)?.status, 'completed');
+  assert.equal(harness.store.getInbound(liveKey)?.status, 'absorbed');
+  assert.equal(harness.store.listMessageAttempts(oldKey).length, 1);
+});
+
+test('a live participant promotes their queued recovery without waiting for global idle', async (t) => {
+  const harness = await createHarness(t);
+  const busyKey = harness.ingestWecom('already-working', 'wm-working-one');
+  await harness.processor.enqueue(busyKey);
+  const oldKey = harness.ingestWecom('queued-recovery', 'wm-downtime-backlog');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf').filter((record) => record.messageKey === oldKey), { priority: 'low' });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(harness.agent.inputs.length, 1);
+
+  const liveKey = harness.ingestWecom('queued participant returned', 'wm-downtime-backlog');
+  const online = harness.processor.enqueue(liveKey);
+  await waitUntil(() => harness.agent.inputs.length === 3, 'promoted recovery and its live follow-up');
+  await online;
+  assert.deepEqual(harness.agent.inputs.map((input) => input.mode), ['start', 'start', 'steer']);
+  assert.equal(harness.agent.maxActive, 2);
+  await Promise.all([
+    harness.agent.finish(oldKey, 'promoted response'),
+    harness.agent.finish(busyKey, 'other response'),
+  ]);
+  await recovery;
+  await harness.processor.waitForIdle();
+  assert.equal(harness.store.getInbound(liveKey)?.status, 'absorbed');
+});
+
+test('promoting a waiting recovery preempts another low-priority conversation', async (t) => {
+  const harness = await createHarness(t);
+  const firstKey = harness.ingestWecom('running-low-recovery', 'wm-working-one');
+  const secondKey = harness.ingestWecom('waiting-low-recovery', 'wm-downtime-backlog');
+  harness.store.claimInbound({ messageKey: firstKey });
+  harness.store.claimInbound({ messageKey: secondKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'one active low-priority conversation');
+  const liveKey = harness.ingestWecom('the waiting participant returned', 'wm-downtime-backlog');
+  const online = harness.processor.enqueue(liveKey);
+  await waitUntil(() => harness.agent.inputs.length === 3, 'promoted recovery to interrupt unrelated backlog and steer');
+  await online;
+  assert.deepEqual(harness.agent.interruptedMessageKeys, [firstKey]);
+  assert.deepEqual(harness.agent.inputs.map((input) => input.mode), ['start', 'start', 'steer']);
+  assert.equal(harness.store.getInbound(firstKey)?.deferred, true);
+  assert.equal(harness.store.listMessageAttempts(firstKey).length, 0);
+  await harness.agent.finish(secondKey, 'current response');
+  await recovery;
+  await harness.processor.waitForIdle();
+});
+
+test('a live participant arriving before the recovery slot request is still high priority', async (t) => {
+  const harness = await createHarness(t);
+  const busyKey = harness.ingestWecom('busy-before-recovery', 'wm-working-one');
+  await harness.processor.enqueue(busyKey);
+  const oldKey = harness.ingestWecom('not-yet-waiting', 'wm-downtime-backlog');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf').filter((record) => record.messageKey === oldKey), { priority: 'low' });
+  const liveKey = harness.ingestWecom('immediately returned', 'wm-downtime-backlog');
+  const online = harness.processor.enqueue(liveKey);
+  await waitUntil(() => harness.agent.inputs.some((input) => input.message.messageKey === liveKey), 'live admission without waiting for idle');
+  await online;
+  assert.equal(harness.agent.maxActive, 2);
+  assert.deepEqual(harness.agent.inputs.map((input) => input.mode), ['start', 'start', 'steer']);
+  await Promise.all([
+    harness.agent.finish(oldKey, 'current reply'),
+    harness.agent.finish(busyKey, 'other reply'),
+  ]);
+  await recovery;
+  await harness.processor.waitForIdle();
+  assert.equal(harness.store.getInbound(liveKey)?.status, 'absorbed');
+});
+
+test('promoting a queued recovery respects ten active conversations and sends only one queue notice', async (t) => {
+  const harness = await createHarness(t);
+  const busyKeys = Array.from({ length: 10 }, (_, index) => harness.ingestWecom(
+    `busy-capacity-${index}`, index === 9 ? 'wm-working-one' : `wm-occupied-${index}`,
+  ));
+  await Promise.all(busyKeys.map((key) => harness.processor.enqueue(key)));
+  const oldKey = harness.ingestWecom('capacity-backlog', 'wm-downtime-backlog');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf').filter((record) => record.messageKey === oldKey), { priority: 'low' });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const liveKey = harness.ingestWecom('capacity participant returned', 'wm-downtime-backlog');
+  const online = harness.processor.enqueue(liveKey);
+  const duplicate = harness.processor.enqueue(liveKey);
+  await waitUntil(() => harness.store.listMessageAttempts(liveKey).length === 1, 'one queue notice');
+  assert.equal(harness.agent.starts.length, 10);
+  await harness.agent.finish(busyKeys[0]!, 'free one slot');
+  await Promise.all([online, duplicate]);
+  assert.equal(harness.agent.starts.length, 11);
+  assert.equal(harness.agent.maxActive, 10);
+  assert.equal(harness.store.listMessageAttempts(liveKey).filter((attempt) => attempt.source === 'queue_notice').length, 1);
+  await Promise.all([
+    harness.agent.finish(oldKey, 'promoted reply'),
+    ...busyKeys.slice(1).map((key) => harness.agent.finish(key, 'finish other conversation')),
+  ]);
+  await recovery;
+  await harness.processor.waitForIdle();
+});
+
+for (const phase of ['history inspection', 'thread preparation', 'start RPC'] as const) {
+  test(`same-participant input arriving during recovery ${phase} does not start a second turn`, async (t) => {
+    const harness = await createHarness(t);
+    const oldKey = harness.ingestWecom(`recover-${phase}`, 'wm-downtime-backlog');
+    harness.store.claimInbound({ messageKey: oldKey });
+    const reached = deferred<void>();
+    const proceed = deferred<void>();
+    if (phase === 'history inspection') {
+      harness.store.setConversationThread({
+        channel: 'wechat_kf', accountKey: 'wk-priority-runtime', peerId: 'wm-downtime-backlog', threadId: 'history-thread',
+      });
+      Object.assign(harness.agent, {
+        async inspectHistory() {
+          reached.resolve();
+          await proceed.promise;
+          return { state: 'missing', turnId: '', foundClientInputIds: new Set(), artifacts: [] };
+        },
+      });
+    } else if (phase === 'thread preparation') {
+      const ensure = harness.agent.ensureThread.bind(harness.agent);
+      harness.agent.ensureThread = async (conversationId, threadId) => {
+        reached.resolve();
+        await proceed.promise;
+        return ensure(conversationId, threadId);
+      };
+    } else {
+      const submit = harness.agent.submit.bind(harness.agent);
+      harness.agent.submit = async (input) => {
+        if (input.mode === 'start') {
+          reached.resolve();
+          await proceed.promise;
+        }
+        return submit(input);
+      };
+    }
+    const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf'), { priority: 'low' });
+    await reached.promise;
+    const liveKey = harness.ingestWecom(`new direction during ${phase}`, 'wm-downtime-backlog');
+    const online = harness.processor.enqueue(liveKey);
+    proceed.resolve();
+    await online;
+    assert.deepEqual(harness.agent.inputs.map((input) => input.mode), ['start', 'steer']);
+    assert.deepEqual(harness.agent.interruptedMessageKeys, []);
+    await harness.agent.finish(oldKey, 'current response');
+    await recovery;
+    await harness.processor.waitForIdle();
+    assert.equal(harness.store.getInbound(liveKey)?.status, 'absorbed');
+  });
+}
+
+test('iLink live steering renews a recovered turn capability without replaying the previous window', async (t) => {
+  const sends: string[] = [];
+  const harness = await createHarness(t, ({ content }) => { sends.push(content); });
+  const account = harness.registerIlink('active-recovery-window');
+  const oldKey = harness.ingestIlink(account, 'old request');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('weixin_ilink'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'iLink recovered turn');
+  const oldToken = harness.agent.inputs[0]!.toolSessionToken;
+  const liveKey = harness.ingestIlink(account, 'latest request');
+  await harness.processor.enqueue(liveKey);
+  assert.deepEqual(harness.agent.inputs.map((input) => input.mode), ['start', 'steer']);
+  assert.throws(() => harness.store.getAgentSession(oldToken));
+  assert.notEqual(harness.agent.inputs[1]?.toolSessionToken, oldToken);
+  await harness.agent.finish(oldKey, 'latest iLink reply');
+  await recovery;
+  await harness.processor.waitForIdle();
+  assert.deepEqual(sends, ['latest iLink reply']);
+  assert.equal(harness.store.getInbound(liveKey)?.status, 'absorbed');
+  const window = harness.ilinkStore.getReplyWindowSecretBySource(liveKey)!;
+  assert.equal(harness.ilinkStore.getReplyWindow(window.replyWindowId)?.transmittedSendCount, 1);
+});
+
+test('a newer iLink window retires a queued old recovery and admits only the current message', async (t) => {
+  const harness = await createHarness(t);
+  const busyKey = harness.ingestWecom('busy-before-window', 'wm-working-one');
+  await harness.processor.enqueue(busyKey);
+  const account = harness.registerIlink('waiting-window');
+  const oldKey = harness.ingestIlink(account, 'old request');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('weixin_ilink'), { priority: 'low' });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const liveKey = harness.ingestIlink(account, 'latest request');
+  await harness.processor.enqueue(liveKey);
+  assert.deepEqual(harness.agent.starts.map((input) => input.messageKey), [busyKey, liveKey]);
+  assert.equal(harness.store.getInbound(oldKey)?.status, 'suppressed');
+  await Promise.all([harness.agent.finish(liveKey, 'latest reply'), harness.agent.finish(busyKey, 'other reply')]);
+  await recovery;
+  await harness.processor.waitForIdle();
+});
+
+test('duplicate recovery registration and duplicate live enqueue do not replay an accepted turn', async (t) => {
+  const harness = await createHarness(t);
+  const oldKey = harness.ingestWecom('duplicate-recovery', 'wm-downtime-backlog');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const records = harness.store.listRecoverableInbound('wechat_kf');
+  const first = harness.processor.recover(records, { priority: 'low' });
+  const second = harness.processor.recover(records, { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'one recovered turn');
+  await harness.processor.enqueue(oldKey);
+  const liveKey = harness.ingestWecom('duplicate-live', 'wm-downtime-backlog');
+  await Promise.all([harness.processor.enqueue(liveKey), harness.processor.enqueue(liveKey)]);
+  await harness.agent.finish(oldKey, 'only reply');
+  await Promise.all([first, second]);
+  await harness.processor.waitForIdle();
+  assert.deepEqual(harness.agent.inputs.map((input) => input.mode), ['start', 'steer']);
+  assert.equal(harness.store.listMessageAttempts(oldKey).length, 1);
+});
+
+test('duplicate recovery registration does not resend an uncertain iLink delivery', async (t) => {
+  let sends = 0;
+  const harness = await createHarness(t, () => {
+    sends += 1;
+    throw new Error('Connection closed after transmission');
+  });
+  const account = harness.registerIlink('uncertain-recovery');
+  const oldKey = harness.ingestIlink(account, 'request with uncertain outcome');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const records = harness.store.listRecoverableInbound('weixin_ilink');
+  const first = harness.processor.recover(records, { priority: 'low' });
+  const second = harness.processor.recover(records, { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'one recovered iLink turn');
+  const attemptId = await harness.agent.finish(oldKey, 'one transmission', 'uncertain');
+  await Promise.all([first, second]);
+  await harness.processor.waitForIdle();
+  assert.equal(sends, 1);
+  assert.equal(harness.agent.starts.length, 1);
+  assert.equal(harness.store.getAttempt(attemptId)?.status, 'uncertain');
+  assert.equal(harness.store.getInbound(oldKey)?.status, 'completed');
+});
+
+test('a promoted active recovery shares capacity with other live conversations without being interrupted', async (t) => {
+  const harness = await createHarness(t);
+  const oldKey = harness.ingestWecom('active-promoted', 'wm-downtime-backlog');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'the recovered turn');
+  const liveKey = harness.ingestWecom('participant returned', 'wm-downtime-backlog');
+  await harness.processor.enqueue(liveKey);
+  const otherKey = harness.ingestWecom('other live participant', 'wm-working-one');
+  await harness.processor.enqueue(otherKey);
+  assert.equal(harness.agent.maxActive, 2);
+  assert.deepEqual(harness.agent.interruptedMessageKeys, []);
+  await Promise.all([harness.agent.finish(oldKey, 'latest reply'), harness.agent.finish(otherKey, 'other reply')]);
+  await recovery;
+  await harness.processor.waitForIdle();
+});
+
+test('a live participant arriving during a pending backlog interrupt waits for cancellation, not the old turn', async (t) => {
+  const harness = await createHarness(t);
+  const oldKey = harness.ingestWecom('about-to-interrupt', 'wm-downtime-backlog');
+  harness.store.claimInbound({ messageKey: oldKey });
+  const interruptStarted = deferred<void>();
+  const releaseInterrupt = deferred<void>();
+  const interrupt = harness.agent.interrupt.bind(harness.agent);
+  harness.agent.interrupt = async (conversationId) => {
+    interruptStarted.resolve();
+    await releaseInterrupt.promise;
+    return interrupt(conversationId);
+  };
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'interruptible recovery');
+  const otherKey = harness.ingestWecom('other queued live participant', 'wm-working-one');
+  const other = harness.processor.enqueue(otherKey);
+  await interruptStarted.promise;
+  const liveKey = harness.ingestWecom('returned during interrupt', 'wm-downtime-backlog');
+  const online = harness.processor.enqueue(liveKey);
+  releaseInterrupt.resolve();
+  await Promise.all([online, other, recovery]);
+  assert.ok(harness.agent.inputs.every((input) => input.mode === 'start'));
+  assert.deepEqual(harness.agent.interruptedMessageKeys, [oldKey]);
+  assert.equal(harness.store.listMessageAttempts(oldKey).length, 0);
+  await Promise.all([harness.agent.finish(liveKey, 'fresh current reply'), harness.agent.finish(otherKey, 'other reply')]);
+  await harness.processor.waitForIdle();
+});
+
+test('separate historical messages remain separate turns rather than steering one another', async (t) => {
+  const harness = await createHarness(t);
+  const firstKey = harness.ingestWecom('first historical question', 'wm-downtime-backlog');
+  const secondKey = harness.ingestWecom('second historical question', 'wm-downtime-backlog');
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'first historical turn');
+  assert.equal(harness.agent.inputs[0]?.message.messageKey, firstKey);
+  await harness.agent.finish(firstKey, 'first historical reply');
+  await waitUntil(() => harness.agent.inputs.length === 2, 'second historical turn');
+  await harness.agent.finish(secondKey, 'second historical reply');
+  await recovery;
+  await harness.processor.waitForIdle();
+  assert.deepEqual(harness.agent.inputs.map((input) => input.mode), ['start', 'start']);
+  assert.equal(harness.agent.maxActive, 1);
+  assert.equal(harness.store.listMessageAttempts(firstKey).length, 1);
+  assert.equal(harness.store.listMessageAttempts(secondKey).length, 1);
+});
+
+test('a delivered live direction renews independent recovery units and leaves their admission low priority', async (t) => {
+  const harness = await createHarness(t);
+  const firstKey = harness.ingestWecom('first old question', 'wm-downtime-backlog');
+  harness.store.claimInbound({ messageKey: firstKey });
+  const secondKey = harness.ingestWecom('second old question', 'wm-downtime-backlog');
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'the first recovered unit');
+  const liveKey = harness.ingestWecom('a current direction', 'wm-downtime-backlog');
+  await harness.processor.enqueue(liveKey);
+  const busyKey = harness.ingestWecom('another live conversation', 'wm-working-one');
+  await harness.processor.enqueue(busyKey);
+  const attemptId = await harness.agent.finish(firstKey, 'the current response');
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(harness.agent.inputs.length, 3);
+  assert.equal(harness.store.getInbound(secondKey)?.status, 'received');
+  await harness.agent.finish(busyKey, 'other live response');
+  await waitUntil(() => harness.agent.inputs.length === 4, 'independent historical unit with the renewed reply boundary');
+  await harness.agent.finish(secondKey, 'the independent historical response');
+  await recovery;
+  await harness.processor.waitForIdle();
+  assert.deepEqual(harness.agent.inputs.map((input) => input.mode), ['start', 'steer', 'start', 'start']);
+  assert.equal(harness.store.getAttempt(attemptId)?.status, 'accepted');
+  assert.equal(harness.store.listMessageAttempts(firstKey).length, 1);
+  assert.equal(harness.store.listMessageAttempts(secondKey).length, 1);
+  assert.equal(harness.store.getInbound(secondKey)?.status, 'completed');
+});
+
+test('iLink recovery does not replay an older input already absorbed into live context after an uncertain send', async (t) => {
+  const sends: string[] = [];
+  const harness = await createHarness(t, ({ content }) => {
+    sends.push(content);
+    throw new Error('Connection lost after transmission');
+  });
+  const account = harness.registerIlink('independent-window');
+  const firstKey = harness.ingestIlink(account, 'first old request');
+  harness.store.claimInbound({ messageKey: firstKey });
+  const secondKey = harness.ingestIlink(account, 'second independent request');
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('weixin_ilink'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'first recovered iLink unit');
+  const liveKey = harness.ingestIlink(account, 'current request');
+  await harness.processor.enqueue(liveKey);
+  assert.equal(harness.store.getInbound(secondKey)?.status, 'absorbed');
+  assert.match(harness.agent.inputs[1]!.contextText, /second independent request/u);
+  const attemptId = await harness.agent.finish(firstKey, 'current response', 'uncertain');
+  await recovery;
+  await harness.processor.waitForIdle();
+  assert.deepEqual(sends, ['current response']);
+  assert.equal(harness.store.getAttempt(attemptId)?.status, 'uncertain');
+  assert.equal(harness.agent.starts.length, 1);
+  const window = harness.ilinkStore.getReplyWindowSecretBySource(liveKey)!;
+  assert.equal(harness.ilinkStore.getReplyWindow(window.replyWindowId)?.transmittedSendCount, 1);
 });
 
 test('recovery retires a superseded iLink window without waking the Agent or replaying a completed reply', async (t) => {
