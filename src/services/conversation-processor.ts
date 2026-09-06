@@ -59,6 +59,10 @@ interface ProcessorOptions {
   readonly mediaGateway: MediaGateway;
   readonly channel: SendDrain;
   readonly agentAccess?: (record: ChannelIdentity) => AgentAccess;
+  readonly approvals?: {
+    readonly binding: (record: ChannelIdentity) => string | undefined;
+    readonly notify: (record: InboundRecord, content: string, signal: AbortSignal) => Promise<void>;
+  };
   readonly allowedUserIds?: readonly string[];
   readonly authorization?: {
     readonly trigger?: string;
@@ -77,6 +81,7 @@ type UnboundAgentInput = Omit<
   | 'conversationId'
   | 'threadId'
   | 'toolSessionToken'
+  | 'approvals'
 >;
 
 function errorMessage(error: unknown): string {
@@ -135,7 +140,7 @@ export class ConversationProcessor {
   readonly #store: CoreState;
   readonly #pipeline: Pick<
     ProcessorOptions,
-    'agent' | 'mediaGateway' | 'channel' | 'agentAccess'
+    'agent' | 'mediaGateway' | 'channel' | 'agentAccess' | 'approvals'
   >;
   #allowedUsers: ReadonlySet<string>;
   #authorization: {
@@ -210,6 +215,31 @@ export class ConversationProcessor {
 
   #agentAccess(record: ChannelIdentity): AgentAccess {
     return this.#pipeline.agentAccess?.(record) === 'host' ? 'host' : 'restricted';
+  }
+
+  #approvalBinding(record: ChannelIdentity): string | undefined {
+    return record.channel === 'weixin_ilink' && this.#agentAccess(record) === 'host'
+      ? this.#pipeline.approvals?.binding(record) : undefined;
+  }
+
+  #approvals(record: InboundRecord, boundaryMessageKey: string): AgentInput['approvals'] {
+    const binding = this.#approvalBinding(record);
+    const boundary = this.#store.getInbound(boundaryMessageKey);
+    if (!binding || !boundary || !this.#pipeline.approvals) return undefined;
+    const isAllowed = () => {
+      try {
+        return this.#accepting && !this.#pausedChannels.has(record.channel) &&
+          this.#approvalBinding(record) === binding &&
+          ['processing', 'preparing'].includes(this.#store.getInbound(record.messageKey)?.status || '');
+      } catch { return false; }
+    };
+    return {
+      isAllowed,
+      notify: async (content, signal) => {
+        if (signal.aborted || !isAllowed()) throw new Error('Approval conversation is no longer active');
+        await this.#pipeline.approvals!.notify(boundary, content, signal);
+      },
+    };
   }
 
   #authorized(record: ChannelIdentity): boolean {
@@ -291,7 +321,8 @@ export class ConversationProcessor {
     const [, active] = entry;
     const opaqueId = conversationId(active.record);
     const primary = this.#pipeline.agent.activePrimary(opaqueId);
-    if (!primary || this.#preempting.has(primary) || this.#store.listMessageAttempts(primary).length) return;
+    if (!primary || this.#preempting.has(primary) || this.#store.listMessageAttempts(primary)
+      .some((attempt) => attempt.source !== 'agent_approval')) return;
     this.#preempting.add(primary);
     try {
       if (!await this.#pipeline.agent.interrupt(opaqueId)) {
@@ -530,6 +561,7 @@ export class ConversationProcessor {
       readonly recoveredArtifacts?: readonly AgentImageArtifact[];
       readonly started?: (submission: Extract<AgentSubmission, { kind: 'started' }>) => void;
       readonly priority?: WorkPriority;
+      readonly approvalReply?: { readonly code: string; readonly option: number };
     } = {},
   ): Promise<PendingTurn | undefined> {
     const boundaryMessageKey = options.boundaryMessageKey || record.messageKey;
@@ -537,6 +569,10 @@ export class ConversationProcessor {
     const opaqueConversationId = conversationId(record);
     const agentAccess = this.#agentAccess(record);
     const activePrimary = this.#pipeline.agent.activePrimary(opaqueConversationId);
+    if (options.approvalReply && !activePrimary) {
+      this.#store.markInboundIgnored(record.messageKey);
+      return;
+    }
     if (activePrimary) {
       this.#store.beginInboundSteering({
         messageKey: record.messageKey,
@@ -568,6 +604,7 @@ export class ConversationProcessor {
           )?.threadId || '',
           ...(memoryThreadId ? { archivedThreadId: memoryThreadId } : {}),
           toolSessionToken: session.token,
+          approvals: this.#approvals(primary, record.messageKey),
           publishArtifact: async (artifact) => this.#store.registerAgentArtifact({
             sessionToken: session.token,
             bytes: artifact.bytes,
@@ -584,8 +621,22 @@ export class ConversationProcessor {
         });
         const turn = this.#activeConversations.get(this.#conversationKey(record))?.turn;
         if (turn) turn.boundaryMessageKey = record.messageKey;
+        if (options.approvalReply) {
+          try {
+            this.#store.getAgentSession(session.token);
+            if (!this.#pipeline.agent.respondApproval?.(opaqueConversationId, options.approvalReply.code, options.approvalReply.option, () => {
+              try { this.#store.getAgentSession(session.token); return true; }
+              catch { return false; }
+            })) {
+              this.#pipeline.agent.cancelApprovals?.(opaqueConversationId);
+            }
+          } catch {
+            this.#pipeline.agent.cancelApprovals?.(opaqueConversationId);
+          }
+        }
         return;
       } catch (error) {
+        if (options.approvalReply) this.#pipeline.agent.cancelApprovals?.(opaqueConversationId);
         this.#store.closeAgentSession(session.token);
         this.#store.requeueInboundSteering(record.messageKey, activePrimary);
         throw error;
@@ -656,6 +707,7 @@ export class ConversationProcessor {
         threadId: ensuredThreadId,
         ...(memoryThreadId ? { archivedThreadId: memoryThreadId } : {}),
         toolSessionToken: session.token,
+        approvals: this.#approvals(record, boundaryMessageKey),
         publishArtifact: async (artifact) => this.#store.registerAgentArtifact({
           sessionToken: session.token,
           bytes: artifact.bytes,
@@ -729,6 +781,24 @@ export class ConversationProcessor {
       return;
     }
     if (!this.#admit(record, boundaryMessageKey)) return;
+
+    if (message.type === COMMON_MESSAGE_TYPES.TEXT && /^\/kintio approval(?:\s|$)/u.test(message.text)) {
+      const reply = /^\/kintio approval ([A-F0-9]{12}) ([1-3])$/u.exec(message.text.trim());
+      const key = conversationId(record);
+      if (!reply || !this.#approvalBinding(record) || !this.#pipeline.agent.hasApproval?.(key, reply[1]!, Number(reply[2]))) {
+        this.#store.markInboundIgnored(record.messageKey);
+        if (this.#approvalBinding(record)) {
+          await this.#pipeline.approvals?.notify(record, 'This approval code or option is invalid, expired, or already used. No action was approved.', new AbortController().signal);
+        }
+        return;
+      }
+      await this.#submit(record, {
+        message: agentMessage(message),
+        contextText: 'The participant explicitly answered a pending host approval. Use the refreshed channel session below; the host returns the approval decision separately. This control reply is not a new task.',
+      }, { priority, approvalReply: { code: reply[1]!, option: Number(reply[2]) } });
+      return;
+    }
+    this.#pipeline.agent.cancelApprovals?.(conversationId(record));
 
     await this.#acquire(record, priority);
     if (!this.#admit(record, boundaryMessageKey)) return;
@@ -1127,6 +1197,7 @@ export class ConversationProcessor {
     if (enabled) this.#pausedChannels.delete(channel);
     else {
       this.#pausedChannels.add(channel);
+      this.#pipeline.agent.invalidateApprovals?.();
       for (const waiters of [this.#highWaiters, this.#lowWaiters]) {
         for (let index = waiters.length - 1; index >= 0; index -= 1) {
           if (waiters[index]?.record.channel === channel) waiters.splice(index, 1)[0]!.resolve();
@@ -1151,6 +1222,7 @@ export class ConversationProcessor {
 
   stopAccepting(): void {
     this.#accepting = false;
+    this.#pipeline.agent.invalidateApprovals?.();
   }
 
   async close(): Promise<void> {

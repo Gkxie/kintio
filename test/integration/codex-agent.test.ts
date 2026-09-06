@@ -12,6 +12,8 @@ import {
 import type { AgentInput, AgentMessage } from '../../src/agent/runtime.ts';
 import type {
   CodexBoundary,
+  CodexApprovalRequest,
+  CodexApprovalResult,
   CodexInput,
   CodexRun,
   CodexThread,
@@ -92,6 +94,7 @@ function agentInput(
 }
 
 class FakeBoundary implements CodexBoundary {
+  approvalHandler?: (request: CodexApprovalRequest) => Promise<CodexApprovalResult>;
   readonly startOptions: CodexThreadOptions[] = [];
   readonly runCalls: { input: CodexInput; options?: { clientUserMessageId?: string } }[] = [];
   readonly steerCalls: CodexInput[] = [];
@@ -135,6 +138,10 @@ class FakeBoundary implements CodexBoundary {
 
   async close(): Promise<void> {
     this.closed = true;
+  }
+
+  setApprovalHandler(handler: (request: CodexApprovalRequest) => Promise<CodexApprovalResult>): void {
+    this.approvalHandler = handler;
   }
 }
 
@@ -220,6 +227,40 @@ test('host-authorized iLink uses a separate unrestricted Codex boundary', async 
   assert.match(instructions, /host owner.*full Agent authorization/su);
   assert.doesNotMatch(instructions, /Never read|Never access localhost|Never use shell/u);
   assert.match(String(trusted.runCalls[0]?.input), /weixin_ilink tools/u);
+});
+
+test('host approval is explicit, scoped to its active conversation, and consumed once', async (t) => {
+  const boundary = new FakeBoundary([]);
+  const completed = deferred<CodexTurnResult>();
+  boundary.thread.startRun = async () => ({ turnId: 'approval-turn', completion: completed.promise });
+  t.onTestFinished(() => completed.resolve({ items: [executedIlinkText('done', 'sa_done', 1)] }));
+  const agent = createAgent(t, boundary);
+  let prompt = '';
+  const submission = await agent.submit(agentInput('approval-primary', {
+    channel: 'weixin_ilink', agentAccess: 'host', approvals: {
+      isAllowed: () => true,
+      async notify(content) { prompt = content; },
+    },
+  }));
+  assert.ok(boundary.approvalHandler);
+  const pending = boundary.approvalHandler({
+    id: 'request-one', kind: 'command', threadId: 'thread-test', turnId: 'approval-turn',
+    params: { command: 'git status', cwd: '/workspace' }, signal: new AbortController().signal,
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const code = /\/kintio approval ([A-Z0-9]+) 1/u.exec(prompt)?.[1];
+  assert.ok(code);
+  assert.equal(agent.hasApproval('different-conversation', code), false);
+  assert.equal(agent.hasApproval('cv-test', code), true);
+  assert.equal(agent.respondApproval('different-conversation', code, 1, () => true), false);
+  assert.equal(agent.respondApproval('cv-test', code, 99, () => true), false);
+  assert.equal(agent.respondApproval('cv-test', code, 1, () => true), true);
+  const accepted = await pending;
+  assert.equal(typeof accepted === 'object' && accepted.decision, 'accept');
+  assert.equal(typeof accepted === 'object' && accepted.isAllowed(), true);
+  assert.equal(agent.respondApproval('cv-test', code, 1, () => true), false);
+  completed.resolve({ items: [executedIlinkText('done', 'sa_done', 1)] });
+  if (submission.kind === 'started') await submission.completion;
 });
 
 test('one Agent adapter preserves channel workspaces and restricted versus host access when ensuring threads', async (t) => {

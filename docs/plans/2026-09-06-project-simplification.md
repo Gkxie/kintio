@@ -63,6 +63,14 @@ links to the evidence so work can resume without repeating the review.
    introduces a user-visible control exchange. Use explicit request correlation,
    not conversational keyword guessing. Verify supported requests against the
    official Codex App Server protocol before implementation.
+   The first approval bridge supports explicit, one-use command/file decisions
+   in trusted iLink conversations. Other approval/elicitation methods remain
+   explicitly unsupported. Protocol fixtures use schemas generated offline from
+   Codex CLI 0.153.4; synthetic App Server tests verify correlation, cancellation,
+   and the refresh-then-steer-ACK ordering. This does **not** establish that a
+   real installed Codex can steer while waiting for approval: that upstream
+   interoperability still needs a separately authorized real-model run. No live
+   model or channel-provider test is included in the synthetic evidence.
 4. **CLI ownership and simplification (C1, C2):** reuse the shared local operator
    owner for concurrent logins. First fix the ownership/lock lifetime; then move
    cohesive update/lifecycle code out of command parsing and delete dead modes.
@@ -99,7 +107,7 @@ separate approval; delete test threads when such a run is authorized.
 | A1 | PR checks | [#105](https://github.com/Gkxie/kintio/pull/105); fatal transport, early notifications, startup/running failure, normal shutdown tested. Full suite: 674 tests / 92 files passed; independent review completed. |
 | A2 | In progress | #101 merged; active and waiting recovery promotion tests in an isolated branch. |
 | A3 | Merged | [#103](https://github.com/Gkxie/kintio/pull/103); 667 tests passed locally; independent review and all hosted checks passed. |
-| A4 | Pending | Protocol verified; explicit, scoped approval interaction still to implement. |
+| A4 | In review | One-use command/file approval bridge implemented; scoped protocol, SQLite, iLink quota, and runtime-stop regressions. Real pending-approval/steering interoperability remains unverified; see the boundary above. |
 | C1 | In progress | Shared operator ownership and per-connection terminal offers; foreground and cancellation regressions. |
 | C2 | Pending | Remove dead modes and relocate cohesive update/lifecycle logic after C1. |
 | R1 / D1 | Merged | [#104](https://github.com/Gkxie/kintio/pull/104); 672 tests passed locally; independent authorization review and all hosted checks passed. |

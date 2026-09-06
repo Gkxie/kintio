@@ -261,6 +261,124 @@ test('ordinary RPC errors and intentional close do not request a worker restart'
   assert.equal(fake.requests.filter((request) => request.method === 'initialize').length, 1);
 });
 
+test('command approval waits for an explicit handler decision without blocking protocol responses', async (t) => {
+  const fake = fakeSpawn(standardHandler);
+  const server = new CodexAppServer({ spawnProcess: fake.spawn });
+  t.onTestFinished(() => server.close());
+  let allow!: () => void;
+  const decision = new Promise<void>((resolve) => { allow = resolve; });
+  server.setApprovalHandler(async (request) => {
+    assert.equal(request.id, 'approval-one');
+    assert.equal(request.threadId, 'thread-one');
+    assert.equal(request.turnId, 'turn-one');
+    assert.equal(request.item?.command, 'git status');
+    await decision;
+    return { decision: 'accept', isAllowed: () => true };
+  });
+  await server.initialize();
+  fake.child().send({ method: 'item/started', params: {
+    threadId: 'thread-one', turnId: 'turn-one',
+    item: { id: 'command-one', type: 'commandExecution', command: 'git status', cwd: '/workspace' },
+  } });
+  fake.child().send({ id: 'approval-one', method: 'item/commandExecution/requestApproval', params: {
+    threadId: 'thread-one', turnId: 'turn-one', itemId: 'command-one', command: 'git status', cwd: '/workspace',
+  } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fake.requests.some((request) => request.id === 'approval-one'), false);
+  await server.request('thread/read', { threadId: 'thread-one' });
+  allow();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(fake.requests.find((request) => request.id === 'approval-one'), {
+    id: 'approval-one', result: { decision: 'accept' },
+  });
+});
+
+test('request ID zero can be reused after resolution without its old asynchronous handler answering the new request', async (t) => {
+  const fake = fakeSpawn(standardHandler);
+  const server = new CodexAppServer({ spawnProcess: fake.spawn });
+  t.onTestFinished(() => server.close());
+  const release: (() => void)[] = [];
+  server.setApprovalHandler(async () => {
+    await new Promise<void>((resolve) => release.push(resolve));
+    return { decision: 'accept', isAllowed: () => true };
+  });
+  await server.initialize();
+  const request = { id: 0, method: 'item/commandExecution/requestApproval', params: {
+    threadId: 'thread-one', turnId: 'turn-one', itemId: 'command-one',
+  } };
+  fake.child().send(request);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  fake.child().send({ method: 'serverRequest/resolved', params: { threadId: 'thread-one', requestId: 0 } });
+  fake.child().send(request);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  release[0]!();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fake.requests.some((message) => message.id === 0), false);
+  release[1]!();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(fake.requests.filter((message) => message.id === 0), [{ id: 0, result: { decision: 'accept' } }]);
+});
+
+test('the last synchronous guard can revoke a decision before it reaches the wire', async (t) => {
+  const fake = fakeSpawn(standardHandler);
+  const server = new CodexAppServer({ spawnProcess: fake.spawn });
+  t.onTestFinished(() => server.close());
+  let allowed = true;
+  server.setApprovalHandler(async () => {
+    queueMicrotask(() => { allowed = false; });
+    return { decision: 'accept', isAllowed: () => allowed };
+  });
+  await server.initialize();
+  fake.child().send({ id: 0, method: 'item/commandExecution/requestApproval', params: {
+    threadId: 'thread-one', turnId: 'turn-one', itemId: 'command-one',
+  } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(fake.requests.find((message) => message.id === 0), { id: 0, result: { decision: 'cancel' } });
+});
+
+for (const method of ['item/tool/requestUserInput', 'item/permissions/requestApproval', 'mcpServer/elicitation/request']) {
+  test(`${method} stays explicitly unsupported rather than being treated as command approval`, async (t) => {
+    const fake = fakeSpawn(standardHandler);
+    const server = new CodexAppServer({ spawnProcess: fake.spawn });
+    t.onTestFinished(() => server.close());
+    server.setApprovalHandler(async () => { throw new Error('Unsupported request reached approval handling'); });
+    await server.initialize();
+    fake.child().send({ id: 0, method, params: { threadId: 'thread-one', turnId: 'turn-one' } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal((fake.requests.find((message) => message.id === 0)?.error as Record<string, unknown>)?.code, -32601);
+  });
+}
+
+for (const event of ['resolved', 'completed', 'closed'] as const) {
+  test(`a pending approval cannot grant after its request is ${event}`, async (t) => {
+    const fake = fakeSpawn(standardHandler);
+    const server = new CodexAppServer({ spawnProcess: fake.spawn });
+    t.onTestFinished(() => server.close());
+    let captured: AbortSignal | undefined;
+    let allow!: () => void;
+    const decision = new Promise<void>((resolve) => { allow = resolve; });
+    server.setApprovalHandler(async (request) => {
+      captured = request.signal;
+      await decision;
+      return { decision: 'accept', isAllowed: () => true };
+    });
+    await server.initialize();
+    fake.child().send({ id: 81, method: 'item/fileChange/requestApproval', params: {
+      threadId: 'thread-one', turnId: 'turn-one', itemId: 'file-one',
+    } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(captured?.aborted, false);
+    if (event === 'closed') await server.close();
+    else fake.child().send(event === 'resolved'
+      ? { method: 'serverRequest/resolved', params: { threadId: 'thread-one', requestId: 81 } }
+      : { method: 'turn/completed', params: { threadId: 'thread-one', turn: { id: 'turn-one', status: 'completed' } } });
+    allow();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(captured?.aborted, true);
+    assert.equal(fake.requests.some((request) => request.id === 81), false);
+  });
+}
+
 test('resume and read use persisted IDs and include full turn history', async () => {
   const fake = fakeSpawn(standardHandler);
   const server = new CodexAppServer({ spawnProcess: fake.spawn });

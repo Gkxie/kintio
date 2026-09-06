@@ -1172,3 +1172,29 @@ test('low-priority downtime backlog waits for zero working conversations and yie
     ],
   );
 });
+
+test('a durable approval notice does not prevent backlog preemption or restore its spent quota', async (t) => {
+  const harness = await createHarness(t);
+  const account = harness.registerIlink('approval-backlog');
+  const backlogKey = harness.ingestIlink(account, 'background action');
+  harness.store.claimInbound({ messageKey: backlogKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('weixin_ilink'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'background action to start');
+  const notice = harness.ilinkStore.reserveStartedSystemAttempt({
+    messageKey: backlogKey, sentType: 'text', source: 'agent_approval',
+    payload: { content: 'Synthetic approval prompt' },
+  });
+  harness.store.completeSend(notice.attemptId, { providerMessageId: 'approval-notice' });
+  const window = harness.ilinkStore.getReplyWindowSecretBySource(backlogKey)!;
+  const liveKey = harness.ingestWecom('live conversation', 'wm-working-one');
+  const live = harness.processor.enqueue(liveKey);
+  await waitUntil(() => harness.agent.inputs.length === 2, 'live input to preempt the waiting approval');
+  await live;
+  assert.deepEqual(harness.agent.interruptedMessageKeys, [backlogKey]);
+  assert.equal(harness.store.getInbound(backlogKey)?.deferred, true);
+  assert.equal(harness.store.getAttempt(notice.attemptId)?.status, 'accepted');
+  assert.equal(harness.ilinkStore.getReplyWindow(window.replyWindowId)?.transmittedSendCount, 1);
+  await harness.agent.finish(liveKey, 'current response');
+  await recovery;
+  await harness.processor.waitForIdle();
+});

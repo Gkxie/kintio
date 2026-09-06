@@ -32,6 +32,10 @@ export interface AgentImageArtifact extends AgentArtifact {
 }
 
 export interface AgentInput {
+  readonly approvals?: {
+    readonly isAllowed: () => boolean;
+    readonly notify: (content: string, signal: AbortSignal) => Promise<void>;
+  } | undefined;
   readonly agentAccess?: AgentAccess;
   readonly channel: ChatChannel;
   readonly mode: 'start' | 'steer';
@@ -82,6 +86,10 @@ export interface HistoryInspection {
 }
 
 export interface AgentRuntime {
+  hasApproval?(conversationId: string, code: string, option?: number): boolean;
+  respondApproval?(conversationId: string, code: string, option: number, isCurrent: () => boolean): boolean;
+  cancelApprovals?(conversationId: string): void;
+  invalidateApprovals?(): void;
   ensureThread(
     conversationId: string,
     threadId: string,
