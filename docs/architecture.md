@@ -32,21 +32,24 @@ kintio ilink commands ───┘                                 ├── WeC
                                                           └── Agent CLI + stdio MCP children
 ```
 
-The first background start launches the daemon and worker. Starting another
-channel attaches to that worker instead of creating another database owner.
-iLink login can still run temporarily without any background worker or WeCom
-configuration. Operator tools are available only over private local IPC;
+The first background start or iLink login launches the daemon and worker.
+Other terminals and channels attach to that worker instead of creating another
+database owner. Login needs no WeCom configuration. Each terminal's operator
+connection owns its QR offer; waiting for a scan does not hold the lifecycle
+lock. Operator tools are available only over private local IPC;
 conversation Agents receive scoped delivery tools, never lifecycle controls.
 The shared CLI operator client is in
 [src/runtime/operator-client.ts](../src/runtime/operator-client.ts); QR rendering
-and temporary standalone login remain in `src/ilink/cli-login.ts`. Neither
+and login interaction remain in `src/ilink/cli-login.ts`. Neither
 channel owns the other channel's control transport.
 
 WeCom start loads its own configuration, installs its Skill, and binds its HTTP
 listener. iLink alone does not load that configuration or bind a TCP port.
 Repeated WeCom start is idempotent. Stopping or restarting a listener does not
 restart the shared worker or another channel's listeners. When the last channel
-is stopped, the worker drains and asks its daemon to exit.
+is stopped and no operator connection is in use, the worker drains and asks its
+daemon to exit. A login connection stays open until its terminal has observed the
+result, so confirming a QR cannot shut down its status response prematurely.
 
 SQLite retains the WeCom enabled flag and each iLink account's enabled flag.
 A whole-worker restart restores only those choices. Startup recovery closes

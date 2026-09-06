@@ -6,7 +6,48 @@ import { test } from 'vitest';
 
 import { createIlinkLoginMcpServer } from '../../src/mcp/ilink-login-server.ts';
 
-test('local login MCP supports cancellation and sanitizes provider failures', async (t) => {
+test('operator connections own separate offers and disconnect cancels only their own pending QR', async (t) => {
+  const owned = new Map<string, string>();
+  const cancelled: string[] = [];
+  const sessions = new Set<string>();
+  const clients: Client[] = [];
+  for (const name of ['a', 'b']) {
+    const server = createIlinkLoginMcpServer({
+      connected(sessionId) { sessions.add(sessionId); },
+      disconnected(sessionId) { sessions.delete(sessionId); },
+      async begin(sessionId) {
+        const offerId = `qo_${name.repeat(20)}`;
+        owned.set(offerId, sessionId);
+        return { offerId, qrContent: `weixin://${name}`, expiresAt: Date.now() + 300_000 };
+      },
+      status() { return { status: 'waiting' }; },
+      cancel(offerId) { cancelled.push(offerId); return true; },
+      listAccounts() { return []; },
+      async setAccountRuntime() { throw new Error('not used'); },
+      async deleteAccount() { throw new Error('not used'); },
+    });
+    const client = new Client({ name: `terminal-${name}`, version: '1' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    t.onTestFinished(async () => { await client.close(); await server.close(); });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    await client.callTool({ name: 'begin_login', arguments: {} });
+    clients.push(client);
+  }
+  const [first, second] = [...owned.keys()];
+  assert.equal(new Set(owned.values()).size, 2);
+  assert.deepEqual((await clients[0]!.callTool({ name: 'login_status', arguments: { offerId: second } })).structuredContent, { status: 'unknown' });
+  assert.deepEqual((await clients[0]!.callTool({ name: 'cancel_login', arguments: { offerId: second } })).structuredContent, { cancelled: false });
+  assert.deepEqual(cancelled, []);
+  await clients[0]!.close();
+  assert.deepEqual(cancelled, [first]);
+  assert.equal(sessions.size, 1);
+  assert.deepEqual((await clients[1]!.callTool({ name: 'login_status', arguments: { offerId: second } })).structuredContent, { status: 'waiting' });
+  await clients[1]!.close();
+  assert.deepEqual(cancelled, [first, second]);
+  assert.equal(sessions.size, 0);
+});
+
+test('local login MCP rejects unowned cancellation and sanitizes provider failures', async (t) => {
   const server = createIlinkLoginMcpServer({
     begin() {
       throw new Error('iLink account limit reached with secret provider detail');
@@ -28,7 +69,7 @@ test('local login MCP supports cancellation and sanitizes provider failures', as
     name: 'cancel_login',
     arguments: { offerId: `qo_${'c'.repeat(20)}` },
   });
-  assert.deepEqual(cancelled.structuredContent, { cancelled: true });
+  assert.deepEqual(cancelled.structuredContent, { cancelled: false });
 
   const failed = await client.callTool({ name: 'begin_login', arguments: {} });
   assert.equal(failed.isError, true);
@@ -146,7 +187,7 @@ test('private operator MCP sanitizes every account lifecycle failure', async (t)
     expectedIncarnation: `ii_${'f'.repeat(64)}`,
   };
   const server = createIlinkLoginMcpServer({
-    async begin() { throw new Error('not used'); },
+    async begin() { return { offerId: `qo_${'s'.repeat(20)}`, qrContent: 'weixin://owned', expiresAt: Date.now() + 300_000 }; },
     status() { throw new Error('secret status detail'); },
     cancel() { throw new Error('secret cancel detail'); },
     listAccounts() { throw new Error('secret list detail'); },
@@ -159,12 +200,13 @@ test('private operator MCP sanitizes every account lifecycle failure', async (t)
     await Promise.allSettled([client.close(), server.close()]);
   });
   await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  await client.callTool({ name: 'begin_login', arguments: {} });
   const results = await Promise.all([
     client.callTool({
       name: 'login_status', arguments: { offerId: `qo_${'s'.repeat(20)}` },
     }),
     client.callTool({
-      name: 'cancel_login', arguments: { offerId: `qo_${'c'.repeat(20)}` },
+      name: 'cancel_login', arguments: { offerId: `qo_${'s'.repeat(20)}` },
     }),
     client.callTool({ name: 'list_accounts', arguments: {} }),
     client.callTool({

@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Allow simultaneous iLink CLI logins through the shared runtime. Each terminal
+  has its own expiring QR offer, channel controls remain available while waiting,
+  and unused login runtimes exit without enabling new account listeners
+  ([#102](https://github.com/Gkxie/kintio/issues/102)).
+
 - Restart the supervised worker after a fatal Agent process or protocol failure
   instead of leaving chat listeners attached to a permanently closed executor.
 

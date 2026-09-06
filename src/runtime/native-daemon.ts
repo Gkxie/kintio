@@ -154,7 +154,7 @@ export async function runNativeDaemon({
       : {}),
   });
 
-  function requestWorkerStopIfIdle(): Promise<boolean> {
+  function requestWorkerStopIfIdle(command: 'stop-if-idle' | 'stop-if-unused'): Promise<boolean> {
     if (workerIdleProbe) {
       return Promise.reject(new Error('another Worker stop-if-idle check is active'));
     }
@@ -167,7 +167,7 @@ export async function runNativeDaemon({
     }
     const requestId = `idle_${randomBytes(18).toString('base64url')}`;
     const request: WorkerStopIfIdleRequest = {
-      type: 'stop-if-idle',
+      type: command,
       requestId,
     };
     const operation = new Promise<boolean>((resolve, reject) => {
@@ -187,7 +187,7 @@ export async function runNativeDaemon({
       const onMessage = (message: unknown): void => {
         if (
           !message || typeof message !== 'object' || !('type' in message) ||
-          message.type !== 'stop-if-idle-result' ||
+          message.type !== `${command}-result` ||
           !('requestId' in message) || message.requestId !== requestId
         ) return;
         try {
@@ -414,7 +414,7 @@ export async function runNativeDaemon({
           send(response(true), () => { void shutdown(); });
           return;
         }
-        if (request.command === 'stop-if-idle') {
+        if (request.command === 'stop-if-idle' || request.command === 'stop-if-unused') {
           if (
             request.updateIdentity &&
             !sameUpdateRuntimeIdentity(request.updateIdentity, updateIdentity)
@@ -424,7 +424,7 @@ export async function runNativeDaemon({
             );
             return;
           }
-          if ((phase === 'failed' || phase === 'backoff') && !worker) {
+          if (request.command === 'stop-if-idle' && (phase === 'failed' || phase === 'backoff') && !worker) {
             phase = 'stopping';
             send(response(true, undefined, true), () => { void shutdown(); });
             return;
@@ -433,7 +433,7 @@ export async function runNativeDaemon({
             reject('Kintio Worker is not running; idle state cannot be proven');
             return;
           }
-          void requestWorkerStopIfIdle().then((idle) => {
+          void requestWorkerStopIfIdle(request.command).then((idle) => {
             if (responded) return;
             if (idle) phase = 'stopping';
             send(

@@ -12,7 +12,6 @@ import {
 const ILINK_LOGIN_TTL_MS = 5 * 60 * 1_000;
 const MAX_TTL_MS = 10 * 60 * 1_000;
 const TERMINAL_ACCOUNT_ID = 'local';
-const TERMINAL_PEER_ID = 'operator';
 
 type ActiveStatus = 'waiting' | 'scanned';
 export type IlinkLoginResult =
@@ -25,7 +24,7 @@ export type IlinkLoginResult =
 export type IlinkLoginStatus = ActiveStatus | IlinkLoginResult | 'unknown';
 export type IlinkLoginSource =
   | { readonly kind: 'wechat_kf'; readonly sessionToken: string }
-  | { readonly kind: 'terminal' };
+  | { readonly kind: 'terminal'; readonly sessionId: string };
 type IlinkLoginInitiator = 'local_operator' | 'remote_adapter';
 
 interface ResolvedSource {
@@ -171,12 +170,15 @@ export class IlinkLoginStore {
 
   #source(source: IlinkLoginSource): ResolvedSource {
     if (source.kind === 'terminal') {
+      if (!/^[A-Za-z0-9_-]{1,128}$/u.test(source.sessionId)) {
+        throw new Error('Invalid terminal login session');
+      }
       return {
         initiatorKind: 'local_operator',
         channel: source.kind,
         messageKey: '',
         accountId: TERMINAL_ACCOUNT_ID,
-        peerId: TERMINAL_PEER_ID,
+        peerId: source.sessionId,
       };
     }
     const session = this.#store.getAgentSession(source.sessionToken);

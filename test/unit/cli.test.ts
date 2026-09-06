@@ -48,6 +48,16 @@ function cliRuntime(root: string, extra: Partial<CliOverrides> = {}) {
       packageRoot: path.resolve('.'),
       stdout: (text: string) => stdout.push(text),
       ilinkRestart: async () => {},
+      ilinkConnect: async () => ({
+        mode: 'runtime',
+        async begin() { throw new Error('unexpected QR request'); },
+        async status() { return { status: 'unknown' }; },
+        async cancel() { return false; },
+        async listAccounts() { return []; },
+        async setAccountRuntime() { throw new Error('unexpected account mutation'); },
+        async deleteAccount() { throw new Error('unexpected account deletion'); },
+        async close() {},
+      }),
       wecomControl: async (config, _root, action) => {
         if (action !== 'status') wecomRunning = action !== 'stop';
         if (action === 'stop' && 'home' in config && typeof config.home === 'string' && readDaemonRecord(config.home)) {
@@ -500,8 +510,9 @@ test('iLink login and start need no setup, config file, or Hono lifecycle', asyn
       };
     },
     ilinkSnapshot: async () => ({ accounts: [account], mode: 'standalone' }),
-    ilinkStart: async ({ config }) => {
+    ilinkStart: async ({ config, onStarted }) => {
       startCalls += 1;
+      await onStarted?.({ stopIfIdleForUpdate: () => true, stopIfUnused: () => true });
       assert.equal('wecom' in config, false);
       assert.ok(config.ilink);
       assert.equal(config.state.databaseFile, path.join(home, 'data/kintio.sqlite'));
@@ -594,8 +605,9 @@ test('CLI routes iLink account lifecycle selectors and destructive confirmation'
           : {}),
       };
     },
-    ilinkStart: async () => {
+    ilinkStart: async ({ onStarted }) => {
       foregroundStarts += 1;
+      await onStarted?.({ stopIfIdleForUpdate: () => true, stopIfUnused: () => true });
       return 0;
     },
   });
@@ -808,8 +820,8 @@ test('standalone iLink start launches one managed background daemon before activ
       "process.send?.({ type: 'ready', pid: process.pid });",
       "process.on('message', (message) => {",
       "  if (message === 'shutdown') process.exit(0);",
-      "  if (message?.type === 'stop-if-idle') process.send?.({",
-      "    type: 'stop-if-idle-result', requestId: message.requestId,",
+      "  if (message?.type === 'stop-if-idle' || message?.type === 'stop-if-unused') process.send?.({",
+      "    type: message.type + '-result', requestId: message.requestId,",
       "    pid: process.pid, ok: true, idle: true,",
       "  });",
       "});",
@@ -1816,10 +1828,6 @@ test('a lifecycle lock rejects concurrent background mutation', async (t) => {
   });
   assert.equal(await runCli(['wecom', 'start', '--home', home], runtime.overrides), 1);
   assert.equal(await runCli(['wecom', 'run', '--home', home], runtime.overrides), 1);
-  assert.equal(await runCli(['ilink', 'login', '--home', home], runtime.overrides), 1);
-  assert.equal(await runCli([
-    'ilink', 'start', '--foreground', '--home', home,
-  ], runtime.overrides), 1);
   assert.equal(await runCli(['ilink', 'stop', '--home', home], runtime.overrides), 1);
   assert.equal(launched, false);
   assert.equal(foregroundExecuted, false);

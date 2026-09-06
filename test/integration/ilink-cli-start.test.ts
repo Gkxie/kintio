@@ -12,14 +12,36 @@ import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import { readDaemonRecord } from '../../src/runtime/daemon-protocol.ts';
 import { StatePersistence } from '../../src/state/persistence.ts';
+import { createIlinkCliRuntime, fakeIlinkFetch } from '../support/ilink-cli-runtime.ts';
 
 async function eventually(condition: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 500; attempt += 1) {
     if (condition()) return;
-    await new Promise<void>((resolve) => setTimeout(resolve, 2));
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
   assert.fail('Timed out waiting for iLink CLI runtime');
 }
+
+test('first foreground start owns the runtime through QR login and account activation without a daemon', async (t) => {
+  const fixture = await createIlinkCliRuntime(t);
+  vi.stubGlobal('fetch', fakeIlinkFetch(fixture.directory));
+  const running = runCli(['ilink', 'start', '--foreground', '--home', fixture.home], fixture.overrides);
+  t.onTestFinished(async () => {
+    await runCli(['ilink', 'stop', '--home', fixture.home], fixture.overrides);
+    await running;
+  });
+  await fixture.eventually(() => fixture.stdout.join('').includes('Waiting for scan'));
+  assert.equal(fixture.launches(), 0);
+  assert.equal(fs.existsSync(path.join(fixture.home, 'data/lifecycle.lock')), false);
+  fixture.setReplies({ default: {
+    status: 'confirmed', bot_token: 'synthetic-foreground',
+    ilink_bot_id: 'foreground@im.bot', ilink_user_id: 'foreground@im.wechat',
+  } });
+  await fixture.eventually(() => fixture.stdout.join('').includes('Started '));
+  assert.equal(fixture.launches(), 0);
+  assert.equal(await runCli(['ilink', 'stop', '--home', fixture.home], fixture.overrides), 0, fixture.stderr.join(''));
+  assert.equal(await running, 0, fixture.stderr.join(''));
+});
 
 test('iLink start owns polling and Agent lifecycle without setup or Hono', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kintio-ilink-start-'));
@@ -76,8 +98,10 @@ test('foreground iLink lifecycle never loses a concurrent stop/start decision', 
     if (pathname.endsWith('/notifystart') || pathname.endsWith('/notifystop')) {
       return Response.json({ ret: 0 });
     }
+    const signal = init?.signal || request.signal;
     return await new Promise<Response>((_resolve, reject) => {
-      request.signal.addEventListener('abort', () => {
+      if (signal.aborted) { reject(signal.reason); return; }
+      signal.addEventListener('abort', () => {
         const error = new Error('poll aborted');
         error.name = 'AbortError';
         reject(error);
@@ -106,7 +130,8 @@ test('foreground iLink lifecycle never loses a concurrent stop/start decision', 
     fs.rmSync(profile, { recursive: true, force: true });
   });
   await eventually(() => stdout.join('').includes('shared runtime is active'));
-  assert.equal(fs.existsSync(path.join(home, 'data/lifecycle.lock')), true);
+  await eventually(() => stdout.join('').includes('Started '));
+  await eventually(() => !fs.existsSync(path.join(home, 'data/lifecycle.lock')));
   const [stopResult, startResult] = await Promise.all([
     runCli(['ilink', 'stop', '--home', home], overrides),
     runCli(['ilink', 'start', '--home', home], overrides),

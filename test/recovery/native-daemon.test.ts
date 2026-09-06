@@ -374,6 +374,10 @@ test('restart exhaustion remains observable until an explicit stop', async (t) =
   let active = await waitFor((value) => value?.phase === 'starting' && !!value.workerPid);
   for (const restartDelay of [1_000, 2_000, 4_000, 8_000, 16_000, 30_000, 30_000, 30_000, 30_000, 30_000]) {
     await waitFor((value) => value?.phase === 'backoff');
+    if (restartDelay === 1_000) {
+      await assert.rejects(requestControl(home, 'stop-if-unused'), /cannot be proven/u);
+      assert.equal((await requestControl(home, 'ping')).phase, 'backoff');
+    }
     const previousPid = active?.workerPid;
     await vi.advanceTimersByTimeAsync(restartDelay);
     active = await waitFor(
@@ -383,6 +387,8 @@ test('restart exhaustion remains observable until an explicit stop', async (t) =
   const failed = await waitFor((value) => value?.phase === 'failed');
   assert.match(failed?.message || '', /restart limit exceeded/u);
   assert.equal(completed, false);
+  assert.equal((await requestControl(home, 'ping')).phase, 'failed');
+  await assert.rejects(requestControl(home, 'stop-if-unused'), /cannot be proven/u);
   assert.equal((await requestControl(home, 'ping')).phase, 'failed');
   const stopped = await requestControl(home, 'stop-if-idle');
   assert.equal(stopped.ok, true);

@@ -21,6 +21,24 @@ import { WecomSync } from '../../src/services/wecom-sync.ts';
 const logger = { info() {}, warn() {}, error() {} };
 
 describe('independent WeCom and iLink channels', () => {
+  it('read-only status and account listing never request an empty runtime to stop', async (t) => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-read-only-runtime-'));
+    t.onTestFinished(() => fs.rm(home, { recursive: true, force: true }));
+    const config = loadSharedRuntimeConfig({ root: home, environment: {} });
+    const stopRequested = vi.fn();
+    const runtime = await createRuntime({ config, logger, onStopRequested: stopRequested });
+    t.onTestFinished(() => runtime.close());
+    await runtime.start();
+    assert.deepEqual(await controlWecom(config, path.resolve('.'), 'status'), { running: false });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(stopRequested.mock.calls.length, 0);
+    const snapshot = await readIlinkAccountSnapshot({ config, packageRoot: path.resolve('.'), signal: AbortSignal.timeout(5_000) });
+    assert.deepEqual(snapshot.accounts, []);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(stopRequested.mock.calls.length, 0);
+    assert.deepEqual(await controlWecom(config, path.resolve('.'), 'status'), { running: false });
+  });
+
   it('WeCom setup leaves existing iLink configuration and data byte-for-byte intact', async (t) => {
     const profile = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-channel-config-'));
     t.onTestFinished(() => fs.rm(profile, { recursive: true, force: true }));
@@ -87,6 +105,8 @@ describe('independent WeCom and iLink channels', () => {
     });
     persistence.close();
     vi.spyOn(WecomSync.prototype, 'catchUp').mockResolvedValue(undefined);
+    vi.spyOn(IlinkClient.prototype, 'notifyStart').mockResolvedValue({ ret: 0 });
+    vi.spyOn(IlinkClient.prototype, 'notifyStop').mockResolvedValue({ ret: 0 });
     vi.spyOn(IlinkClient.prototype, 'getUpdates').mockImplementation(async (_cursor, { signal } = {}) => {
       await new Promise<void>((resolve) => {
         if (signal?.aborted) resolve();

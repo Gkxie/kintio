@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 
 import type { IlinkLoginStatus } from '../ilink/login-store.ts';
@@ -26,9 +27,11 @@ const LOGIN_STATUS = z.enum([
 ]);
 
 export interface IlinkLoginOperator {
+  connected?(sessionId: string): void;
   restartAccounts?(): Promise<void>;
   wecomControl?(action: 'start' | 'stop' | 'restart' | 'status', configFile?: string): Promise<{ running: boolean }>;
-  begin(signal?: AbortSignal): Promise<{
+  disconnected?(sessionId: string): void;
+  begin(sessionId: string, signal?: AbortSignal): Promise<{
     readonly offerId: string;
     readonly qrContent: string;
     readonly expiresAt: number;
@@ -95,6 +98,9 @@ function failure(error: unknown, operation: 'login' | 'account' = 'login') {
 }
 
 export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServer {
+  const sessionId = randomUUID();
+  const offers = new Map<string, boolean>();
+  let disconnected = false;
   const server = new McpServer(
     { name: 'kintio-operator', version: KINTIO_VERSION },
     {
@@ -102,6 +108,26 @@ export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServ
         'Private local operator tools for channel lifecycle and iLink enrollment. Never expose this server to an Agent.',
     },
   );
+  operator.connected?.(sessionId);
+  const disconnect = () => {
+    if (disconnected) return;
+    disconnected = true;
+    try {
+      for (const [offerId, pending] of offers) {
+        if (pending) {
+          try { operator.cancel(offerId); } catch { /* The bounded offer expiry still applies. */ }
+        }
+      }
+    } finally {
+      offers.clear();
+      operator.disconnected?.(sessionId);
+    }
+  };
+  server.server.onclose = disconnect;
+  const close = server.close.bind(server);
+  server.close = async () => {
+    try { await close(); } finally { disconnect(); }
+  };
 
   if (operator.restartAccounts) {
     server.registerTool('restart_accounts', {
@@ -144,13 +170,14 @@ export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServ
     async (_input, { signal }) => {
       let offered: Awaited<ReturnType<IlinkLoginOperator['begin']>> | undefined;
       try {
-        offered = await operator.begin(signal);
-        if (signal.aborted) {
-          throw signal.reason;
+        offered = await operator.begin(sessionId, signal);
+        if (signal.aborted || disconnected) {
+          throw signal.reason || new Error('Terminal disconnected');
         }
+        offers.set(offered.offerId, true);
         return textResult('iLink login started.', offered);
       } catch (error: unknown) {
-        if (offered && signal.aborted) operator.cancel(offered.offerId);
+        if (offered && (signal.aborted || disconnected)) operator.cancel(offered.offerId);
         return failure(error);
       }
     },
@@ -168,7 +195,13 @@ export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServ
     },
     ({ offerId }) => {
       try {
-        return textResult('iLink login status.', operator.status(offerId));
+        const result = offers.has(offerId)
+          ? operator.status(offerId)
+          : { status: 'unknown' };
+        if (offers.has(offerId) && result.status !== 'waiting' && result.status !== 'scanned') {
+          offers.set(offerId, false);
+        }
+        return textResult('iLink login status.', result);
       } catch (error: unknown) {
         return failure(error);
       }
@@ -185,9 +218,9 @@ export function createIlinkLoginMcpServer(operator: IlinkLoginOperator): McpServ
     },
     ({ offerId }) => {
       try {
-        return textResult('iLink login cancelled.', {
-          cancelled: operator.cancel(offerId),
-        });
+        const cancelled = offers.has(offerId) && operator.cancel(offerId);
+        if (cancelled) offers.set(offerId, false);
+        return textResult('iLink login cancelled.', { cancelled });
       } catch (error: unknown) {
         return failure(error);
       }

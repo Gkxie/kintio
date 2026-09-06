@@ -18,6 +18,7 @@ export interface WorkerOptions {
   readonly onStopRequested?: () => void;
   readonly onStarted?: (control: {
     readonly stopIfIdleForUpdate: () => boolean;
+    readonly stopIfUnused: () => boolean;
   }) => void | Promise<void>;
   readonly create?: (options: {
     readonly config: SharedRuntimeConfig;
@@ -78,7 +79,10 @@ export async function runWorker(options: WorkerOptions): Promise<number> {
       await Promise.race([runtime.wecomControl('start', options.startWecom), failed]);
     }
     await Promise.race([
-      options.onStarted?.({ stopIfIdleForUpdate: () => runtime.stopAcceptingIfIdle() }),
+      options.onStarted?.({
+        stopIfIdleForUpdate: () => runtime.stopAcceptingIfIdle(),
+        stopIfUnused: () => runtime.stopAcceptingIfIdle({ requireUnused: true }),
+      }),
       failed,
     ]);
     options.stdout(
