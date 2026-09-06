@@ -2,6 +2,8 @@ import readline from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import crossSpawn from 'cross-spawn';
 
+import { AgentTurnCancelledError } from '../agent/runtime.ts';
+
 import { KINTIO_VERSION } from '../version.ts';
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -71,6 +73,7 @@ export interface CodexThread {
 }
 
 export interface CodexBoundary {
+  setApprovalHandler?(handler: (request: CodexApprovalRequest) => Promise<CodexApprovalResult>): void;
   startThread(options: CodexThreadOptions): CodexThread;
   resumeThread(threadId: string, options: CodexThreadOptions): CodexThread;
   getThreadState?(threadId: string): Promise<'active' | 'archived' | 'missing'>;
@@ -80,6 +83,21 @@ export interface CodexBoundary {
   ): Promise<unknown>;
   deleteThread?(threadId: string): Promise<void>;
   close(): Promise<void>;
+}
+
+export type CodexApprovalDecision = 'accept' | 'decline' | 'cancel';
+export type CodexApprovalResult = 'decline' | 'cancel' | {
+  readonly decision: CodexApprovalDecision;
+  readonly isAllowed: () => boolean;
+};
+export interface CodexApprovalRequest {
+  readonly id: string | number;
+  readonly kind: 'command' | 'file';
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly params: JsonRecord;
+  readonly item?: JsonRecord;
+  readonly signal: AbortSignal;
 }
 
 interface ProcessLike {
@@ -107,6 +125,7 @@ export type SpawnProcess = (
 export interface CodexAppServerOptions {
   readonly configOverrides?: readonly string[];
   readonly requestTimeoutMs?: number;
+  readonly approvalTimeoutMs?: number;
   readonly spawnProcess?: SpawnProcess;
   readonly logger?: { warn?(message: string): void };
 }
@@ -124,9 +143,10 @@ interface PendingRequest extends Deferred<unknown> {
 
 interface TurnState {
   readonly items: CodexItem[];
-  readonly itemStarts: Map<string, number>;
+  readonly itemStarts: Map<string, { readonly sequence: number; readonly item: JsonRecord }>;
   readonly waiter: Deferred<CodexTurnResult>;
   failure?: string;
+  approvalCancelled?: boolean;
 }
 
 type ResolvedOptions = CodexAppServerOptions & {
@@ -187,6 +207,14 @@ export class CodexAppServer implements CodexBoundary {
   #reader: readline.Interface | null = null;
   #requestId = 1;
   #pending = new Map<number, PendingRequest>();
+  readonly #approvals = new Map<string | number, {
+    readonly threadId: string;
+    readonly turnId: string;
+    readonly itemId: string;
+    readonly controller: AbortController;
+    readonly timer: NodeJS.Timeout;
+  }>();
+  #approvalHandler?: (request: CodexApprovalRequest) => Promise<CodexApprovalResult>;
   #turns = new Map<string, TurnState>();
   #initializing: Promise<void> | null = null;
   #terminating: Promise<void> | null = null;
@@ -200,6 +228,10 @@ export class CodexAppServer implements CodexBoundary {
       spawnProcess: options.spawnProcess || defaultSpawn,
       logger: options.logger || console,
     };
+  }
+
+  setApprovalHandler(handler: (request: CodexApprovalRequest) => Promise<CodexApprovalResult>): void {
+    this.#approvalHandler = handler;
   }
 
   startThread(options: CodexThreadOptions): CodexThread {
@@ -379,7 +411,8 @@ export class CodexAppServer implements CodexBoundary {
       }
       return;
     }
-    if (typeof message.id === 'number' && typeof message.method === 'string') {
+    if ((typeof message.id === 'number' || typeof message.id === 'string') && typeof message.method === 'string') {
+      if (this.#handleApproval(message as JsonRecord & { id: string | number })) return;
       this.#write({
         id: message.id,
         error: { code: -32601, message: `Unsupported server request: ${message.method}` },
@@ -387,6 +420,63 @@ export class CodexAppServer implements CodexBoundary {
       return;
     }
     this.#handleNotification(message);
+  }
+
+  #handleApproval(message: JsonRecord & { id: string | number }): boolean {
+    const kind = message.method === 'item/commandExecution/requestApproval' ? 'command'
+      : message.method === 'item/fileChange/requestApproval' ? 'file' : undefined;
+    if (!kind || !this.#approvalHandler) return false;
+    const params = asRecord(message.params);
+    if (!params || typeof params.threadId !== 'string' || typeof params.turnId !== 'string' ||
+      typeof params.itemId !== 'string' || this.#approvals.has(message.id) || this.#approvals.size >= 32) {
+      this.#clearApprovals((id) => id === message.id);
+      this.#write({ id: message.id, error: { code: -32602, message: 'Invalid or unavailable approval request' } });
+      return true;
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => {
+      if (this.#approvals.get(message.id)?.controller !== controller) return;
+      if (!this.#closed) {
+        try { this.#finishApproval(message.id, 'cancel'); }
+        catch { this.#fail(new Error('Codex app-server approval cancellation failed')); }
+      }
+    }, Math.max(1, Math.min(this.#options.approvalTimeoutMs || 300_000, 300_000)));
+    timer.unref();
+    this.#approvals.set(message.id, { threadId: params.threadId, turnId: params.turnId, itemId: params.itemId, controller, timer });
+    const item = this.#turns.get(params.turnId)?.itemStarts.get(params.itemId)?.item;
+    const request: CodexApprovalRequest = {
+      id: message.id, kind, threadId: params.threadId, turnId: params.turnId, params,
+      ...(item ? { item } : {}),
+      signal: controller.signal,
+    };
+    void Promise.resolve().then(() => this.#approvalHandler!(request)).catch(() => 'cancel' as const).then((result) => {
+      if (this.#closed || this.#approvals.get(message.id)?.controller !== controller) return;
+      let decision: CodexApprovalDecision = 'cancel';
+      try {
+        if (typeof result === 'string') decision = result === 'decline' ? 'decline' : 'cancel';
+        else if (result.isAllowed() && ['accept', 'decline', 'cancel'].includes(result.decision)) decision = result.decision;
+      } catch { /* A failed freshness check never grants permission. */ }
+      this.#finishApproval(message.id, decision);
+    }).catch(() => this.#fail(new Error('Codex app-server approval response failed')));
+    return true;
+  }
+
+  #finishApproval(id: string | number, decision: CodexApprovalDecision): void {
+    const request = this.#approvals.get(id);
+    if (!request || this.#closed) return;
+    const cancellation = decision === 'cancel' ? new AgentTurnCancelledError() : undefined;
+    if (cancellation) this.#turnState(request.turnId).approvalCancelled = true;
+    this.#clearApprovals((candidate) => candidate === id, cancellation);
+    this.#write({ id, result: { decision } });
+  }
+
+  #clearApprovals(predicate: (id: string | number, request: { threadId: string; turnId: string }) => boolean, reason?: Error): void {
+    for (const [id, request] of this.#approvals) {
+      if (!predicate(id, request)) continue;
+      this.#approvals.delete(id);
+      clearTimeout(request.timer);
+      request.controller.abort(reason);
+    }
   }
 
   #turnState(turnId: string): TurnState {
@@ -407,10 +497,28 @@ export class CodexAppServer implements CodexBoundary {
   #handleNotification(message: JsonRecord): void {
     const sequence = ++this.eventSequence;
     const params = asRecord(message.params);
+    if (message.method === 'serverRequest/resolved') {
+      this.#clearApprovals((id, request) => id === params?.requestId && request.threadId === params.threadId);
+      return;
+    }
+    if (message.method === 'thread/archived' || message.method === 'thread/closed' || message.method === 'thread/deleted') {
+      this.#clearApprovals((_id, request) => request.threadId === params?.threadId);
+      return;
+    }
+    if (message.method === 'item/fileChange/patchUpdated' && typeof params?.turnId === 'string' && typeof params.itemId === 'string') {
+      const starts = this.#turns.get(params.turnId)?.itemStarts;
+      const previous = starts?.get(params.itemId);
+      if (previous) starts?.set(params.itemId, { sequence: previous.sequence, item: { ...previous.item, changes: params.changes } });
+      for (const [id, approval] of this.#approvals) {
+        if (approval.threadId !== params.threadId || approval.turnId !== params.turnId || approval.itemId !== params.itemId) continue;
+        this.#finishApproval(id, 'cancel');
+      }
+      return;
+    }
     if (message.method === 'item/started') {
       const item = asRecord(params?.item);
       if (typeof params?.turnId === 'string' && typeof item?.id === 'string') {
-        this.#turnState(params.turnId).itemStarts.set(item.id, sequence);
+        this.#turnState(params.turnId).itemStarts.set(item.id, { sequence, item });
       }
       return;
     }
@@ -426,7 +534,7 @@ export class CodexAppServer implements CodexBoundary {
         state.items.push({
           ...item,
           type: item.type,
-          startedSequence: state.itemStarts.get(id) || sequence,
+          startedSequence: state.itemStarts.get(id)?.sequence || sequence,
           completedSequence: sequence,
         });
         if (id) state.itemStarts.delete(id);
@@ -436,8 +544,11 @@ export class CodexAppServer implements CodexBoundary {
     if (message.method === 'turn/completed') {
       const turn = asRecord(params?.turn);
       if (typeof turn?.id !== 'string') return;
+      this.#clearApprovals((_id, request) => request.turnId === turn.id);
       const state = this.#turnState(turn.id);
-      if (turn.status === 'completed') {
+      if (state.approvalCancelled) {
+        state.waiter.reject(new AgentTurnCancelledError());
+      } else if (turn.status === 'completed') {
         state.waiter.resolve({ items: state.items });
       } else {
         const status = turn.status === 'failed' || turn.status === 'interrupted'
@@ -468,6 +579,7 @@ export class CodexAppServer implements CodexBoundary {
   }
 
   #rejectAll(error: Error): void {
+    this.#clearApprovals(() => true);
     for (const pending of this.#pending.values()) {
       clearTimeout(pending.timer);
       pending.reject(error);
@@ -605,6 +717,7 @@ class CodexAppServerThread implements CodexThread {
       expectedTurnId: this.#activeTurnId,
       ...(clientUserMessageId ? { clientUserMessageId } : {}),
     });
+    if (result.turnId !== this.#activeTurnId) throw new Error('Codex steering acknowledged a different turn');
     this.#lastSteerSequence = this.#server.eventSequence;
     this.#lastSteerClientId = clientUserMessageId || '';
     return result.turnId;

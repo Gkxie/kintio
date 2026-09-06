@@ -8,6 +8,7 @@ import type {
   AgentRuntime,
   AgentSubmission,
 } from '../../src/agent/runtime.ts';
+import { AgentTurnCancelledError } from '../../src/agent/runtime.ts';
 import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
 import { IlinkSendExecutor } from '../../src/ilink/executor.ts';
 import { normalizeIlinkInboundMessage } from '../../src/ilink/message.ts';
@@ -213,6 +214,7 @@ async function createHarness(
     readonly token: string;
     readonly content: string;
   }) => void | Promise<void> = () => undefined,
+  maxConcurrentConversations = 10,
 ): Promise<PriorityHarness> {
   const temporary = await createTempSqlite(t, {
     prefix: 'ilink-priority-runtime-',
@@ -272,7 +274,7 @@ async function createHarness(
       'wm-working-two',
       'wm-downtime-backlog',
     ],
-    maxConcurrentConversations: 10,
+    maxConcurrentConversations,
     logger: { info() {}, warn() {}, error() {} },
   });
   const wecomCursors = new Map<string, string>();
@@ -1171,4 +1173,75 @@ test('low-priority downtime backlog waits for zero working conversations and yie
       { messageKey: liveKey, activeBefore: 0 },
     ],
   );
+});
+
+test('a durable approval notice does not prevent backlog preemption or restore its spent quota', async (t) => {
+  const harness = await createHarness(t);
+  const submit = harness.agent.submit.bind(harness.agent);
+  harness.agent.submit = async (input) => {
+    const result = await submit(input);
+    return result.kind === 'started'
+      ? { ...result, completion: result.completion.catch(() => { throw new AgentTurnCancelledError(); }) }
+      : result;
+  };
+  const account = harness.registerIlink('approval-backlog');
+  const backlogKey = harness.ingestIlink(account, 'background action');
+  harness.store.claimInbound({ messageKey: backlogKey });
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('weixin_ilink'), { priority: 'low' });
+  await waitUntil(() => harness.agent.inputs.length === 1, 'background action to start');
+  const notice = harness.ilinkStore.reserveStartedSystemAttempt({
+    messageKey: backlogKey, sentType: 'text', source: 'agent_approval',
+    payload: { content: 'Synthetic approval prompt' },
+  });
+  harness.store.completeSend(notice.attemptId, { providerMessageId: 'approval-notice' });
+  const window = harness.ilinkStore.getReplyWindowSecretBySource(backlogKey)!;
+  const liveKey = harness.ingestWecom('live conversation', 'wm-working-one');
+  const live = harness.processor.enqueue(liveKey);
+  await waitUntil(() => harness.agent.inputs.length === 2, 'live input to preempt the waiting approval');
+  await live;
+  assert.deepEqual(harness.agent.interruptedMessageKeys, [backlogKey]);
+  assert.equal(harness.store.getInbound(backlogKey)?.deferred, true);
+  assert.equal(harness.store.getAttempt(notice.attemptId)?.status, 'accepted');
+  assert.equal(harness.ilinkStore.getReplyWindow(window.replyWindowId)?.transmittedSendCount, 1);
+  await harness.agent.finish(liveKey, 'current response');
+  await recovery;
+  await harness.processor.waitForIdle();
+});
+
+test('a paused steering failure keeps a finishing turn slot until its tracked completion releases it', async (t) => {
+  const harness = await createHarness(t, () => undefined, 1);
+  const primary = harness.ingestWecom('still finishing', 'wm-working-one');
+  await harness.processor.enqueue(primary);
+  const conversation = harness.agent.inputs[0]!.conversationId;
+  const activePrimary = harness.agent.activePrimary.bind(harness.agent);
+  let finishing = false;
+  harness.agent.activePrimary = (key) => finishing && key === conversation ? undefined : activePrimary(key);
+  const entered = deferred<void>();
+  const steering = deferred<AgentSubmission>();
+  const submit = harness.agent.submit.bind(harness.agent);
+  harness.agent.submit = async (input) => {
+    if (input.mode === 'steer') { entered.resolve(); return steering.promise; }
+    return submit(input);
+  };
+  try {
+    const followup = harness.processor.enqueue(harness.ingestWecom('follow-up', 'wm-working-one'));
+    await entered.promise;
+    const otherKey = harness.ingestIlink(harness.registerIlink('waiting-for-finishing'), 'another conversation');
+    const other = harness.processor.enqueue(otherKey);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    finishing = true;
+    harness.processor.setChannelEnabled('wechat_kf', false);
+    steering.reject(new Error('Synthetic steering failure while paused'));
+    await followup;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(harness.agent.starts.length, 1, 'the unfinished tracked turn still owns the only slot');
+    await harness.agent.interrupt(conversation);
+    await other;
+    assert.equal(harness.agent.starts.length, 2);
+    assert.equal(harness.agent.maxActive, 1);
+    await harness.agent.finish(otherKey, 'The slot is now free');
+    await harness.processor.waitForIdle();
+  } finally {
+    steering.reject(new Error('Synthetic steering cleanup'));
+  }
 });

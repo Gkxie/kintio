@@ -2388,7 +2388,7 @@ export class SqliteStore {
     return this.#transaction(() => {
       const attempts = rowAs<{ count: number }>(this.#database.prepare(`
         SELECT COUNT(*) AS count FROM send_attempts
-        WHERE source_message_key = ?
+        WHERE source_message_key = ? AND source <> 'agent_approval'
       `).get(messageKey));
       if (Number(attempts?.count || 0) > 0) return false;
       const now = this.#now();

@@ -128,7 +128,10 @@ export async function createRuntime({
         persistence: activePersistence,
         config: ilink,
         logger,
-        onAccountsChanged: () => ilinkListener?.refresh(),
+        onAccountsChanged: () => {
+          codexAgent.invalidateApprovals();
+          return ilinkListener?.refresh();
+        },
         onPollingSettled: () => {
           if (toolsUnavailable || !ilinkEnrollment) return;
           scheduleRuntimeStop(ilinkEnrollment, ilinkEnrollment.accounts.listRuntimeAccountsWithSecrets().length);
@@ -266,6 +269,7 @@ export async function createRuntime({
             const stored = enrollment.accounts.getAccountWithSecret(accountKey);
             assertIlinkAccountRevision(stored ? operatorAccount(stored) : undefined, expected);
             const account = enrollment.accounts.setRuntimeEnabled(accountKey, enabled);
+            codexAgent.invalidateApprovals();
             if (ilinkRuntimeStarted) await ilinkListener?.refresh();
             const runningCount = enrollment.accounts
               .listRuntimeAccountsWithSecrets().length;
@@ -284,6 +288,7 @@ export async function createRuntime({
             const stored = enrollment.accounts.getAccountWithSecret(accountKey);
             assertIlinkAccountRevision(stored ? operatorAccount(stored) : undefined, expected);
             const account = enrollment.accounts.deleteAccountCompletely(accountKey);
+            codexAgent.invalidateApprovals();
             if (ilinkRuntimeStarted) await ilinkListener?.refresh();
             const runningCount = enrollment.accounts
               .listRuntimeAccountsWithSecrets().length;
@@ -394,6 +399,19 @@ export async function createRuntime({
         }
       },
       channel: channelDispatcher,
+      approvals: {
+        binding(identity) {
+          if (identity.channel !== 'weixin_ilink') return undefined;
+          try {
+            assertIlinkAccountKey(identity.accountKey);
+            const account = ilinkStore.getAccount(identity.accountKey);
+            return account?.status === 'active' && account.runtimeEnabled &&
+              account.agentAccess === 'host' && account.ownerPeerId === identity.peerId
+              ? String(account.generation) : undefined;
+          } catch { return undefined; }
+        },
+        notify: (record, content, signal) => ilinkTools.notifyApproval(record.messageKey, content, signal),
+      },
       allowedUserIds: [],
       logger,
     });
