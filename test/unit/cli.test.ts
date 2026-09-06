@@ -902,7 +902,6 @@ test('standalone iLink start launches one managed background daemon before activ
         home,
         configFile: path.join(home, '.env'),
         packageRoot,
-        mode: 'shared',
         environment: request.env,
       });
       daemonRuns.push(running);
@@ -1583,7 +1582,6 @@ test('update refuses active work and restores an idle service daemon', async (t)
         home,
         configFile: path.join(home, '.env'),
         packageRoot,
-        mode: request.env.KINTIO_DAEMON_MODE as 'shared',
         environment: request.env,
       });
       daemons.push(running);
