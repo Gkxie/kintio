@@ -127,8 +127,8 @@ export class ConversationProcessor {
     ProcessorOptions,
     'agent' | 'mediaGateway' | 'channel' | 'agentAccess'
   >;
-  readonly #allowedUsers: ReadonlySet<string>;
-  readonly #authorization: {
+  #allowedUsers: ReadonlySet<string>;
+  #authorization: {
     readonly trigger: string;
     readonly requiredConsecutive: number;
     readonly confirmationText: string;
@@ -148,6 +148,7 @@ export class ConversationProcessor {
   readonly #preempting = new Set<string>();
   readonly #maxConcurrentConversations: number;
   #accepting = true;
+  readonly #pausedChannels = new Set<ChatChannel>();
 
   constructor(options: ProcessorOptions) {
     this.#store = options.store;
@@ -276,6 +277,7 @@ export class ConversationProcessor {
   }
 
   #acquire(record: InboundRecord, priority: WorkPriority): Promise<void> {
+    if (this.#pausedChannels.has(record.channel)) return Promise.reject(new Error('Channel is stopped'));
     const key = this.#conversationKey(record);
     if (this.#activeConversations.has(key)) return Promise.resolve();
     const lowActive = [...this.#activeConversations.values()]
@@ -346,7 +348,7 @@ export class ConversationProcessor {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         let record = this.#store.getInbound(messageKey);
-        if (!record) return;
+        if (!record || this.#pausedChannels.has(record.channel)) return;
         if (record.status === 'received') {
           await this.#process(messageKey);
           return;
@@ -372,6 +374,11 @@ export class ConversationProcessor {
         await this.#recoverConversation(group, 'high');
         return;
       } catch (error: unknown) {
+        const record = this.#store.getInbound(messageKey);
+        if (record && this.#pausedChannels.has(record.channel)) {
+          this.#releaseIfInactive(record);
+          return;
+        }
         lastError = error;
         if (attempt < 2) {
           await new Promise((resolve) => setTimeout(resolve, 50 * (attempt + 1)));
@@ -493,6 +500,10 @@ export class ConversationProcessor {
       }
     }
     await this.#acquire(record, options.priority || 'high');
+    if (this.#pausedChannels.has(record.channel)) {
+      this.#release(record);
+      throw new Error('Channel is stopped');
+    }
     this.#store.claimInbound({
       messageKey: record.messageKey,
       clientInputId: input.clientInputId || record.messageKey,
@@ -507,6 +518,7 @@ export class ConversationProcessor {
       opaqueConversationId,
       conversationBefore?.threadId || '',
       agentAccess,
+      record.channel,
     );
     const pendingMemoryThreadId =
       this.#pipeline.agent.takePendingMemoryThread?.(opaqueConversationId) || '';
@@ -586,7 +598,7 @@ export class ConversationProcessor {
     }: { wait?: boolean; boundaryMessageKey?: string } = {},
   ): Promise<void> {
     const record = this.#store.getInbound(messageKey) as InboundRecord | undefined;
-    if (!record || record.status !== 'received') return;
+    if (!record || record.status !== 'received' || this.#pausedChannels.has(record.channel)) return;
     const message = this.#message(record);
     if (!message) return;
     if (isSystemEvent(message)) {
@@ -876,6 +888,7 @@ export class ConversationProcessor {
           ids,
           latestId,
           this.#agentAccess(primary),
+          primary.channel,
         )
       : undefined;
     const missingInput = steering.some((record) => {
@@ -985,6 +998,36 @@ export class ConversationProcessor {
       this.#activeConversations.size || this.#highWaiters.length ||
       this.#lowWaiters.length
     );
+  }
+
+  configureWecom(allowedUserIds: readonly string[], authorization: Required<NonNullable<ProcessorOptions['authorization']>>): void {
+    this.#allowedUsers = new Set(allowedUserIds);
+    this.#authorization = { ...authorization };
+  }
+
+  setChannelEnabled(channel: ChatChannel, enabled: boolean): void {
+    if (enabled) this.#pausedChannels.delete(channel);
+    else {
+      this.#pausedChannels.add(channel);
+      for (const waiters of [this.#highWaiters, this.#lowWaiters]) {
+        for (let index = waiters.length - 1; index >= 0; index -= 1) {
+          if (waiters[index]?.record.channel === channel) waiters.splice(index, 1)[0]!.resolve();
+        }
+      }
+      this.#wakeWaiters();
+    }
+  }
+
+  async waitForChannelIdle(channel: ChatChannel): Promise<void> {
+    const prefix = `${channel}\0`;
+    while (true) {
+      const pending = [...this.#queues, ...this.#recoveries]
+        .filter(([key]) => key.startsWith(prefix)).map(([, task]) => task);
+      if (pending.length) await Promise.allSettled(pending);
+      else if ([...this.#activeConversations.values()].some(({ record }) => record.channel === channel)) {
+        await Promise.race(this.#background);
+      } else return;
+    }
   }
 
   stopAccepting(): void {

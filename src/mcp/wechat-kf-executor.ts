@@ -20,11 +20,6 @@ interface WechatToolError {
   readonly failType?: number;
 }
 
-interface IlinkOfferManager {
-  offer(sessionToken: string): Promise<{ readonly offerId: string; readonly png: Buffer }>;
-  cancel(offerId: string): void;
-}
-
 export interface WechatToolReceipt {
   readonly status: 'accepted' | 'failed' | 'uncertain';
   readonly attemptId: string;
@@ -141,7 +136,6 @@ export class WechatKfToolExecutor {
   readonly #pollMs: number;
   readonly #sleep: (milliseconds: number) => Promise<void>;
   readonly #logger: Logger;
-  readonly #ilinkOffers: IlinkOfferManager | undefined;
   #draining: Promise<void> | undefined;
   #rerun = false;
   #closed = false;
@@ -155,7 +149,6 @@ export class WechatKfToolExecutor {
     sleep = (milliseconds) =>
       new Promise<void>((resolve) => setTimeout(resolve, milliseconds)),
     logger = console,
-    ilinkOffers,
   }: {
     store: ExecutorStore;
     apiClient: ExecutorApi;
@@ -164,7 +157,6 @@ export class WechatKfToolExecutor {
     pollMs?: number;
     sleep?: (milliseconds: number) => Promise<void>;
     logger?: Logger;
-    ilinkOffers?: IlinkOfferManager;
   }) {
     this.#store = store;
     this.#api = apiClient;
@@ -173,7 +165,6 @@ export class WechatKfToolExecutor {
     this.#pollMs = Math.max(10, Math.min(Number(pollMs) || 100, 1_000));
     this.#sleep = sleep;
     this.#logger = logger;
-    this.#ilinkOffers = ilinkOffers;
   }
 
   async #payload(
@@ -310,34 +301,6 @@ export class WechatKfToolExecutor {
         'Agent session is bound to another channel',
         'wrong_channel',
       );
-    }
-    if (toolName === 'offer_weixin_bot_channel') {
-      if (!this.#ilinkOffers) {
-        throw new AgentSessionError(
-          'iLink channel invitations are unavailable',
-          'ilink_unavailable',
-        );
-      }
-      const offered = await this.#ilinkOffers.offer(sessionToken);
-      try {
-        const uploaded = await this.#media.upload({
-          kind: 'image',
-          bytes: offered.png,
-          filename: 'weixin-ilink-login.png',
-          contentType: 'image/png',
-        });
-        const result = await this.#sendPrepared({
-          sessionToken,
-          type: 'image',
-          payload: { msgtype: 'image', image: { media_id: uploaded.media_id } },
-          metadata: { tool: toolName, offerId: offered.offerId },
-        });
-        if (result.status === 'failed') this.#ilinkOffers.cancel(offered.offerId);
-        return result;
-      } catch (error) {
-        this.#ilinkOffers.cancel(offered.offerId);
-        throw error;
-      }
     }
     const { session: _session, ...argumentsWithoutSession } = input;
     const prepared = await this.#payload(

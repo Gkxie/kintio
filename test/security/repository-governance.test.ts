@@ -127,11 +127,11 @@ test('package, release version, and public entry points stay aligned', async () 
     const readme = await read(file);
     assert.ok(readme.includes(`<img src="${logoSource}" alt="Kintio" width="320" />`));
     const installIndex = readme.indexOf('npm install --global @kin-tio/cli');
-    const setupIndex = readme.indexOf('kintio setup');
+    const setupIndex = readme.indexOf('kintio wecom setup');
     assert.notEqual(installIndex, -1);
     assert.notEqual(setupIndex, -1);
     assert.ok(installIndex < setupIndex);
-    assert.ok(readme.indexOf('kintio start', setupIndex) > setupIndex);
+    assert.ok(readme.indexOf('kintio wecom start', setupIndex) > setupIndex);
   }
   assert.match(logo, /<title id="kintio-wordmark-title">Kintio<\/title>/u);
   assert.match(logo, /fill="#211920"/u);
@@ -206,6 +206,14 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(ci, /name: Unit, integration, recovery, security/u);
   assert.match(ci, /needs: platform-tests/u);
   assert.doesNotMatch(ci, /pnpm audit|upload-artifact|download-artifact/u);
+
+  for (const file of ['.github/workflows/ci.yml', '.github/workflows/release.yml']) {
+    const workflow = workflows.get(file) || '';
+    assert.ok(workflow.includes('"$RUNNER_TEMP/kintio-global/bin/kintio" wecom setup'), file);
+    assert.ok(workflow.includes('test -f "$RUNNER_TEMP/kintio-profile/.kintio/wecom/.env"'), file);
+    assert.ok(workflow.includes('test ! -e "$RUNNER_TEMP/kintio-profile/.kintio/.env"'), file);
+    assert.doesNotMatch(workflow, /bin\/kintio" setup/u, file);
+  }
 
   const secretScan = workflows.get('.github/workflows/secret-scan.yml') || '';
   assert.match(secretScan, /^  pull_request:$/mu);

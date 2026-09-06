@@ -9,19 +9,21 @@ import {
 } from '../runtime.ts';
 import type { Logger } from '../types.ts';
 
-export interface IlinkCliStartOptions {
+export interface WorkerOptions {
   readonly background?: boolean;
   readonly config: IlinkRuntimeConfig;
+  readonly startWecom?: string;
   readonly signal: AbortSignal;
   readonly stdout: (text: string) => void;
   readonly logger?: Logger;
+  readonly onStopRequested?: () => void;
   readonly onStarted?: (control: {
     readonly stopIfIdleForUpdate: () => boolean;
   }) => void | Promise<void>;
   readonly create?: (options: {
     readonly config: RuntimeConfig;
     readonly logger?: Logger;
-    readonly onIlinkStopRequested?: () => void;
+    readonly onStopRequested?: () => void;
   }) => Promise<Runtime>;
 }
 
@@ -37,7 +39,7 @@ async function closeRuntime(runtime: Runtime, timeoutMs: number): Promise<void> 
   let timeout: NodeJS.Timeout | undefined;
   const timedOut = new Promise<never>((_resolve, reject) => {
     timeout = setTimeout(
-      () => reject(new Error('Graceful iLink shutdown timed out')),
+      () => reject(new Error('Graceful Kintio shutdown timed out')),
       timeoutMs,
     );
   });
@@ -58,7 +60,7 @@ async function closeRuntime(runtime: Runtime, timeoutMs: number): Promise<void> 
   }
 }
 
-export async function startIlinkCliRuntime(options: IlinkCliStartOptions): Promise<number> {
+export async function runWorker(options: WorkerOptions): Promise<number> {
   if (options.signal.aborted) return 130;
   const create = options.create || createRuntime;
   let requestStop!: () => void;
@@ -66,22 +68,25 @@ export async function startIlinkCliRuntime(options: IlinkCliStartOptions): Promi
   const runtime = await create({
     config: options.config,
     ...(options.logger ? { logger: options.logger } : {}),
-    onIlinkStopRequested: requestStop,
+    onStopRequested: requestStop,
   });
   try {
     await runtime.start();
+    if (options.startWecom) await runtime.wecomControl?.('start', options.startWecom);
     await options.onStarted?.({
       stopIfIdleForUpdate: () => runtime.stopAcceptingIfIdle(),
     });
     options.stdout(
       options.background
-        ? 'Kintio iLink runtime is active.\n'
-        : 'Kintio iLink runtime is active. Press Ctrl-C to stop.\n',
+        ? 'Kintio shared runtime is active.\n'
+        : 'Kintio shared runtime is active. Press Ctrl-C to stop.\n',
     );
     const reason = await Promise.race([
       waitForAbort(options.signal).then(() => 'signal' as const),
-      stopRequested.then(() => 'account-stop' as const),
+      stopRequested.then(() => 'channel-stop' as const),
     ]);
+    // Tell the daemon this is an intentional stop before cleanup can fail.
+    if (reason === 'channel-stop') options.onStopRequested?.();
     return reason === 'signal' ? 130 : 0;
   } finally {
     await closeRuntime(runtime, options.config.state.shutdownTimeoutMs);

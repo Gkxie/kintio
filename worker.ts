@@ -1,26 +1,22 @@
 import {
-  KINTIO_PACKAGE_ROOT,
-  loadIlinkRuntimeConfig,
+  loadSharedRuntimeConfig,
 } from './src/config.ts';
-import { startIlinkCliRuntime } from './src/ilink/cli-start.ts';
-import { installManagedSkill } from './src/runtime/managed-skill.ts';
+import { runWorker } from './src/runtime/run-worker.ts';
 import {
   CONTROL_TIMEOUT_MS,
   parseWorkerStopIfIdleRequest,
   type WorkerStopIfIdleResponse,
 } from './src/runtime/daemon-protocol.ts';
 
-const config = loadIlinkRuntimeConfig();
-installManagedSkill({
-  packageRoot: KINTIO_PACKAGE_ROOT,
-  workingDirectory: config.codex.workingDirectory,
-});
+const config = loadSharedRuntimeConfig();
 
 const controller = new AbortController();
 let resolveParentShutdown!: () => void;
 const parentShutdown = new Promise<void>((resolve) => { resolveParentShutdown = resolve; });
 let updateGateRecoveryTimer: NodeJS.Timeout | undefined;
 const shutdown = (): void => {
+  if (controller.signal.aborted) return;
+  console.log('Stopping Kintio runtime.');
   clearTimeout(updateGateRecoveryTimer);
   controller.abort();
   resolveParentShutdown();
@@ -46,7 +42,7 @@ const handleMessage = (message: unknown): void => {
   }
   let response: WorkerStopIfIdleResponse;
   try {
-    if (!stopIfIdleForUpdate) throw new Error('iLink runtime is not ready');
+    if (!stopIfIdleForUpdate) throw new Error('Kintio runtime is not ready');
     response = {
       type: 'stop-if-idle-result',
       requestId: request.requestId,
@@ -61,7 +57,7 @@ const handleMessage = (message: unknown): void => {
       pid: process.pid,
       ok: false,
       message: (error instanceof Error ? error.message : String(error)).slice(0, 2_048) ||
-        'iLink Worker stop-if-idle check failed',
+        'Kintio worker stop-if-idle check failed',
     };
   }
   const recoverOnSendFailure = (error: Error | null): void => {
@@ -86,23 +82,30 @@ process.once('disconnect', shutdown);
 if (process.env.KINTIO_MANAGED_WORKER === '1' && !process.connected) shutdown();
 
 try {
-  const result = await startIlinkCliRuntime({
+  const result = await runWorker({
     background: true,
     config,
+    ...(process.env.KINTIO_START_WECOM ? { startWecom: process.env.KINTIO_START_WECOM } : {}),
     signal: controller.signal,
     stdout: (text) => process.stdout.write(text),
     onStarted(control) {
       stopIfIdleForUpdate = control.stopIfIdleForUpdate;
-      process.send?.({ type: 'ready', pid: process.pid });
+      if (!controller.signal.aborted && process.connected) {
+        process.send?.({ type: 'ready', pid: process.pid }, (error) => { if (error) shutdown(); });
+      }
+    },
+    onStopRequested() {
+      if (process.connected) {
+        process.send?.({ type: 'shutdown-request', pid: process.pid }, (error) => { if (error) shutdown(); });
+      }
     },
   });
   if (result === 0 && process.connected) {
-    process.send?.({ type: 'shutdown-request', pid: process.pid });
     await parentShutdown;
   }
   process.exitCode = result === 130 ? 0 : result;
 } catch (error: unknown) {
-  console.error('[ilink] process failed', error);
+  console.error('[runtime] worker failed', error);
   process.exitCode = 1;
 } finally {
   process.off('SIGINT', shutdown);

@@ -222,6 +222,28 @@ test('host-authorized iLink uses a separate unrestricted Codex boundary', async 
   assert.match(String(trusted.runCalls[0]?.input), /weixin_ilink tools/u);
 });
 
+test('one Agent adapter preserves channel workspaces and restricted versus host access when ensuring threads', async (t) => {
+  const restricted = new FakeBoundary([]);
+  const trusted = new FakeBoundary([]);
+  const agent = new CodexAgent({
+    codex: restricted,
+    trustedCodex: trusted,
+    config: { workingDirectory: '/synthetic/ilink', imageTempDirectory: os.tmpdir(), generatedImageDirectory: '' },
+    channelConfig: (channel) => ({
+      workingDirectory: channel === 'wechat_kf' ? '/synthetic/wecom' : '/synthetic/ilink',
+      imageTempDirectory: os.tmpdir(), generatedImageDirectory: '',
+    }),
+  });
+  t.onTestFinished(() => agent.close());
+  await agent.ensureThread('wecom-conversation', '', 'restricted', 'wechat_kf');
+  await agent.ensureThread('ilink-conversation', '', 'host', 'weixin_ilink');
+  assert.equal(restricted.startOptions[0]?.workingDirectory, '/synthetic/wecom');
+  assert.equal(restricted.startOptions[0]?.sandbox, 'read-only');
+  assert.equal(trusted.startOptions[0]?.workingDirectory, '/synthetic/ilink');
+  assert.equal(trusted.startOptions[0]?.sandbox, undefined);
+  assert.equal(trusted.startOptions[0]?.approvalPolicy, undefined);
+});
+
 test('a live turn rejection stays observed after Harness-owned thread initialization', async (t) => {
   const turn = deferred<CodexTurnResult>();
   const thread: CodexThread = {
@@ -316,7 +338,7 @@ test('keeps only executed MCP attempts after the last steering boundary', () => 
       ...executedText('offer', 'sa_offer', 1),
       tool: 'offer_weixin_bot_channel',
     }],
-  }, 'wechat_kf'), ['sa_offer']);
+  }, 'wechat_kf'), []);
   assert.deepEqual(executedAttemptIds({
     items: [{ ...executedText('ilink', 'sa_ilink', 1), server: 'weixin_ilink' }],
   }, 'weixin_ilink'), ['sa_ilink']);

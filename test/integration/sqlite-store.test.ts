@@ -67,7 +67,7 @@ test('SQLite store creates private directory and WAL/FULL/FK schema', (t) => {
     persistence.close();
     fs.rmSync(directory, { recursive: true, force: true });
   });
-  assert.equal(inspectSchemaVersion(database), 24);
+  assert.equal(inspectSchemaVersion(database), 25);
   assert.deepEqual(inspectPragmas(database), {
     journalMode: 'wal',
     synchronous: 2,
@@ -97,7 +97,8 @@ test('SQLite store creates private directory and WAL/FULL/FK schema', (t) => {
     'inbound_media',
     'inbound_messages',
     'send_attempts',
-    'sync_cursors',
+      'sync_cursors',
+      'wecom_runtime',
   ]);
   if (process.platform !== 'win32') {
     assert.equal(fs.statSync(path.dirname(filePath)).mode & 0o777, 0o700);

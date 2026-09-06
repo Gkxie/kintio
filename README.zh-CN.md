@@ -43,8 +43,8 @@ kintio ilink start
 查看运行状态和日志：
 
 ```bash
-kintio status
-kintio logs --lines 100
+kintio ilink status
+kintio ilink logs --lines 100
 ```
 
 ### 管理 iLink 账号
@@ -72,20 +72,21 @@ kintio ilink login --qr-output ~/.kintio/ilink-login.png
 二维码最多等待五分钟，PNG 仅在登录过程中临时存在。完整的二维码、多账号和非交互规则见
 英文[部署指南](docs/setup.md)。
 
-### 公网回调通道
+### 微信客服 API 通道
 
 需要接收公网 HTTPS 回调的通道使用部署配置：
 
 ```bash
-kintio setup
-kintio start
-kintio status
-kintio logs --lines 100
+kintio wecom setup
+kintio wecom start
+kintio wecom status
+kintio wecom logs --lines 100
 ```
 
-`kintio setup` 会在 `~/.kintio` 下创建私有实例、安装 Agent Skill，并写入通道配置模板。
-回调凭据、授权流程和首次回复见英文[部署指南](docs/setup.md)。WeChat KF 部署也可以在同一个
-Service Runtime 中启用 iLink。
+WeCom 通道的配置位于 `~/.kintio/wecom/.env`，iLink 沿用 `~/.kintio`。两条通道共用一套后台运行时和 SQLite 数据库，监听分别启停；身份、授权和对话仍然隔离。
+
+`kintio wecom setup` 会在 `~/.kintio/wecom` 下创建私有配置、安装 Agent Skill，并写入通道配置模板。
+回调凭据、授权流程和首次回复见英文[部署指南](docs/setup.md)。
 
 ## 核心能力
 
@@ -108,9 +109,9 @@ Service Runtime 中启用 iLink。
 ## 运维和升级
 
 ```bash
-kintio status
-kintio logs
-kintio restart
+kintio ilink status
+kintio ilink logs
+kintio ilink restart
 kintio update
 ```
 

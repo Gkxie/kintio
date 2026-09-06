@@ -259,6 +259,33 @@ function accountMutation(value: Record<string, unknown>) {
   });
 }
 
+export function hasRuntimeOperator(state: IlinkEnrollmentConfig['state']): boolean {
+  try {
+    findMcpDescriptorFile(path.dirname(state.lockFile), operatorMcpInstanceKey(state.lockFile));
+    return true;
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Kintio runtime is not running') return false;
+    throw error;
+  }
+}
+
+export async function controlWecom(
+  config: Pick<IlinkEnrollmentConfig, 'state'>,
+  packageRoot: string,
+  action: 'start' | 'stop' | 'restart' | 'status',
+  configFile?: string,
+): Promise<{ running: boolean }> {
+  const control = await McpIlinkOperatorControl.connect(config, packageRoot);
+  try { return await control.wecom(action, configFile); }
+  finally { await control.close(); }
+}
+
+export async function restartIlinkListeners(config: Pick<IlinkEnrollmentConfig, 'state'>, packageRoot: string): Promise<void> {
+  const control = await McpIlinkOperatorControl.connect(config, packageRoot);
+  try { await control.restart(); }
+  finally { await control.close(); }
+}
+
 class McpIlinkOperatorControl implements IlinkOperatorControl {
   readonly mode = 'runtime' as const;
   readonly #client: Client;
@@ -307,6 +334,21 @@ class McpIlinkOperatorControl implements IlinkOperatorControl {
         cause: error,
       });
     }
+  }
+
+  async wecom(action: 'start' | 'stop' | 'restart' | 'status', configFile?: string): Promise<{ running: boolean }> {
+    const result = await this.#client.callTool({ name: 'wecom_control', arguments: { action, ...(configFile ? { configFile } : {}) } }, undefined, { timeout: 130_000 });
+    if (result.isError) {
+      const content = result.content as { type: string; text?: string }[];
+      throw new Error(content.find((item) => item.type === 'text')?.text || 'WeCom operation failed');
+    }
+    const value = structured(result);
+    if (typeof value.running !== 'boolean') throw new Error('Invalid WeCom listener state');
+    return { running: value.running };
+  }
+
+  async restart(): Promise<void> {
+    structured(await this.#client.callTool({ name: 'restart_accounts', arguments: {} }, undefined, { timeout: 130_000 }));
   }
 
   async begin(signal: AbortSignal) {

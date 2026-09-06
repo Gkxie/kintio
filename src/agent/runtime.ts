@@ -86,6 +86,7 @@ export interface AgentRuntime {
     conversationId: string,
     threadId: string,
     agentAccess?: AgentAccess,
+    channel?: ChatChannel,
   ): Promise<string>;
   takePendingMemoryThread?(conversationId: string): string;
   activePrimary(conversationId: string): string | undefined;
@@ -96,6 +97,7 @@ export interface AgentRuntime {
     clientInputIds: readonly string[],
     latestClientInputId: string,
     agentAccess?: AgentAccess,
+    channel?: ChatChannel,
   ): Promise<HistoryInspection>;
   close(): Promise<void>;
   abort(): Promise<void>;

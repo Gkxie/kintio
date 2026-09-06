@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { test } from 'vitest';
 
-import { createConfig, loadConfig } from '../../src/config.ts';
+import { createConfig, loadConfig, loadIlinkEnrollmentConfig } from '../../src/config.ts';
 
 const base: NodeJS.ProcessEnv = {
   WECOM_CALLBACK_TOKEN: 'CallbackToken123',
@@ -39,7 +39,6 @@ test('Windows rejects Kintio-owned state outside the instance home', (t) => {
 
   for (const name of [
     'KINTIO_DB_FILE',
-    'ILINK_STORAGE_KEY_FILE',
     'CODEX_IMAGE_TMP_DIR',
   ] as const) {
     assert.throws(
@@ -146,16 +145,11 @@ test('positive integer settings reject zero fractions and non-numbers', () => {
 test('iLink validates an explicit storage key and otherwise uses its private key file', () => {
   for (const key of ['short', 'a'.repeat(42), 'a'.repeat(44), `${'a'.repeat(42)}=`]) {
     assert.throws(
-      () => testConfig({ ...base, ILINK_ENABLED: 'true', ILINK_STORAGE_KEY: key }),
+      () => loadIlinkEnrollmentConfig({ environment: { ILINK_STORAGE_KEY: key }, root: isolatedRoot }),
       /ILINK_STORAGE_KEY/u,
     );
   }
-  const config = testConfig({
-    ...base,
-    ILINK_ENABLED: 'true',
-    ILINK_STORAGE_KEY: 'a'.repeat(43),
-  });
-  assert.equal(config.ilink.enabled, true);
+  const config = loadIlinkEnrollmentConfig({ environment: { ILINK_STORAGE_KEY: 'a'.repeat(43) }, root: isolatedRoot });
   assert.match(config.ilink.storageKeyFile, /ilink-storage\.key$/u);
 });
 

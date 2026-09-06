@@ -89,7 +89,7 @@ async function waitForPortRelease(port: number, timeoutMs = 20_000): Promise<voi
     try {
       await new Promise<void>((resolve, reject) => {
         server.once('error', reject);
-        server.listen(port, '127.0.0.1', resolve);
+        server.listen(port, '0.0.0.0', resolve);
       });
       await new Promise<void>((resolve) => server.close(() => resolve()));
       return;
@@ -251,7 +251,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
 
   t.onTestFinished(async () => {
     if (launcher) {
-      await command(launcher, ['stop', '--home', instanceHome], {
+      await command(launcher, ['wecom', 'stop', '--home', instanceHome], {
         cwd: packageRoot,
         env: environment,
       }).catch(() => undefined);
@@ -271,7 +271,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
     fs.cp('bin', path.join(packageRoot, 'bin'), { recursive: true }),
     fs.cp('assets', path.join(packageRoot, 'assets'), { recursive: true }),
     fs.cp('codex-workspace', path.join(packageRoot, 'codex-workspace'), { recursive: true }),
-    ...['cli.ts', 'daemon.ts', 'index.ts', 'ilink.ts', 'mcp-relay.ts', 'tsconfig.json',
+    ...['cli.ts', 'daemon.ts', 'worker.ts', 'mcp-relay.ts', 'tsconfig.json',
       'package.json'].map((file) =>
       fs.copyFile(file, path.join(packageRoot, file))),
     fs.symlink(
@@ -321,7 +321,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
     PATH: `${fakeAgentDirectory}${path.delimiter}${process.env.PATH || ''}`,
   };
 
-  const setup = await command(launcher, ['setup', '--home', instanceHome], {
+  const setup = await command(launcher, ['wecom', 'setup', '--home', instanceHome], {
     cwd: packageRoot,
     env: environment,
   });
@@ -343,7 +343,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
     upstream!.listen(upstreamPort, '127.0.0.1', resolve);
   });
 
-  const configFile = path.join(instanceHome, '.env');
+  const configFile = path.join(instanceHome, 'wecom/.env');
   let config = await fs.readFile(configFile, 'utf8');
   for (const [name, value] of Object.entries({
     PORT: String(servicePort),
@@ -378,7 +378,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
   const bootstrapDelay = path.join(root, 'delay-worker-bootstrap.mjs');
   await fs.writeFile(bootstrapDelay, [
     "const entry = (process.argv[1] || '').replaceAll('\\\\', '/');",
-    "if (entry.endsWith('/dist/index.js')) {",
+    "if (entry.endsWith('/dist/worker.js')) {",
     '  await new Promise((resolve) => setTimeout(resolve, 1000));',
     '}',
   ].join('\n'));
@@ -419,7 +419,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
   const earlyTree = [earlyState.daemonPid, earlyState.workerPid!];
   await waitForDead(earlyTree);
   earlyTree.forEach((pid) => ownedPids.delete(pid));
-  const earlyStatus = await command(launcher, ['status', '--home', instanceHome], {
+  const earlyStatus = await command(launcher, ['wecom', 'status', '--home', instanceHome], {
     cwd: packageRoot,
     env: environment,
   });
@@ -427,7 +427,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
   assert.match(earlyStatus.output, /not running/u);
   await assert.rejects(fs.access(daemonRecordPath(instanceHome)), { code: 'ENOENT' });
 
-  const started = await command(launcher, ['start', '--home', instanceHome], {
+  const started = await command(launcher, ['wecom', 'start', '--home', instanceHome], {
     cwd: packageRoot,
     env: environment,
   });
@@ -463,7 +463,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
   firstTree.forEach((pid) => ownedPids.delete(pid));
   await waitForPortRelease(servicePort);
 
-  const status = await command(launcher, ['status', '--home', instanceHome], {
+  const status = await command(launcher, ['wecom', 'status', '--home', instanceHome], {
     cwd: packageRoot,
     env: environment,
   });
@@ -471,7 +471,7 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
   assert.match(status.output, /not running/u);
   await assert.rejects(fs.access(daemonRecordPath(instanceHome)), { code: 'ENOENT' });
 
-  const restarted = await command(launcher, ['start', '--home', instanceHome], {
+  const restarted = await command(launcher, ['wecom', 'start', '--home', instanceHome], {
     cwd: packageRoot,
     env: environment,
   });
@@ -483,12 +483,18 @@ test('daemon SIGKILL leaves no Worker, Codex, or stdio relay process', {
     ...(secondDaemon.workerPid ? [secondDaemon.workerPid] : []),
   ];
   secondTree.forEach((pid) => ownedPids.add(pid));
-  const stopped = await command(launcher, ['stop', '--home', instanceHome], {
+  const stopped = await command(launcher, ['wecom', 'stop', '--home', instanceHome], {
     cwd: packageRoot,
     env: environment,
   });
   assert.equal(stopped.code, 0, stopped.output);
   await waitForPortRelease(servicePort);
-  await waitForDead(secondTree);
+  try {
+    await waitForDead(secondTree);
+  } catch (error) {
+    const state = await requestControl(instanceHome, 'ping').catch(() => undefined);
+    const log = await fs.readFile(path.join(instanceHome, 'data/logs/kintio.log'), 'utf8').catch(() => 'No runtime log');
+    throw new Error(`${String(error)}; phase=${state?.phase}; worker=${state?.workerPid}\n${log.slice(-4_096)}`);
+  }
   secondTree.forEach((pid) => ownedPids.delete(pid));
 });
