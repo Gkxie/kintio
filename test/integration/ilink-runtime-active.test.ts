@@ -10,7 +10,7 @@ import type {
   AgentCompletion,
   AgentInput,
 } from '../../src/agent/runtime.ts';
-import { loadIlinkRuntimeConfig } from '../../src/config.ts';
+import { loadSharedRuntimeConfig } from '../../src/config.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import {
@@ -93,7 +93,7 @@ async function fixture(t: TestContext) {
     prefix: 'ilink-active-runtime-',
   });
   const storageKey = Buffer.alloc(32, 41).toString('base64url');
-  const config = loadIlinkRuntimeConfig({ environment: {
+  const config = loadSharedRuntimeConfig({ environment: {
     WECOM_CALLBACK_TOKEN: 'RuntimeIlinkToken123',
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
     WECOM_CORP_ID: 'ww-ilink-runtime',
@@ -338,6 +338,7 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
     (await operator.listTools()).tools.map((tool) => tool.name),
     [
       'restart_accounts',
+      'wecom_control',
       'begin_login',
       'login_status',
       'cancel_login',

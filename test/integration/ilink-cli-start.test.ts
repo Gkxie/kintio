@@ -6,7 +6,7 @@ import path from 'node:path';
 import { test, vi } from 'vitest';
 
 import { runCli } from '../../src/cli.ts';
-import { loadIlinkRuntimeConfig } from '../../src/config.ts';
+import { loadSharedRuntimeConfig } from '../../src/config.ts';
 import { runWorker } from '../../src/runtime/run-worker.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
@@ -24,7 +24,7 @@ async function eventually(condition: () => boolean): Promise<void> {
 test('iLink start owns polling and Agent lifecycle without setup or Hono', async (t) => {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'kintio-ilink-start-'));
   t.onTestFinished(() => fs.rmSync(home, { recursive: true, force: true }));
-  const config = loadIlinkRuntimeConfig({ environment: {}, root: home });
+  const config = loadSharedRuntimeConfig({ environment: {}, root: home });
   assert.equal('wecom' in config, false);
   assert.equal('port' in config, false);
   const controller = new AbortController();
@@ -52,7 +52,7 @@ test('foreground iLink lifecycle never loses a concurrent stop/start decision', 
   const home = path.join(profile, '.kintio');
   const storageKey = Buffer.alloc(32, 73).toString('base64url');
   const environment = { ILINK_STORAGE_KEY: storageKey };
-  const config = loadIlinkRuntimeConfig({ environment, root: home });
+  const config = loadSharedRuntimeConfig({ environment, root: home });
   const accountKey = createIlinkAccountKey('foreground-bot@im.bot');
   const persistence = new StatePersistence({ filePath: config.state.databaseFile });
   const box = new IlinkSecretBox(storageKey);

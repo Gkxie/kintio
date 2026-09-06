@@ -7,8 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { test, vi } from 'vitest';
 import type { TestContext } from 'vitest';
 
-import { createApp } from '../../src/app.ts';
-import { createConfig, loadIlinkRuntimeConfig, type AppConfig } from '../../src/config.ts';
+import { loadSharedRuntimeConfig } from '../../src/config.ts';
 import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { StatePersistence } from '../../src/state/persistence.ts';
@@ -21,32 +20,24 @@ async function workspace(t: TestContext): Promise<string> {
   return directory;
 }
 
-function activeConfig(directory: string): AppConfig {
-  return createConfig({
-    WECOM_CALLBACK_TOKEN: 'RuntimeToken123',
-    WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
-    WECOM_CORP_ID: 'ww-runtime',
-    WECOM_KF_SECRET: 'runtime-secret',
-    ILINK_ENABLED: 'false',
-    WECOM_ALLOWED_USER_IDS: 'wm-runtime',
+function activeConfig(directory: string) {
+  return loadSharedRuntimeConfig({ root: directory, environment: {
     KINTIO_DB_FILE: path.join(directory, 'wecom.sqlite'),
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
-  }, directory);
+  } });
 }
 
 const logger = { info() {}, warn() {}, error() {} };
 
-test('disabled runtime exposes complete no-op lifecycle', async (t) => {
+test('an idle shared runtime uses the same lifecycle with Agent processing disabled', async (t) => {
   const directory = await workspace(t);
-  const config = createConfig({
-    WECOM_CALLBACK_TOKEN: 'RuntimeToken123',
-    WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
-  }, directory);
+  const config = loadSharedRuntimeConfig({ root: directory, environment: { CODEX_ENABLED: 'false' } });
   const runtime = await createRuntime({ config, logger });
-  assert.equal(runtime.messageProcessor, null);
+  t.onTestFinished(() => runtime.close());
+  assert.deepEqual(await runtime.wecomControl('status'), { running: false });
   await runtime.start();
-  assert.equal(runtime.stopAcceptingIfIdle(), true);
+  await vi.waitFor(() => assert.equal(runtime.stopAcceptingIfIdle(), true));
   assert.equal(runtime.stopAcceptingIfIdle(), false);
   await assert.rejects(runtime.start(), /runtime is stopping/u);
   await runtime.abort();
@@ -77,7 +68,7 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
     })],
   });
   previousPersistence.close();
-  const config = loadIlinkRuntimeConfig({ environment: {
+  const config = loadSharedRuntimeConfig({ environment: {
     KINTIO_DB_FILE: databaseFile,
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
@@ -85,16 +76,8 @@ test('iLink-only runtime remains active without WeChat callback or KF API', asyn
   const runtime = await createRuntime({ config, logger });
   t.onTestFinished(() => runtime.close());
 
-  assert.equal(runtime.messageProcessor, null);
+  assert.deepEqual(await runtime.wecomControl('status'), { running: false });
   await runtime.start();
-
-  const app = createApp({ config: createConfig({}, directory), logger, messageProcessor: runtime.messageProcessor });
-  const rootResponse = await app.request('/');
-  assert.equal(await rootResponse.text(), 'hello world');
-  assert.equal((await app.request('/', { method: 'POST' })).status, 404);
-  for (const route of ['/mcp', '/mcp/memory', '/mcp/ilink']) {
-    assert.equal((await app.request(route, { method: 'POST' })).status, 404);
-  }
   await runtime.close();
 
   const preservedPersistence = new StatePersistence({ filePath: databaseFile });
@@ -114,15 +97,12 @@ test('active runtime stop/abort/close are safe and close releases the instance l
   const directory = await workspace(t);
   const config = activeConfig(directory);
   const runtime = await createRuntime({ config, logger });
-  assert.ok(runtime.messageProcessor);
+  t.onTestFinished(() => runtime.close());
   await runtime.start();
   assert.equal(await fs.stat(config.state.lockFile).then(() => true), true);
 
   runtime.stopAccepting();
-  await runtime.messageProcessor.enqueue({
-    callbackToken: 'ignored-after-stop',
-    openKfId: 'wk-runtime',
-  });
+  await assert.rejects(runtime.wecomControl('start'), /runtime is stopping/u);
   await runtime.abort();
   const firstClose = runtime.close();
   const secondClose = runtime.close();
@@ -150,6 +130,8 @@ test('runtime readiness does not wait for a blocked startup catch-up backlog', a
   const databaseFile = path.join(directory, 'catch-up.sqlite');
   const seededPersistence = new StatePersistence({ filePath: databaseFile });
   const seeded = seededPersistence.core;
+  const wecomFile = path.join(directory, 'wecom/.env');
+  seeded.setWecomRuntime(true, wecomFile);
   seeded.ingestSyncPage({
     accountKey: 'wk-catch-up',
     nextCursor: 'cursor-before-start',
@@ -190,18 +172,27 @@ test('runtime readiness does not wait for a blocked startup catch-up backlog', a
   });
   const address = provider.address();
   if (!address || typeof address === 'string') throw new Error('Missing provider port');
-  const config = createConfig({
+  const callback = http.createServer();
+  await new Promise<void>((resolve) => callback.listen(0, '127.0.0.1', resolve));
+  const callbackAddress = callback.address();
+  if (!callbackAddress || typeof callbackAddress === 'string') throw new Error('Missing callback port');
+  await new Promise<void>((resolve) => callback.close(() => resolve()));
+  const environment = {
+    PORT: String(callbackAddress.port),
     WECOM_CALLBACK_TOKEN: 'RuntimeToken123',
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
     WECOM_CORP_ID: 'ww-runtime',
     WECOM_KF_SECRET: 'runtime-secret',
-    ILINK_ENABLED: 'false',
     WECOM_API_BASE_URL: `http://127.0.0.1:${address.port}`,
     WECOM_API_TIMEOUT_MS: '5000',
     KINTIO_DB_FILE: databaseFile,
     CODEX_WORKING_DIRECTORY: path.join(directory, 'codex-workspace'),
     CODEX_IMAGE_TMP_DIR: path.join(directory, 'images'),
-  }, directory);
+  };
+  await fs.mkdir(path.dirname(wecomFile), { recursive: true, mode: 0o700 });
+  await fs.writeFile(wecomFile, Object.entries(environment)
+    .map(([key, value]) => `${key}=${value}`).join('\n'), { mode: 0o600 });
+  const config = loadSharedRuntimeConfig({ environment, root: directory });
   const runtime = await createRuntime({ config, logger });
   t.onTestFinished(() => runtime.close());
 

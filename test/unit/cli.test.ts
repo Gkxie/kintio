@@ -10,7 +10,7 @@ import crossSpawn from 'cross-spawn';
 import { runCli } from '../../src/cli.ts';
 import { INSTANCE_CONFIG_TEMPLATE } from '../../src/config.ts';
 import { IlinkPromptInterruptedError } from '../../src/ilink/account-picker.ts';
-import type { IlinkOperatorAccount } from '../../src/ilink/cli-login.ts';
+import type { IlinkOperatorAccount } from '../../src/runtime/operator-client.ts';
 import { runNativeDaemon } from '../../src/runtime/native-daemon.ts';
 import * as daemonProtocol from '../../src/runtime/daemon-protocol.ts';
 import {

@@ -5,7 +5,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { test } from 'vitest';
 
-import { loadIlinkRuntimeConfig } from '../../src/config.ts';
+import { loadSharedRuntimeConfig } from '../../src/config.ts';
 import {
   findMcpDescriptorFile,
   operatorMcpInstanceKey,
@@ -15,7 +15,7 @@ import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 test('iLink enrollment stays available when the Codex adapter is disabled', async (t) => {
   const temp = await createTempSqlite(t, { prefix: 'ilink-login-no-agent-' });
-  const defaults = loadIlinkRuntimeConfig({ environment: {
+  const defaults = loadSharedRuntimeConfig({ environment: {
     ILINK_ENABLED: 'true',
     ILINK_STORAGE_KEY: Buffer.alloc(32, 45).toString('base64url'),
     KINTIO_DB_FILE: temp.filePath,
@@ -34,12 +34,8 @@ test('iLink enrollment stays available when the Codex adapter is disabled', asyn
   });
   t.onTestFinished(() => runtime.abort());
   await runtime.start();
-  assert.equal(runtime.messageProcessor, null);
-  assert.match(logs.join('\n'), /enrollment remains available/u);
-  assert.throws(() => findMcpDescriptorFile(
-    path.dirname(config.state.lockFile),
-    config.state.lockFile,
-  ), /not running/u);
+  assert.deepEqual(await runtime.wecomControl('status'), { running: false });
+  assert.doesNotMatch(logs.join('\n'), /Codex app-server/u);
   const descriptor = findMcpDescriptorFile(
     path.dirname(config.state.lockFile),
     operatorMcpInstanceKey(config.state.lockFile),
@@ -58,6 +54,7 @@ test('iLink enrollment stays available when the Codex adapter is disabled', asyn
   assert.deepEqual(
     (await client.listTools()).tools.map((tool) => tool.name),
     [
+      'wecom_control',
       'begin_login',
       'login_status',
       'cancel_login',

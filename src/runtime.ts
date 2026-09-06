@@ -44,21 +44,18 @@ import {
   StatePersistence,
   StatePersistenceUnclosedError,
 } from './state/persistence.ts';
-import { KINTIO_PACKAGE_ROOT, loadConfig, type AppConfig, type IlinkRuntimeConfig, type SharedRuntimeConfig } from './config.ts';
+import { KINTIO_PACKAGE_ROOT, loadConfig, type AppConfig, type SharedRuntimeConfig } from './config.ts';
 import type { ChatChannel, Logger } from './types.ts';
 import { KINTIO_VERSION } from './version.ts';
 
 export interface Runtime {
-  readonly messageProcessor: WecomSync | null;
   start(): Promise<void>;
   stopAcceptingIfIdle(): boolean;
   stopAccepting(): void;
   close(): Promise<void>;
   abort(): Promise<void>;
-  wecomControl?(action: 'start' | 'stop' | 'restart' | 'status', configFile?: string): Promise<{ running: boolean }>;
+  wecomControl(action: 'start' | 'stop' | 'restart' | 'status', configFile?: string): Promise<{ running: boolean }>;
 }
-
-export type RuntimeConfig = AppConfig | IlinkRuntimeConfig | SharedRuntimeConfig;
 
 function ilinkSecretGeneration(providerMessageId: string): number {
   return Number.parseInt(
@@ -72,39 +69,17 @@ export async function createRuntime({
   logger = console,
   onStopRequested,
 }: {
-  config: RuntimeConfig;
+  config: SharedRuntimeConfig;
   logger?: Logger;
   onStopRequested?: () => void;
 }): Promise<Runtime> {
-  let wecom = 'wecom' in config ? config.wecom : undefined;
-  const shared = 'home' in config ? config : undefined;
-  let wecomConfig: AppConfig | undefined = 'wecom' in config ? config : undefined;
-  const ilink = 'ilink' in config ? config.ilink : undefined;
-  if (
-    (!wecom?.api.enabled && !ilink) ||
-    (!config.codex.enabled && !ilink)
-  ) {
-    logger.info('[runtime] message processing is disabled');
-    let accepting = true;
-    return {
-      messageProcessor: null,
-      async start() {
-        if (!accepting) throw new Error('Kintio runtime is stopping');
-      },
-      stopAcceptingIfIdle() {
-        if (!accepting) return false;
-        accepting = false;
-        return true;
-      },
-      stopAccepting() { accepting = false; },
-      async close() {},
-      async abort() {},
-    };
-  }
+  let wecom: AppConfig['wecom'] | undefined;
+  let wecomConfig: AppConfig | undefined;
+  const ilink = config.ilink;
 
   const enabledChannels = (): readonly ChatChannel[] => [
     ...(wecom?.api.enabled && wecomConfig?.codex.enabled ? ['wechat_kf' as const] : []),
-    ...(ilink && config.codex.enabled ? ['weixin_ilink' as const] : []),
+    ...(config.codex.enabled ? ['weixin_ilink' as const] : []),
   ];
 
   const instanceLock = acquireSingleInstanceLock({
@@ -139,15 +114,8 @@ export async function createRuntime({
     }, 60 * 60 * 1000);
     cleanupTimer.unref();
     const startupInbound = store.recoverStartup().inbound;
-    let apiClient = wecom?.api.enabled
-      ? new WecomApiClient({
-          corpId: wecom.api.corpId,
-          kfSecret: wecom.api.kfSecret,
-          baseUrl: wecom.api.baseUrl,
-          timeoutMs: wecom.api.timeoutMs,
-        })
-      : undefined;
-    let mediaGateway = apiClient ? new WecomMediaGateway({ apiClient }) : undefined;
+    let apiClient: WecomApiClient | undefined;
+    let mediaGateway: WecomMediaGateway | undefined;
     let wecomServer: ServerType | undefined;
     let wecomChange: Promise<{ running: boolean }> | undefined;
     let wecomRecovery: Promise<void> | undefined;
@@ -155,7 +123,6 @@ export async function createRuntime({
     let ilinkRuntimeStarted = false;
     let toolsUnavailable = false;
     const ensureIlinkEnrollment = () => {
-      if (!ilink) throw new Error('iLink is not part of the WeCom runtime');
       ilinkEnrollment ||= createIlinkEnrollmentService({
         persistence: activePersistence,
         config: ilink,
@@ -170,9 +137,9 @@ export async function createRuntime({
       await ilinkEnrollmentStart;
       return enrollment;
     };
-    const activeIlinkEnrollment = ilink ? ensureIlinkEnrollment() : undefined;
-    const ilinkSecretBox = activeIlinkEnrollment?.secretBox;
-    const ilinkStore = activeIlinkEnrollment?.accounts;
+    const activeIlinkEnrollment = ensureIlinkEnrollment();
+    const ilinkSecretBox = activeIlinkEnrollment.secretBox;
+    const ilinkStore = activeIlinkEnrollment.accounts;
     let terminalLoginBegins = 0;
     let accountMutationEpoch = 0;
     let activeAccountMutations = 0;
@@ -212,168 +179,104 @@ export async function createRuntime({
     const terminalLoginActive = (): boolean =>
       terminalLoginBegins > 0 ||
       Boolean(ilinkEnrollment?.manager.hasActiveLocalOperatorLogin());
-    let wechatTools = apiClient && mediaGateway
-      ? new WechatKfToolExecutor({
-          store,
-          apiClient,
-          mediaGateway,
-          observeMs: wecom?.api.observeMs || 5_000,
-          logger,
-        })
-      : undefined;
-    const recoveredIlinkReservations = ilinkStore?.recoverPendingAttempts() || 0;
+    let wechatTools: WechatKfToolExecutor | undefined;
+    const recoveredIlinkReservations = ilinkStore.recoverPendingAttempts();
     if (recoveredIlinkReservations) {
       logger.info?.(
         `[recovery] released pending iLink sends=${recoveredIlinkReservations}`,
       );
     }
-    const ilinkMedia = ilinkStore && ilinkSecretBox
-      ? new IlinkMediaGateway({ store: ilinkStore, secretBox: ilinkSecretBox })
-      : undefined;
-    const ilinkTools = ilink && ilinkStore && ilinkSecretBox
-      ? new IlinkSendExecutor({
-          store,
-          ilinkStore,
-          secretBox: ilinkSecretBox,
-          createClient: ({ token, baseUrl }) => new IlinkClient({
-            token, baseUrl, timeoutMs: ilink.apiTimeoutMs,
-          }),
-          ...(ilinkMedia ? { mediaGateway: ilinkMedia } : {}),
-        })
-      : undefined;
+    const ilinkMedia = new IlinkMediaGateway({ store: ilinkStore, secretBox: ilinkSecretBox });
+    const ilinkTools = new IlinkSendExecutor({
+      store,
+      ilinkStore,
+      secretBox: ilinkSecretBox,
+      createClient: ({ token, baseUrl }) => new IlinkClient({
+        token, baseUrl, timeoutMs: ilink.apiTimeoutMs,
+      }),
+      mediaGateway: ilinkMedia,
+    });
     const runtimeFile = fileURLToPath(import.meta.url);
     const relayFile = path.resolve(
       path.dirname(runtimeFile),
       '..',
       `mcp-relay${path.extname(runtimeFile)}`,
     );
-    if (ilink) {
-      const activeOperatorHost = new McpIpcHost({
-        instanceKey: operatorMcpInstanceKey(config.state.lockFile),
-        stateDirectory: path.dirname(config.state.lockFile),
-        relayFile,
-        memory: () => new McpServer({
-          name: 'kintio-operator-isolation',
-          version: KINTIO_VERSION,
-        }),
-        operator: () => createIlinkLoginMcpServer({
-          ...(config.codex.enabled ? { restartAccounts: () => runAccountMutation(async () => { await ilinkListener?.restart(); }) } : {}),
-          ...(shared ? { wecomControl: (action, configFile) => changeWecom(action, configFile) } : {}),
-          async begin(signal) {
-            if (toolsUnavailable) throw new Error('service unavailable');
-            terminalLoginBegins += 1;
-            try {
-              const offer = await (await startIlinkEnrollment()).manager.offer(
-                { kind: 'terminal' },
-                signal ? { signal } : {},
-              );
-              return offer;
-            } finally {
-              terminalLoginBegins -= 1;
-            }
-          },
-          status(offerId) {
-            if (toolsUnavailable) throw new Error('service unavailable');
-            const result = ensureIlinkEnrollment().manager.status(offerId);
-            return result;
-          },
-          cancel(offerId) {
-            return ilinkEnrollment?.manager.cancel(offerId) || false;
-          },
-          listAccounts: () => ensureIlinkEnrollment().accounts
-            .listActiveAccountsWithSecrets()
-            .map(operatorAccount),
-          setAccountRuntime(accountKey, enabled, expected) {
-            return runAccountMutation(async () => {
-              const enrollment = ensureIlinkEnrollment();
-              assertIlinkAccountKey(accountKey);
-              const stored = enrollment.accounts.getAccountWithSecret(accountKey);
-              assertIlinkAccountRevision(stored ? operatorAccount(stored) : undefined, expected);
-              const account = enrollment.accounts.setRuntimeEnabled(accountKey, enabled);
-              if (ilinkRuntimeStarted) await ilinkListener?.refresh();
-              const runningCount = enrollment.accounts
-                .listRuntimeAccountsWithSecrets().length;
-              accountMutationEpoch += 1;
-              if (!enabled) scheduleRuntimeStop(enrollment, runningCount);
-              return {
-                account: operatorAccount({ account, secret: stored!.secret }),
-                runningCount,
-              };
-            });
-          },
-          deleteAccount(accountKey, expected) {
-            return runAccountMutation(async () => {
-              const enrollment = ensureIlinkEnrollment();
-              assertIlinkAccountKey(accountKey);
-              const stored = enrollment.accounts.getAccountWithSecret(accountKey);
-              assertIlinkAccountRevision(stored ? operatorAccount(stored) : undefined, expected);
-              const account = enrollment.accounts.deleteAccountCompletely(accountKey);
-              if (ilinkRuntimeStarted) await ilinkListener?.refresh();
-              const runningCount = enrollment.accounts
-                .listRuntimeAccountsWithSecrets().length;
-              accountMutationEpoch += 1;
-              scheduleRuntimeStop(enrollment, runningCount);
-              return {
-                account: operatorAccount({ account, secret: stored!.secret }),
-                runningCount,
-              };
-            });
-          },
-        }),
-        logger,
-      });
-      operatorMcpHost = activeOperatorHost;
-    }
-    if (!config.codex.enabled && !shared) {
-      await operatorMcpHost?.start();
-      logger.info('[runtime] Agent processing is disabled; iLink enrollment remains available');
-      let started: Promise<void> | undefined;
-      let closing: Promise<void> | undefined;
-      let accepting = true;
-      const close = (force = false): Promise<void> => {
-        closing ||= (async () => {
-          accepting = false;
-          toolsUnavailable = true;
-          await Promise.allSettled([
-            ilinkEnrollment?.manager.close(),
-            operatorMcpHost?.close(force),
-          ]);
-          if (cleanupTimer) clearInterval(cleanupTimer);
+    const activeOperatorHost = new McpIpcHost({
+      instanceKey: operatorMcpInstanceKey(config.state.lockFile),
+      stateDirectory: path.dirname(config.state.lockFile),
+      relayFile,
+      memory: () => new McpServer({
+        name: 'kintio-operator-isolation',
+        version: KINTIO_VERSION,
+      }),
+      operator: () => createIlinkLoginMcpServer({
+        ...(config.codex.enabled ? { restartAccounts: () => runAccountMutation(async () => { await ilinkListener?.restart(); }) } : {}),
+        wecomControl: (action, configFile) => changeWecom(action, configFile),
+        async begin(signal) {
+          if (toolsUnavailable) throw new Error('service unavailable');
+          terminalLoginBegins += 1;
           try {
-            activeStore.cleanup();
-            ilinkEnrollment?.offers.cleanup();
-            activeStore.checkpoint('TRUNCATE');
+            const offer = await (await startIlinkEnrollment()).manager.offer(
+              { kind: 'terminal' },
+              signal ? { signal } : {},
+            );
+            return offer;
           } finally {
-            try {
-              activePersistence.close();
-            } finally {
-              if (activePersistence.closed) instanceLock.release();
-            }
+            terminalLoginBegins -= 1;
           }
-        })();
-        return closing;
-      };
-      return {
-        messageProcessor: null,
-        start() {
-          if (!accepting) return Promise.reject(new Error('Kintio runtime is stopping'));
-          started ||= startIlinkEnrollment().then(() => undefined);
-          return started;
         },
-        stopAcceptingIfIdle() {
-          if (!accepting || terminalLoginActive() || activeAccountMutations > 0) return false;
-          accepting = false;
-          toolsUnavailable = true;
-          return true;
+        status(offerId) {
+          if (toolsUnavailable) throw new Error('service unavailable');
+          const result = ensureIlinkEnrollment().manager.status(offerId);
+          return result;
         },
-        stopAccepting() {
-          accepting = false;
-          toolsUnavailable = true;
+        cancel(offerId) {
+          return ilinkEnrollment?.manager.cancel(offerId) || false;
         },
-        close: () => close(),
-        abort: () => close(true),
-      };
-    }
+        listAccounts: () => ensureIlinkEnrollment().accounts
+          .listActiveAccountsWithSecrets()
+          .map(operatorAccount),
+        setAccountRuntime(accountKey, enabled, expected) {
+          return runAccountMutation(async () => {
+            const enrollment = ensureIlinkEnrollment();
+            assertIlinkAccountKey(accountKey);
+            const stored = enrollment.accounts.getAccountWithSecret(accountKey);
+            assertIlinkAccountRevision(stored ? operatorAccount(stored) : undefined, expected);
+            const account = enrollment.accounts.setRuntimeEnabled(accountKey, enabled);
+            if (ilinkRuntimeStarted) await ilinkListener?.refresh();
+            const runningCount = enrollment.accounts
+              .listRuntimeAccountsWithSecrets().length;
+            accountMutationEpoch += 1;
+            if (!enabled) scheduleRuntimeStop(enrollment, runningCount);
+            return {
+              account: operatorAccount({ account, secret: stored!.secret }),
+              runningCount,
+            };
+          });
+        },
+        deleteAccount(accountKey, expected) {
+          return runAccountMutation(async () => {
+            const enrollment = ensureIlinkEnrollment();
+            assertIlinkAccountKey(accountKey);
+            const stored = enrollment.accounts.getAccountWithSecret(accountKey);
+            assertIlinkAccountRevision(stored ? operatorAccount(stored) : undefined, expected);
+            const account = enrollment.accounts.deleteAccountCompletely(accountKey);
+            if (ilinkRuntimeStarted) await ilinkListener?.refresh();
+            const runningCount = enrollment.accounts
+              .listRuntimeAccountsWithSecrets().length;
+            accountMutationEpoch += 1;
+            scheduleRuntimeStop(enrollment, runningCount);
+            return {
+              account: operatorAccount({ account, secret: stored!.secret }),
+              runningCount,
+            };
+          });
+        },
+      }),
+      logger,
+    });
+    operatorMcpHost = activeOperatorHost;
     const channelDispatcher = {
       async kick(channel?: 'wechat_kf' | 'weixin_ilink'): Promise<void> {
         if (channel === 'wechat_kf') return wechatTools?.kick();
@@ -381,7 +284,7 @@ export async function createRuntime({
         await wechatTools?.kick();
       },
       async notifyQueued(record: { readonly channel: string; readonly messageKey: string }) {
-        if (record.channel === 'weixin_ilink' && ilinkTools) {
+        if (record.channel === 'weixin_ilink') {
           await ilinkTools.notifyQueued(record.messageKey);
         }
       },
@@ -391,14 +294,12 @@ export async function createRuntime({
       instanceKey: config.state.lockFile,
       stateDirectory: path.dirname(config.state.lockFile),
       relayFile,
-      ...(wechatTools || shared ? {
-        wechatKf: () => createWechatKfMcpServer({
-          execute(name, input) {
-            if (toolsUnavailable || !wechatTools) throw new Error('WeCom is stopped');
-            return wechatTools.execute(name, input);
-          },
-        }),
-      } : {}),
+      wechatKf: () => createWechatKfMcpServer({
+        execute(name, input) {
+          if (toolsUnavailable || !wechatTools) throw new Error('WeCom is stopped');
+          return wechatTools.execute(name, input);
+        },
+      }),
       memory: () => createConversationMemoryMcpServer({
         read(session) {
           if (toolsUnavailable || !conversationMemory) {
@@ -407,30 +308,24 @@ export async function createRuntime({
           return conversationMemory.read(session);
         },
       }),
-      ...(ilinkTools ? {
-        ilink: () => createIlinkMcpServer({
-          execute(name, input) {
-            if (toolsUnavailable) throw new Error('service unavailable');
-            return ilinkTools.execute(name, input);
-          },
-        }),
-      } : {}),
+      ilink: () => createIlinkMcpServer({
+        execute(name, input) {
+          if (toolsUnavailable) throw new Error('service unavailable');
+          return ilinkTools.execute(name, input);
+        },
+      }),
       logger,
     });
     mcpHost = activeMcpHost;
     const mcpLaunches = await activeMcpHost.start();
     // A singleton can be enabled later with the maximum supported API/observe timeouts.
-    const mcpToolTimeoutSec = shared ? 505 : Math.ceil((
-      (wecom?.api.timeoutMs || 10_000) * 4 +
-      (wecom?.api.observeMs || 5_000) +
-      5_000
-    ) / 1_000);
-    const ilinkMcpToolTimeoutSec = ilink ? Math.ceil((
+    const mcpToolTimeoutSec = 505;
+    const ilinkMcpToolTimeoutSec = Math.ceil((
       DEFAULT_ILINK_IMAGE_TIMEOUT_MS +
       DEFAULT_ILINK_MEDIA_TIMEOUT_MS +
       ilink.apiTimeoutMs +
       5_000
-    ) / 1_000) : 0;
+    ) / 1_000);
     const codex = createCodexAppServer({
       logger,
       mcpLaunches,
@@ -459,7 +354,7 @@ export async function createRuntime({
       agent: codexAgent,
       mediaGateway: {
         resolveForCodex(message) {
-          if (message.conversation.channel === 'weixin_ilink' && ilinkMedia) {
+          if (message.conversation.channel === 'weixin_ilink') {
             return ilinkMedia.resolveForCodex(message);
           }
           return mediaGateway?.resolveForCodex(message) || Promise.resolve([]);
@@ -469,7 +364,7 @@ export async function createRuntime({
         if (identity.channel !== 'weixin_ilink') return 'restricted';
         try {
           assertIlinkAccountKey(identity.accountKey);
-          return ilinkStore?.getAccount(identity.accountKey)?.agentAccess === 'host'
+          return ilinkStore.getAccount(identity.accountKey)?.agentAccess === 'host'
             ? 'host'
             : 'restricted';
         } catch {
@@ -477,24 +372,12 @@ export async function createRuntime({
         }
       },
       channel: channelDispatcher,
-      allowedUserIds: wecom?.allowedUserIds || [],
-      ...(wecom ? { authorization: wecom.authorization } : {}),
+      allowedUserIds: [],
       logger,
     });
     let requestDeferredDrain = (): void => {};
-    let sync = apiClient
-      ? new WecomSync({
-          apiClient,
-          store,
-          processor,
-          logger,
-          startPaused: true,
-          onDeferredReady() {
-            queueMicrotask(requestDeferredDrain);
-          },
-        })
-      : undefined;
-    if (shared) processor.setChannelEnabled('wechat_kf', false);
+    let sync: WecomSync | undefined;
+    processor.setChannelEnabled('wechat_kf', false);
 
     async function closeWecom(): Promise<void> {
       const server = wecomServer;
@@ -521,9 +404,9 @@ export async function createRuntime({
     function changeWecom(action: 'start' | 'stop' | 'restart' | 'status', configFile?: string): Promise<{ running: boolean }> {
       if (action === 'status') return Promise.resolve({ running: Boolean(wecomServer?.listening) });
       const operation = (wecomChange?.catch(() => undefined) || Promise.resolve()).then(async () => {
-        if (!shared || toolsUnavailable) throw new Error('Kintio runtime is stopping');
+        if (toolsUnavailable) throw new Error('Kintio runtime is stopping');
         const stored = store.getWecomRuntime();
-        const file = configFile || stored.configFile || path.join(shared.home, 'wecom/.env');
+        const file = configFile || stored.configFile || path.join(config.home, 'wecom/.env');
         if (action === 'stop' || action === 'restart') {
           store.setWecomRuntime(false, stored.configFile || file);
           await closeWecom();
@@ -534,7 +417,7 @@ export async function createRuntime({
           return { running: true };
         }
         if (!fs.existsSync(file)) throw new Error('WeCom config is missing; run "kintio wecom setup" first');
-        const settings = loadConfig({ root: shared.home, envFile: file, environment: { ...process.env, KINTIO_DB_FILE: config.state.databaseFile } });
+        const settings = loadConfig({ root: config.home, envFile: file, environment: { ...process.env, KINTIO_DB_FILE: config.state.databaseFile } });
         installManagedSkill({ packageRoot: KINTIO_PACKAGE_ROOT, workingDirectory: settings.codex.workingDirectory });
         if (!samePath(settings.codex.imageTempDirectory, config.codex.imageTempDirectory)) {
           cleanupStagedImageOrphans(settings.codex.imageTempDirectory);
@@ -582,7 +465,7 @@ export async function createRuntime({
       wecomChange = tracked;
       return tracked;
     }
-    ilinkListener = config.codex.enabled && ilink && ilinkStore && ilinkSecretBox
+    ilinkListener = config.codex.enabled
       ? new IlinkListenerManager({
           logger,
           host: {
@@ -715,27 +598,24 @@ export async function createRuntime({
       });
     };
     const runtime = {
-      get messageProcessor() { return sync || null; },
-      ...(shared ? { wecomControl: changeWecom } : {}),
+      wecomControl: changeWecom,
       start(): Promise<void> {
         if (!accepting) return Promise.reject(new Error('Kintio runtime is stopping'));
         starting ||= (async () => {
-          const catchUp = sync?.catchUp() || Promise.resolve();
           const recovery = processor.recover(
             startupInbound.filter((record) => enabledChannels().includes(record.channel)),
             { priority: 'low' },
           );
-          sync?.startConsuming();
           await ilinkListener?.start();
           ilinkRuntimeStarted = true;
-          if (ilink) await startIlinkEnrollment();
-          if (shared && store.getWecomRuntime().enabled) {
+          await startIlinkEnrollment();
+          if (store.getWecomRuntime().enabled) {
             await changeWecom('start').catch(() => {
               logger.error('[wecom] listener could not be restored; run "kintio wecom start" to inspect its configuration or callback port');
             });
           }
           startupRecoveryActive = true;
-          startupRecovery = Promise.all([catchUp, recovery])
+          startupRecovery = recovery
             .then(async () => {
               await channelDispatcher.kick();
               if (!ilinkListener) requestDeferredDrain();
@@ -758,7 +638,7 @@ export async function createRuntime({
           deferredDrain !== undefined || !processor.isIdle() ||
           terminalLoginActive() ||
           activeAccountMutations > 0 || wecomChange || wecomRecovery ||
-          Boolean(ilinkTools && !ilinkTools.isIdle()) ||
+          !ilinkTools.isIdle() ||
           Boolean(wechatTools && !wechatTools.isIdle())
         ) return false;
         runtime.stopAccepting();
@@ -785,14 +665,13 @@ export async function createRuntime({
             await startupRecovery?.catch(() => undefined);
             await deferredDrain?.catch(() => undefined);
             await wecomChange?.catch(() => undefined);
-            if (shared) await closeWecom();
-            await sync?.close();
+            await closeWecom();
             await ilinkClosing;
             await processor.close();
           } finally {
             toolsUnavailable = true;
             await Promise.allSettled([
-              ilinkTools?.waitForIdle(),
+              ilinkTools.waitForIdle(),
               wechatTools?.close(),
             ]);
             try {

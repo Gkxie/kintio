@@ -4,6 +4,12 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Recheck current authorization and reply-window validity before recovery can
+  use the Agent, retire superseded iLink work, and prevent prepared thread
+  caches from reusing an archived or deleted thread. Backlog preparation and
+  history inspection now follow the same live-message priority as model turns
+  ([#100](https://github.com/Gkxie/kintio/issues/100)).
+
 - **Breaking:** move callback-channel commands under `kintio wecom` and remove
   ungrouped startup. WeCom configuration lives in `~/.kintio/wecom`; iLink keeps
   `~/.kintio`. A shared worker owns SQLite, recovery, and the global scheduler;

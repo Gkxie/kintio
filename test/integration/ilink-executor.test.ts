@@ -373,22 +373,22 @@ it('rejects the eleventh image before media or provider HTTP', async (t) => {
 });
 
 it('expires exactly 24 hours after the inbound message, including after cleanup', async (t) => {
-  const created = await fixture(t, ILINK_REPLY_WINDOW_LIFETIME_MS);
-  created.store.cleanup();
-  assert.equal(
-    created.ilinkStore.getReplyWindow(created.session.replyWindowId)?.state,
-    'open',
-  );
-  assert.equal(
-    created.ilinkStore.getReplyWindowSecret(created.session.replyWindowId),
-    undefined,
-  );
+  const created = await fixture(t, ILINK_REPLY_WINDOW_LIFETIME_MS - 1);
   const [media] = created.store.rememberInboundMedia({
     messageKey: created.messageKey,
     attachments: [{ kind: 'image', mediaId: 'ilink:0', filename: 'source.jpg' }],
   });
   assert.ok(media);
   const session = created.store.createAgentSession({ messageKey: created.messageKey });
+  created.advance(1);
+  created.store.cleanup();
+  assert.equal(created.ilinkStore.getReplyWindow(session.replyWindowId)?.state, 'open');
+  assert.equal(created.ilinkStore.getReplyWindowSecret(session.replyWindowId), undefined);
+  assert.equal(created.store.getAgentSessionBoundary(created.messageKey), undefined);
+  assert.throws(
+    () => created.store.createAgentSession({ messageKey: created.messageKey }),
+    /Reply boundary is no longer available/u,
+  );
   let clients = 0;
   let resolved = 0;
   let uploaded = 0;

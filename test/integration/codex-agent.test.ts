@@ -321,6 +321,58 @@ test('archived thread starts fresh with memory binding while deleted thread star
   assert.deepEqual(calls, { starts: 2, resumes: [active] });
 });
 
+for (const state of ['archived', 'missing'] as const) {
+  test(`a prepared thread cannot override its ${state} state`, async (t) => {
+    let current: 'active' | 'archived' | 'missing' = 'active';
+    const resumed: string[] = [];
+    let starts = 0;
+    const thread = (id: string): CodexThread => ({
+      id: null,
+      async ensure() { return id; },
+      async startRun() { throw new Error('not expected'); },
+      async steer() { throw new Error('not expected'); },
+    });
+    const agent = createAgent(t, {
+      startThread() { starts += 1; return thread(`new-thread-${starts}`); },
+      resumeThread(id) { resumed.push(id); return thread(id); },
+      async getThreadState() { return current; },
+      async readThread() { return {}; },
+      async close() {},
+    });
+    assert.equal(await agent.ensureThread('conversation', 'old-thread'), 'old-thread');
+    assert.equal(await agent.ensureThread('conversation', 'old-thread'), 'old-thread');
+    assert.deepEqual(resumed, ['old-thread']);
+
+    current = state;
+    assert.equal(await agent.ensureThread('conversation', 'old-thread'), 'new-thread-1');
+    assert.equal(starts, 1);
+    assert.deepEqual(resumed, ['old-thread']);
+    assert.equal(agent.takePendingMemoryThread('conversation'), state === 'archived' ? 'old-thread' : '');
+  });
+}
+
+test('a prepared thread cannot override a changed conversation binding', async (t) => {
+  const resumed: string[] = [];
+  const agent = createAgent(t, {
+    startThread() { throw new Error('not expected'); },
+    resumeThread(id) {
+      resumed.push(id);
+      return {
+        id: null,
+        async ensure() { return id; },
+        async startRun() { throw new Error('not expected'); },
+        async steer() { throw new Error('not expected'); },
+      };
+    },
+    async getThreadState() { return 'active'; },
+    async readThread() { return {}; },
+    async close() {},
+  });
+  await agent.ensureThread('conversation', 'old-thread');
+  assert.equal(await agent.ensureThread('conversation', 'other-thread'), 'other-thread');
+  assert.deepEqual(resumed, ['old-thread', 'other-thread']);
+});
+
 test('keeps only executed MCP attempts after the last steering boundary', () => {
   assert.deepEqual(executedAttemptIds({
     lastSteerSequence: 10,
