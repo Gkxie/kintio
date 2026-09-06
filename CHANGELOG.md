@@ -4,6 +4,9 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Restart the supervised worker after a fatal Agent process or protocol failure
+  instead of leaving chat listeners attached to a permanently closed executor.
+
 - Recheck current authorization and reply-window validity before recovery can
   use the Agent, retire superseded iLink work, and prevent prepared thread
   caches from reusing an archived or deleted thread. Backlog preparation and

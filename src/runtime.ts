@@ -49,6 +49,7 @@ import type { ChatChannel, Logger } from './types.ts';
 import { KINTIO_VERSION } from './version.ts';
 
 export interface Runtime {
+  readonly failure: Promise<Error>;
   start(): Promise<void>;
   stopAcceptingIfIdle(): boolean;
   stopAccepting(): void;
@@ -598,6 +599,10 @@ export async function createRuntime({
       });
     };
     const runtime = {
+      failure: Promise.race([codex.failure, trustedCodex.failure]).then((error) => {
+        runtime.stopAccepting();
+        return error;
+      }),
       wecomControl: changeWecom,
       start(): Promise<void> {
         if (!accepting) return Promise.reject(new Error('Kintio runtime is stopping'));

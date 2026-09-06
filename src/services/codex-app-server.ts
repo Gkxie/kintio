@@ -87,7 +87,7 @@ interface ProcessLike {
   readonly stdout: Readable;
   readonly stderr?: Readable;
   readonly exitCode: number | null;
-  once(event: 'error', listener: (error: Error) => void): this;
+  on(event: 'error', listener: (error: Error) => void): this;
   once(
     event: 'exit',
     listener: (code: number | null, signal: NodeJS.Signals | null) => void,
@@ -180,6 +180,8 @@ function normalizeInput(input: CodexInput): JsonRecord[] {
 const defaultSpawn = crossSpawn as unknown as SpawnProcess;
 
 export class CodexAppServer implements CodexBoundary {
+  readonly #failure = deferred<Error>();
+  readonly failure = this.#failure.promise;
   readonly #options: ResolvedOptions;
   #process: ProcessLike | null = null;
   #reader: readline.Interface | null = null;
@@ -251,7 +253,11 @@ export class CodexAppServer implements CodexBoundary {
   }
 
   initialize(): Promise<void> {
-    this.#initializing ||= this.#initialize();
+    if (this.#closed) return Promise.reject(new Error('Codex app-server is closed'));
+    this.#initializing ||= this.#initialize().catch((error: unknown) => {
+      this.#fail(new Error('Codex app-server initialization failed', { cause: error }));
+      throw error;
+    });
     return this.#initializing;
   }
 
@@ -265,7 +271,7 @@ export class CodexAppServer implements CodexBoundary {
       windowsHide: true,
     });
     this.#process = child;
-    child.once('error', (error) => {
+    child.on('error', (error) => {
       this.#fail(new Error(
         `Codex app-server process error: ${error.message}`,
         { cause: error },
@@ -278,8 +284,11 @@ export class CodexAppServer implements CodexBoundary {
       this.#fail(new Error(`Codex app-server exited with ${detail}`));
     });
     child.stderr?.resume();
+    child.stdin.on('error', () => this.#fail(new Error('Codex app-server input failed')));
     this.#reader = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
     this.#reader.on('line', (line) => this.#handleLine(line));
+    this.#reader.on('error', () => this.#fail(new Error('Codex app-server output failed')));
+    this.#reader.on('close', () => this.#fail(new Error('Codex app-server output closed')));
     await this.request('initialize', {
       clientInfo: {
         name: 'kintio_codex',
@@ -388,6 +397,9 @@ export class CodexAppServer implements CodexBoundary {
       itemStarts: new Map(),
       waiter: deferred<CodexTurnResult>(),
     };
+    // Notifications can precede the turn/start response, so no caller may be
+    // waiting yet when a fatal transport error rejects this owned promise.
+    void created.waiter.promise.catch(() => undefined);
     this.#turns.set(turnId, created);
     return created;
   }
@@ -466,7 +478,9 @@ export class CodexAppServer implements CodexBoundary {
   }
 
   #fail(error: Error): void {
+    if (this.#closed) return;
     void this.#shutdown(error);
+    this.#failure.resolve(error);
   }
 
   #shutdown(error: Error): Promise<void> {

@@ -14,6 +14,56 @@ function config() {
   });
 }
 
+for (const phase of ['starting', 'running'] as const) {
+  test(`fatal Agent failure while ${phase} closes the worker without an intentional-stop notice`, async () => {
+    const events: string[] = [];
+    const fatal = new Error('synthetic fatal Agent failure');
+    let fail!: (error: Error) => void;
+    const failure = new Promise<Error>((resolve) => { fail = resolve; });
+    let finishStartup: (() => void) | undefined;
+    const controller = new AbortController();
+    const running = runWorker({
+      config: config(),
+      signal: controller.signal,
+      stdout() {},
+      onStopRequested() { events.push('intentional-stop'); },
+      onStarted() { events.push('ready'); },
+      create: async () => ({
+        failure,
+        wecomControl: async () => ({ running: false }),
+        async start() {
+          events.push('start');
+          if (phase === 'starting') {
+            fail(fatal);
+            return new Promise<void>((resolve) => { finishStartup = resolve; });
+          }
+        },
+        stopAcceptingIfIdle() { return true; },
+        stopAccepting() { events.push('stop'); },
+        async close() { events.push('close'); },
+        async abort() { events.push('abort'); },
+      }),
+    });
+    // Resolve the signal on the old implementation so the red test fails
+    // promptly instead of waiting indefinitely for its missing failure race.
+    const cleanup = setTimeout(() => { controller.abort(); finishStartup?.(); }, 100);
+    try {
+      if (phase === 'running') {
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        fail(fatal);
+      }
+      await assert.rejects(running, (error) => error === fatal);
+      assert.deepEqual(events, phase === 'starting'
+        ? ['start', 'stop', 'close']
+        : ['start', 'ready', 'stop', 'close']);
+    } finally {
+      clearTimeout(cleanup);
+      controller.abort();
+      finishStartup?.();
+    }
+  });
+}
+
 test('iLink start runs and drains a foreground runtime without Hono', async () => {
   const events: string[] = [];
   const output: string[] = [];
@@ -25,6 +75,7 @@ test('iLink start runs and drains a foreground runtime without Hono', async () =
     create: async ({ config: runtimeConfig }) => {
       assert.equal('wecom' in runtimeConfig, false);
       return {
+        failure: new Promise<never>(() => {}),
         async wecomControl() { return { running: false }; },
         async start() { events.push('start'); },
         stopAcceptingIfIdle() { return true; },
@@ -52,6 +103,7 @@ test('background worker publishes readiness without terminal instructions', asyn
     stdout: (text) => output.push(text),
     onStarted() { started = true; },
     create: async () => ({
+      failure: new Promise<never>(() => {}),
       async wecomControl() { return { running: false }; },
       async start() {},
       stopAcceptingIfIdle() { return true; },
@@ -81,6 +133,7 @@ test('iLink worker control exposes the Runtime atomic idle gate', async () => {
       stopIfIdle = control.stopIfIdleForUpdate;
     },
     create: async () => ({
+      failure: new Promise<never>(() => {}),
       async wecomControl() { return { running: false }; },
       async start() {},
       stopAcceptingIfIdle() {
@@ -114,6 +167,7 @@ test('stopping the last account notifies its owner before closing the runtime', 
     create: async ({ onStopRequested }) => {
       requestStop = onStopRequested;
       return {
+        failure: new Promise<never>(() => {}),
         async wecomControl() { return { running: false }; },
         async start() { events.push('start'); },
         stopAcceptingIfIdle() { return true; },
@@ -137,6 +191,7 @@ test('iLink start closes a runtime whose startup fails', async () => {
     signal: new AbortController().signal,
     stdout() {},
     create: async () => ({
+      failure: new Promise<never>(() => {}),
       async wecomControl() { return { running: false }; },
       async start() {
         events.push('start');
@@ -179,6 +234,7 @@ test('iLink start force-aborts after its bounded graceful shutdown', async () =>
     signal: controller.signal,
     stdout() {},
     create: async () => ({
+      failure: new Promise<never>(() => {}),
       async wecomControl() { return { running: false }; },
       async start() { events.push('start'); },
       stopAcceptingIfIdle() { return true; },
