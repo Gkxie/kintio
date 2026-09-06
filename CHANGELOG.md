@@ -4,6 +4,8 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+## 0.9.0
+
 - Added explicit, one-use command/file approval handling for trusted iLink
   conversations through `/kintio approval CODE OPTION`, with expiring prompts,
   identity checks, and reply-window refresh. Cancelling an approval does not
