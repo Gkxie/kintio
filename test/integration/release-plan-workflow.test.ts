@@ -40,14 +40,18 @@ function releaseWorkflow(github: ReturnType<typeof releaseEvent>) {
   const events = /^    types: \[([^\]]+)\]$/mu.exec(workflow)?.[1]?.split(', ');
   const condition = /^    if: >-\n([\s\S]+?)(?=^    runs-on:)/mu.exec(workflow)?.[1];
   const group = /^  group: (.+)$/mu.exec(workflow)?.[1];
+  const command = /reconcile-release\.ts (verify(?:-source)?)$/mu.exec(workflow)?.[1];
   assert.ok(events && condition && group, 'Release workflow must declare its event gate and concurrency');
+  assert.ok(command === 'verify' || command === 'verify-source');
   // The checked-in gate uses only property reads, boolean/equality operators,
   // and literals, which have the same semantics here as in Actions expressions.
   const evaluate = (expression: string) => runInNewContext(expression, { github }) as unknown;
   return {
+    triggered: events.includes(github.event.action),
     eligible: events.includes(github.event.action) && Boolean(evaluate(condition)),
     group: group.replace(/\$\{\{(.+?)\}\}/gu, (_match, expression: string) => String(evaluate(expression))),
-  };
+    command,
+  } as const;
 }
 
 type CommandResult = {
@@ -130,11 +134,13 @@ function verify(
   repository: string,
   baseSha: string,
   title = 'chore(release): prepare v0.7.0',
+  command: 'verify' | 'verify-source' = 'verify',
+  environment: NodeJS.ProcessEnv = {},
 ): CommandResult {
   return run(
     repository,
     process.execPath,
-    ['--experimental-strip-types', validator, 'verify'],
+    ['--experimental-strip-types', validator, command],
     {
       ...process.env,
       BASE_SHA: baseSha,
@@ -144,6 +150,7 @@ function verify(
       PR_AUTHOR: 'kintio-release[bot]',
       PR_TITLE: title,
       RELEASE_BOT_LOGIN: 'kintio-release[bot]',
+      ...environment,
     },
   );
 }
@@ -179,13 +186,13 @@ describe('Release plan check', () => {
     assert.equal(git(repository, 'status', '--porcelain'), '');
   });
 
-  test('accepts the exact deterministic three-file candidate', () => {
+  test.each(['verify', 'verify-source'] as const)('%s accepts the exact deterministic three-file candidate', (command) => {
     const { baseSha, repository } = fixture();
-    const result = verify(repository, baseSha);
+    const result = verify(repository, baseSha, undefined, command);
     assert.equal(result.status, 0, result.stderr || result.stdout);
   });
 
-  test('rejects a candidate that changes package behavior with the version', () => {
+  test.each(['verify', 'verify-source'] as const)('%s rejects a candidate that changes package behavior with the version', (command) => {
     const { baseSha, candidate, repository } = fixture();
     const packageJson = JSON.parse(candidate.packageSource) as Record<string, unknown>;
     packageJson.scripts = { preinstall: 'node unexpected.js' };
@@ -193,18 +200,18 @@ describe('Release plan check', () => {
     git(repository, 'add', 'package.json');
     git(repository, 'commit', '--amend', '--no-edit');
 
-    const result = verify(repository, baseSha);
+    const result = verify(repository, baseSha, undefined, command);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /package\.json differs from the deterministic Release plan/u);
   });
 
-  test('rejects a generated commit that carries any fourth file', () => {
+  test.each(['verify', 'verify-source'] as const)('%s rejects a generated commit that carries any fourth file', (command) => {
     const { baseSha, repository } = fixture();
     write(repository, 'unexpected.txt', 'not part of a Release PR\n');
     git(repository, 'add', 'unexpected.txt');
     git(repository, 'commit', '--amend', '--no-edit');
 
-    const result = verify(repository, baseSha);
+    const result = verify(repository, baseSha, undefined, command);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /changed files outside the deterministic plan/u);
   });
@@ -212,31 +219,48 @@ describe('Release plan check', () => {
 });
 
 describe('Release Codex event eligibility', () => {
-  test('revalidates a corrected title on the same candidate instead of requiring another commit', () => {
+  test('source validation does not depend on title update order; Release plan still requires the corrected title', () => {
     const { baseSha, repository } = fixture();
     const headSha = git(repository, 'rev-parse', 'HEAD');
     const synchronized = releaseEvent('synchronize', 'chore(release): prepare v0.6.2');
     assert.equal(releaseWorkflow(synchronized).eligible, true);
     assert.notEqual(verify(repository, baseSha, synchronized.event.pull_request.title).status, 0);
+    const source = verify(repository, baseSha, synchronized.event.pull_request.title, releaseWorkflow(synchronized).command);
+    assert.equal(source.status, 0, source.stderr || source.stdout);
 
     const corrected = releaseEvent('edited');
     corrected.run_id = 2;
     corrected.event.changes.title = { from: synchronized.event.pull_request.title };
-    assert.equal(releaseWorkflow(corrected).eligible, true);
-    assert.equal(releaseWorkflow(corrected).group, releaseWorkflow(synchronized).group);
+    assert.equal(releaseWorkflow(corrected).triggered, false);
     const result = verify(repository, baseSha, corrected.event.pull_request.title);
     assert.equal(result.status, 0, result.stderr || result.stdout);
     assert.equal(git(repository, 'rev-parse', 'HEAD'), headSha);
     assert.equal(git(repository, 'status', '--porcelain'), '');
   });
 
-  test('body-only edits neither request another approval nor cancel the candidate awaiting approval', () => {
-    const candidate = releaseEvent('synchronize');
-    const bodyEdit = releaseEvent('edited');
-    bodyEdit.run_id = 2;
-    bodyEdit.event.changes.body = { from: 'Previous Release notes' };
-    assert.equal(releaseWorkflow(bodyEdit).eligible, false);
-    assert.notEqual(releaseWorkflow(bodyEdit).group, releaseWorkflow(candidate).group);
+  test('a force push followed by body and title edits creates only one Codex workflow, not skipped duplicate checks', () => {
+    const synchronized = releaseEvent('synchronize');
+    const metadataEdits = ['body', 'title'].map((field, index) => {
+      const event = releaseEvent('edited');
+      event.run_id = index + 2;
+      event.event.changes[field] = { from: 'Previous metadata' };
+      return event;
+    });
+    const runs = [synchronized, ...metadataEdits].filter((event) => releaseWorkflow(event).triggered);
+    assert.deepEqual(runs, [synchronized]);
+    assert.equal(releaseWorkflow(runs[0]!).eligible, true);
+  });
+
+  test.each(['opened', 'synchronize', 'reopened', 'ready_for_review'])('%s automatically validates the trusted candidate', (action) => {
+    assert.equal(releaseWorkflow(releaseEvent(action)).eligible, true);
+  });
+
+  test('new source updates replace the preceding candidate approval, regardless of metadata', () => {
+    const previous = releaseEvent('synchronize');
+    const next = releaseEvent('synchronize', 'chore(release): prepare v0.8.0');
+    next.run_id = 2;
+    assert.equal(releaseWorkflow(next).eligible, true);
+    assert.equal(releaseWorkflow(next).group, releaseWorkflow(previous).group);
   });
 
   test.each([
@@ -248,26 +272,34 @@ describe('Release Codex event eligibility', () => {
     ['untrusted actor', (event: ReturnType<typeof releaseEvent>) => { event.actor = 'other'; }],
     ['different triggering actor', (event: ReturnType<typeof releaseEvent>) => { event.triggering_actor = 'Gkxie'; }],
     ['rerun', (event: ReturnType<typeof releaseEvent>) => { event.run_attempt = 2; }],
-  ])('title edits remain ineligible for %s', (_reason, mutate) => {
-    const corrected = releaseEvent('edited');
-    corrected.event.changes.title = { from: 'Old title' };
-    mutate(corrected);
-    assert.equal(releaseWorkflow(corrected).eligible, false);
+  ])('source updates remain ineligible for %s', (_reason, mutate) => {
+    const event = releaseEvent('synchronize');
+    mutate(event);
+    assert.equal(releaseWorkflow(event).eligible, false);
   });
 
-  test('allows the owner to correct metadata, but still rejects a candidate based on stale master', () => {
+  test.each(['verify', 'verify-source'] as const)('%s rejects a candidate based on stale master even for an owner-triggered update', (command) => {
     const { baseSha, repository } = fixture();
-    const corrected = releaseEvent('edited');
-    corrected.actor = 'Gkxie';
-    corrected.triggering_actor = 'Gkxie';
-    corrected.event.changes.title = { from: 'Old title' };
-    assert.equal(releaseWorkflow(corrected).eligible, true);
+    const event = releaseEvent('synchronize');
+    event.actor = 'Gkxie';
+    event.triggering_actor = 'Gkxie';
+    assert.equal(releaseWorkflow(event).eligible, true);
     git(repository, 'checkout', '-b', 'updated-master', baseSha);
     git(repository, 'commit', '--allow-empty', '-m', 'docs: update master');
     const updatedBase = git(repository, 'rev-parse', 'HEAD');
     git(repository, 'checkout', 'master');
-    const result = verify(repository, updatedBase, corrected.event.pull_request.title);
+    const result = verify(repository, updatedBase, event.event.pull_request.title, command);
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /must directly follow current master/u);
+  });
+
+  test.each([
+    { PR_AUTHOR: 'other' },
+    { HEAD_REPOSITORY: 'elsewhere/kintio' },
+    { RELEASE_BOT_LOGIN: 'other' },
+    { HEAD_REF: 'feature/other' },
+  ])('source-only verification rejects an untrusted candidate identity: %j', (environment) => {
+    const { baseSha, repository } = fixture();
+    assert.notEqual(verify(repository, baseSha, undefined, 'verify-source', environment).status, 0);
   });
 });

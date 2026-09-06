@@ -244,8 +244,9 @@ function readAt(ref: string, file: string): string {
   return git(['show', `${ref}:${file}`], false);
 }
 
-async function verifyCandidate(): Promise<void> {
+async function verifyCandidate(sourceOnly = false): Promise<void> {
   if (process.env.HEAD_REF !== RELEASE_BRANCH) {
+    if (sourceOnly) throw new Error('source validation requires the release/next branch');
     console.log('Ordinary pull request; no Release plan to validate.');
     return;
   }
@@ -282,7 +283,7 @@ async function verifyCandidate(): Promise<void> {
     subjects,
   });
   const expectedTitle = `chore(release): prepare v${expected.version}`;
-  if (process.env.PR_TITLE !== expectedTitle) {
+  if (!sourceOnly && process.env.PR_TITLE !== expectedTitle) {
     throw new Error(`Release PR title must be ${expectedTitle}`);
   }
   const expectedFiles = new Map<string, string>([
@@ -315,11 +316,11 @@ async function main(): Promise<void> {
     await prepareCandidate(file);
     return;
   }
-  if (command === 'verify' && !file) {
-    await verifyCandidate();
+  if ((command === 'verify' || command === 'verify-source') && !file) {
+    await verifyCandidate(command === 'verify-source');
     return;
   }
-  throw new Error('Usage: reconcile-release.ts <prepare BODY_FILE|verify>');
+  throw new Error('Usage: reconcile-release.ts <prepare BODY_FILE|verify|verify-source>');
 }
 
 await main();
