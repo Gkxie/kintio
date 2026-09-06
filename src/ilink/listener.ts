@@ -214,6 +214,20 @@ export class IlinkListenerManager {
     return refresh;
   }
 
+  restart(): Promise<void> {
+    if (!this.#started || this.#closed) return Promise.reject(new Error('iLink listeners are not running'));
+    const restarting = this.#refreshTail.then(async () => {
+      const active = [...this.#listeners.values()];
+      this.#listeners.clear();
+      for (const running of active) running.state.controller.abort();
+      await Promise.allSettled(active.map((running) => running.task));
+      this.#backlogReadyNotified = false;
+      await this.#reconcile();
+    });
+    this.#refreshTail = restarting.catch(() => undefined);
+    return restarting;
+  }
+
   async #reconcile(): Promise<void> {
     if (this.#closed) return;
     const desired = new Map<IlinkAccountKey, IlinkListenerRuntimeAccount>();

@@ -3,8 +3,12 @@ import { test } from 'vitest';
 
 import {
   IlinkStoreContractError,
+  assertIlinkAccountRevision,
   assertIlinkEncryptedSecret,
+  createIlinkAccountIncarnation,
   createIlinkAccountKey,
+  type IlinkAccountRecord,
+  type IlinkAccountSecretRecord,
   type IlinkEncryptedSecret,
 } from '../../src/ilink/store-types.ts';
 
@@ -46,4 +50,50 @@ test('encrypted Bot and context-token records enforce AES-GCM shape', () => {
       (error: unknown) => contractCode(error, 'invalid_secret'),
     );
   }
+});
+
+test('account incarnation fences rotation and same-key re-enrollment ABA', () => {
+  const accountKey = createIlinkAccountKey('bot@im.bot');
+  const account: IlinkAccountRecord = {
+    accountKey,
+    channel: 'weixin_ilink',
+    providerAccountId: 'bot@im.bot',
+    ownerPeerId: 'owner@im.wechat',
+    baseUrl: 'https://ilinkai.weixin.qq.com/',
+    generation: 1,
+    status: 'active',
+    agentAccess: 'host',
+    runtimeEnabled: false,
+    pauseUntil: 0,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const secret: IlinkAccountSecretRecord = {
+    accountKey,
+    ownerPeerId: account.ownerPeerId,
+    accountGeneration: 1,
+    sealedBotToken: encryptedSecret,
+    updatedAt: 1,
+  };
+  const first = {
+    generation: 1,
+    incarnation: createIlinkAccountIncarnation(account, secret),
+  };
+  const reenrolled = createIlinkAccountIncarnation(account, {
+    ...secret,
+    sealedBotToken: {
+      ...encryptedSecret,
+      nonce: Buffer.alloc(12, 9).toString('base64url'),
+    },
+  });
+  assert.notEqual(reenrolled, first.incarnation);
+  assert.doesNotThrow(() => assertIlinkAccountRevision(first, first));
+  assert.throws(
+    () => assertIlinkAccountRevision({ ...first, incarnation: reenrolled }, first),
+    (error: unknown) => contractCode(error, 'account_revision_changed'),
+  );
+  assert.throws(
+    () => createIlinkAccountIncarnation(account, { ...secret, accountGeneration: 2 }),
+    (error: unknown) => contractCode(error, 'generation_conflict'),
+  );
 });

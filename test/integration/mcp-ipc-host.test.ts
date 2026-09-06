@@ -239,7 +239,7 @@ test('one IPC listener routes three Agent MCP clients independently', async (t) 
       route: 'wechat_kf',
       launch: launches.wechatKf,
       tools: [
-        'offer_weixin_bot_channel', 'send_text', 'send_image',
+        'send_text', 'send_image',
         'send_link', 'send_miniprogram', 'send_location',
       ],
       call: { name: 'send_text', arguments: { session: `ws_${'a'.repeat(32)}`, content: 'hi' } },

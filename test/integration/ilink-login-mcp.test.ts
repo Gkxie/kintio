@@ -81,10 +81,13 @@ test('aborting begin_login cancels an offer created after the caller disconnects
 
 test('private operator MCP exposes account list, start, stop, and delete results', async (t) => {
   const accountKey = `ia_${'a'.repeat(40)}`;
+  const incarnation = `ii_${'a'.repeat(64)}` as const;
   let runtimeEnabled = false;
   let deleted = false;
   const account = () => ({
     accountKey,
+    generation: 1,
+    incarnation,
     providerAccountId: 'operator-bot@im.bot',
     runtimeEnabled,
   });
@@ -93,13 +96,15 @@ test('private operator MCP exposes account list, start, stop, and delete results
     status() { return { status: 'unknown' }; },
     cancel() { return false; },
     listAccounts() { return deleted ? [] : [account()]; },
-    async setAccountRuntime(received, enabled) {
+    async setAccountRuntime(received, enabled, expected) {
       assert.equal(received, accountKey);
+      assert.deepEqual(expected, { generation: 1, incarnation });
       runtimeEnabled = enabled;
       return { account: account(), runningCount: enabled ? 1 : 0 };
     },
-    async deleteAccount(received) {
+    async deleteAccount(received, expected) {
       assert.equal(received, accountKey);
+      assert.deepEqual(expected, { generation: 1, incarnation });
       runtimeEnabled = false;
       deleted = true;
       return { account: account(), runningCount: 0 };
@@ -116,13 +121,19 @@ test('private operator MCP exposes account list, start, stop, and delete results
     name: 'list_accounts', arguments: {},
   })).structuredContent, { accounts: [account()] });
   assert.deepEqual((await client.callTool({
-    name: 'start_account', arguments: { accountKey },
+    name: 'start_account', arguments: {
+      accountKey, expectedGeneration: 1, expectedIncarnation: incarnation,
+    },
   })).structuredContent, { account: account(), runningCount: 1 });
   assert.deepEqual((await client.callTool({
-    name: 'stop_account', arguments: { accountKey },
+    name: 'stop_account', arguments: {
+      accountKey, expectedGeneration: 1, expectedIncarnation: incarnation,
+    },
   })).structuredContent, { account: account(), runningCount: 0 });
   const deletion = await client.callTool({
-    name: 'delete_account', arguments: { accountKey },
+    name: 'delete_account', arguments: {
+      accountKey, expectedGeneration: 1, expectedIncarnation: incarnation,
+    },
   });
   assert.deepEqual(deletion.structuredContent, { account: account(), runningCount: 0 });
   assert.equal(deleted, true);
@@ -130,6 +141,10 @@ test('private operator MCP exposes account list, start, stop, and delete results
 
 test('private operator MCP sanitizes every account lifecycle failure', async (t) => {
   const accountKey = `ia_${'f'.repeat(40)}`;
+  const revision = {
+    expectedGeneration: 1,
+    expectedIncarnation: `ii_${'f'.repeat(64)}`,
+  };
   const server = createIlinkLoginMcpServer({
     async begin() { throw new Error('not used'); },
     status() { throw new Error('secret status detail'); },
@@ -152,8 +167,12 @@ test('private operator MCP sanitizes every account lifecycle failure', async (t)
       name: 'cancel_login', arguments: { offerId: `qo_${'c'.repeat(20)}` },
     }),
     client.callTool({ name: 'list_accounts', arguments: {} }),
-    client.callTool({ name: 'start_account', arguments: { accountKey } }),
-    client.callTool({ name: 'delete_account', arguments: { accountKey } }),
+    client.callTool({
+      name: 'start_account', arguments: { accountKey, ...revision },
+    }),
+    client.callTool({
+      name: 'delete_account', arguments: { accountKey, ...revision },
+    }),
   ]);
   assert.ok(results.every((result) => result.isError));
   assert.ok(results.slice(0, 2).every((result) =>
@@ -161,4 +180,38 @@ test('private operator MCP sanitizes every account lifecycle failure', async (t)
   assert.ok(results.slice(2).every((result) =>
     JSON.stringify(result).includes('account operation is unavailable')));
   assert.doesNotMatch(JSON.stringify(results), /secret .* detail/u);
+});
+
+test('private operator MCP reports stale account revisions without provider detail', async (t) => {
+  const accountKey = `ia_${'d'.repeat(40)}`;
+  const incarnation = `ii_${'d'.repeat(64)}` as const;
+  const server = createIlinkLoginMcpServer({
+    async begin() { throw new Error('not used'); },
+    status() { return { status: 'unknown' }; },
+    cancel() { return false; },
+    listAccounts() { return []; },
+    async setAccountRuntime() {
+      throw Object.assign(new Error('secret revision detail'), {
+        code: 'account_revision_changed',
+      });
+    },
+    async deleteAccount() { throw new Error('not used'); },
+  });
+  const client = new Client({ name: 'ilink-stale-account-test', version: '1.0.0' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  t.onTestFinished(async () => {
+    await Promise.allSettled([client.close(), server.close()]);
+  });
+  await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+  const result = await client.callTool({
+    name: 'start_account',
+    arguments: {
+      accountKey,
+      expectedGeneration: 1,
+      expectedIncarnation: incarnation,
+    },
+  });
+  assert.equal(result.isError, true);
+  assert.match(JSON.stringify(result), /selected iLink account changed/u);
+  assert.doesNotMatch(JSON.stringify(result), /secret revision detail/u);
 });

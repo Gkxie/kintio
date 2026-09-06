@@ -8,9 +8,11 @@ import crossSpawn from 'cross-spawn';
 
 import {
   DAEMON_STOP_TIMEOUT_MS,
+  INSTANCE_CONFIG_TEMPLATE,
   loadConfig,
   loadIlinkEnrollmentConfig,
   loadIlinkRuntimeConfig,
+  loadSharedRuntimeConfig,
   parseStartTimeout,
   resolveProjectRoot,
   WORKER_GRACEFUL_TIMEOUT_MS,
@@ -21,22 +23,45 @@ import {
   ensureContainedDirectory,
   ensurePrivateDirectory,
 } from './lib/private-directory.ts';
-import { runIlinkCliLogin } from './ilink/cli-login.ts';
-import { runIlinkAccountCommand } from './ilink/cli-accounts.ts';
-import { startIlinkCliRuntime } from './ilink/cli-start.ts';
+import { controlWecom, hasRuntimeOperator, restartIlinkListeners, runIlinkCliLogin } from './ilink/cli-login.ts';
 import {
+  readIlinkAccountSnapshot,
+  resolveIlinkAccount,
+  runIlinkAccountCommand,
+} from './ilink/cli-accounts.ts';
+import {
+  confirmIlinkAccountDeletion,
+  IlinkPromptInterruptedError,
+  pickIlinkAccount,
+} from './ilink/account-picker.ts';
+import { runWorker } from './runtime/run-worker.ts';
+import {
+  createUpdateRuntimeIdentity,
   daemonRecordPath,
   readDaemonRecord,
   requestControl,
+  sameUpdateRuntimeIdentity,
   type ControlResponse,
+  type DaemonRecord,
   type DaemonMode,
+  type UpdateRuntimeIdentity,
 } from './runtime/daemon-protocol.ts';
 import {
   acquireSingleInstanceLock,
+  type InstanceLock,
   processIsAlive,
   SingleInstanceLockError,
 } from './runtime/single-instance-lock.ts';
 import { installManagedSkill } from './runtime/managed-skill.ts';
+import { StatePersistence } from './state/persistence.ts';
+import { readInstalledPackageIdentity } from './update/global-install.ts';
+import {
+  installPreparedKintioUpdate,
+  prepareKintioUpdate,
+  ProcessTreeTerminationError,
+  verifyPreparedKintioUpdate,
+  type PreparedKintioUpdate,
+} from './update/self-update.ts';
 import { KINTIO_VERSION } from './version.ts';
 
 interface ProcessRequest {
@@ -59,51 +84,106 @@ interface DaemonProcess {
 }
 
 interface CliRuntime {
+  readonly wecomControl: typeof controlWecom;
+  readonly ilinkRestart: typeof restartIlinkListeners;
   readonly env: NodeJS.ProcessEnv;
   readonly cwd: string;
   readonly homeDirectory: string;
   readonly packageRoot: string;
   readonly execute: (request: ProcessRequest) => Promise<number>;
   readonly launchDaemon: (request: DaemonLaunchRequest) => DaemonProcess;
+  readonly stopIfIdle: (
+    home: string,
+    identity: UpdateRuntimeIdentity,
+  ) => Promise<ControlResponse>;
   readonly stdout: (text: string) => void;
   readonly stderr: (text: string) => void;
+  readonly stdinIsTTY: boolean;
   readonly stdoutIsTTY: boolean;
   readonly stdoutColumns: number;
   readonly ilinkLogin: typeof runIlinkCliLogin;
   readonly ilinkAccount: typeof runIlinkAccountCommand;
-  readonly ilinkStart: typeof startIlinkCliRuntime;
+  readonly ilinkSnapshot: typeof readIlinkAccountSnapshot;
+  readonly ilinkPickAccount: typeof pickIlinkAccount;
+  readonly ilinkConfirmDelete: typeof confirmIlinkAccountDeletion;
+  readonly ilinkStart: typeof runWorker;
+  readonly updater: {
+    readonly prepare: typeof prepareKintioUpdate;
+    readonly install: typeof installPreparedKintioUpdate;
+    readonly verify: typeof verifyPreparedKintioUpdate;
+  };
 }
 
 interface InstanceLocation {
   readonly home: string;
   readonly configFile: string;
+  readonly wecomConfigFile?: string;
+}
+
+interface RuntimeStateIdentity {
+  readonly databaseFile: string;
+  readonly lockFile: string;
+}
+
+interface RuntimeUpdateSnapshot {
+  readonly identity: UpdateRuntimeIdentity;
+  readonly state: RuntimeStateIdentity;
 }
 
 const HELP = `Usage: kintio <command> [options]
 
 Commands:
-  setup                 Create a private instance directory and configuration
-  start                 Start Kintio in the background
-  run                   Run Kintio in the foreground
-  stop                  Stop the background Kintio process
-  restart               Restart Kintio with the current installation and config
-  status                Show the background process status
-  logs                  Follow Kintio logs
-  ilink login [options] Connect an iLink account with a QR code
-  ilink list            List enrolled iLink accounts
-  ilink start [options] Start one iLink account without Hono
-  ilink stop [options]  Stop one iLink account
-  ilink delete [options] Permanently delete one iLink account and its data
+  wecom <command>        Configure and run the WeChat KF callback channel
+  ilink <command>        Connect and run iLink accounts
+  update                Update the global Kintio installation
+  upgrade               Alias for update
 
 Options:
-  --home <directory>     Instance directory (default: ~/.kintio)
-  --config <file>        Environment file (default: <home>/.env)
-  --lines <count>        Initial lines for logs (default: 100)
-  --no-follow            Print logs without following
   -h, --help             Show this help
   -v, --version          Show the Kintio version
 
-Run "kintio ilink --help" for iLink account commands.
+Channels have independent configuration and share one runtime, database, and log.
+There is no shared start or stop command.
+Run "kintio wecom --help" or "kintio ilink --help" for channel commands.
+`;
+
+const WECOM_HELP = `Usage: kintio wecom <command> [options]
+
+Commands:
+  setup                 Create the private WeChat KF configuration
+  start                 Start the callback channel in the background
+  run                   Run the callback channel in the foreground
+  stop                  Stop only the WeChat KF listener
+  restart               Restart only the WeChat KF listener
+  status                Show the WeChat KF listener and shared runtime status
+  logs                  Follow the shared runtime logs
+
+Options:
+  --home <directory>     Kintio home (default: ~/.kintio)
+  --config <file>        WeCom config (default: <home>/wecom/.env)
+  --lines <count>        Initial lines for logs (default: 100)
+  --no-follow            Print logs without following
+  -h, --help             Show this help
+
+Run setup, fill the WECOM credentials and authorization settings, then start.
+The singleton callback listens on port 8888 by default. No iLink account is enabled by starting WeCom.
+`;
+
+const UPDATE_HELP = `Usage: kintio <update|upgrade> [options]
+
+Update a global npm or pnpm installation to the newest stable Kintio release.
+If the shared runtime is running and idle, Kintio restores its enabled channels
+and accounts after verifying the installed version. Active conversation work
+is never interrupted for an update.
+
+Both default channel directories are checked. If both channels are running,
+stop the other channel before updating. Custom instance homes must be stopped
+separately unless selected with --home.
+
+Options:
+  --home <directory>     Instance to coordinate (default: ~/.kintio)
+  --config <file>        Instance configuration (default: <home>/.env)
+  -h, --help             Show this help
 `;
 
 const ILINK_LOGIN_HELP = `Usage: kintio ilink login [options]
@@ -130,11 +210,12 @@ const ILINK_START_HELP = `Usage: kintio ilink start [options]
 
 Run iLink long polling and the host Agent in the background without starting
 Hono or opening a TCP listener. This command does not require setup or an
-environment file. One account is selected automatically; multiple accounts
-require --account. Additional start commands add accounts to the same process.
+environment file. With no enrolled account, an interactive terminal opens the
+login flow first. One account is selected automatically and multiple accounts
+open a searchable picker. Additional start commands add accounts to the same process.
 
 Options:
-  --account <id>        Provider account ID or Kintio account key
+  --account <id>        Select explicitly for scripts or to bypass the picker
   --foreground          Keep the iLink-only Runtime attached to this terminal
   --home <directory>     Instance directory (default: ~/.kintio)
   --config <file>        Optional environment overrides
@@ -144,11 +225,11 @@ Options:
 const ILINK_STOP_HELP = `Usage: kintio ilink stop [options]
 
 Stop one iLink account. Stopping the last account also stops the background
-iLink-only Runtime. One account is selected automatically; multiple
-accounts require --account.
+iLink-only Runtime. One account is selected automatically and multiple accounts
+open a searchable picker in an interactive terminal.
 
 Options:
-  --account <id>        Provider account ID or Kintio account key
+  --account <id>        Select explicitly for scripts or to bypass the picker
   --home <directory>    Instance directory (default: ~/.kintio)
   --config <file>       Optional environment overrides
   -h, --help            Show this help
@@ -156,7 +237,7 @@ Options:
 
 const ILINK_LIST_HELP = `Usage: kintio ilink list [options]
 
-List enrolled iLink accounts and whether each account is currently running.
+List enrolled iLink provider account IDs, one per line.
 
 Options:
   --home <directory>    Instance directory (default: ~/.kintio)
@@ -169,10 +250,12 @@ const ILINK_DELETE_HELP = `Usage: kintio ilink delete [options]
 Permanently delete one iLink account and all Kintio data scoped to it,
 including credentials, conversations, messages, media, send records, and
 enrollment audit records. This operation cannot be undone.
+Interactive use asks for confirmation and defaults to No.
+Non-interactive use requires both --account and --yes.
 
 Options:
-  --account <id>        Provider account ID or Kintio account key
-  --yes                 Confirm permanent deletion
+  --account <id>        Select explicitly for scripts or to bypass the picker
+  --yes                 Confirm permanent deletion without a prompt
   --home <directory>    Instance directory (default: ~/.kintio)
   --config <file>       Optional environment overrides
   -h, --help            Show this help
@@ -186,22 +269,22 @@ Commands:
   start [options]        Start one account without Hono
   stop [options]         Stop one account
   delete [options]       Permanently delete one account and its data
+  restart               Restart enabled iLink listeners; leave WeCom running
+  status                Show the shared runtime status
+  logs                  Follow shared runtime logs (--lines 100, --no-follow)
+
+Options:
+  --home <directory>     Channel instance directory (default: ~/.kintio)
+  --config <file>        Optional environment overrides
 
 Run "kintio ilink <command> --help" for command options.
 `;
 
-const ILINK_COMMANDS = new Set(['login', 'list', 'start', 'stop', 'delete']);
+const ILINK_ACCOUNT_COMMANDS = new Set(['login', 'list', 'start', 'stop', 'delete']);
+const ILINK_COMMANDS = new Set([...ILINK_ACCOUNT_COMMANDS, 'restart', 'status', 'logs']);
+const WECOM_COMMANDS = new Set(['setup', 'start', 'run', 'stop', 'restart', 'status', 'logs']);
 
-const COMMANDS = new Set([
-  'setup',
-  'start',
-  'run',
-  'stop',
-  'restart',
-  'status',
-  'logs',
-  'ilink',
-]);
+const COMMANDS = new Set(['wecom', 'ilink', 'update', 'upgrade']);
 
 const ILINK_SIGNALS: readonly NodeJS.Signals[] = process.platform === 'win32'
   ? ['SIGINT', 'SIGTERM']
@@ -226,7 +309,7 @@ async function runWithIlinkSignals(
     signal,
     listener: () => interrupt(signal),
   }));
-  for (const { signal, listener } of listeners) process.once(signal, listener);
+  for (const { signal, listener } of listeners) process.on(signal, listener);
   try {
     const result = await operation(controller.signal);
     return result === 130 && interruptedBy
@@ -311,13 +394,26 @@ function runtimeDefaults(): CliRuntime {
     packageRoot: resolveProjectRoot(import.meta.url),
     execute: defaultExecute,
     launchDaemon: defaultLaunchDaemon,
+    stopIfIdle: (home, identity) =>
+      requestControl(home, 'stop-if-idle', undefined, identity),
     stdout: (text) => process.stdout.write(text),
     stderr: (text) => process.stderr.write(text),
+    stdinIsTTY: Boolean(process.stdin.isTTY),
     stdoutIsTTY: Boolean(process.stdout.isTTY),
     stdoutColumns: process.stdout.columns || 80,
     ilinkLogin: runIlinkCliLogin,
+    wecomControl: controlWecom,
+    ilinkRestart: restartIlinkListeners,
     ilinkAccount: runIlinkAccountCommand,
-    ilinkStart: startIlinkCliRuntime,
+    ilinkSnapshot: readIlinkAccountSnapshot,
+    ilinkPickAccount: pickIlinkAccount,
+    ilinkConfirmDelete: confirmIlinkAccountDeletion,
+    ilinkStart: runWorker,
+    updater: {
+      prepare: prepareKintioUpdate,
+      install: installPreparedKintioUpdate,
+      verify: verifyPreparedKintioUpdate,
+    },
   };
 }
 
@@ -328,6 +424,7 @@ function resolveInputPath(value: string, cwd: string): string {
 function instanceLocation(
   values: { readonly home?: string; readonly config?: string },
   runtime: CliRuntime,
+  channel: 'wecom' | 'ilink' = 'ilink',
 ): InstanceLocation {
   const hasExplicitHome = values.home !== undefined;
   const hasExplicitConfig = values.config !== undefined;
@@ -343,11 +440,12 @@ function instanceLocation(
   const home = configuredHome
     ? resolveInputPath(configuredHome, runtime.cwd)
     : configFile
-      ? path.dirname(configFile)
+      ? path.resolve(path.dirname(configFile), ...(channel === 'wecom' && path.basename(path.dirname(configFile)) === 'wecom' ? ['..'] : []))
       : path.join(runtime.homeDirectory, '.kintio');
   const location = {
     home: path.resolve(home),
-    configFile: configFile || path.join(path.resolve(home), '.env'),
+    configFile: (channel === 'ilink' ? configFile : '') || path.join(path.resolve(home), '.env'),
+    ...(channel === 'wecom' ? { wecomConfigFile: configFile || path.join(path.resolve(home), 'wecom/.env') } : {}),
   };
   if (
     process.platform === 'win32' &&
@@ -445,7 +543,7 @@ function loadInstanceConfig(
 ): ReturnType<typeof loadConfig> {
   return loadConfig({
     environment: { ...environment },
-    envFile: location.configFile,
+    envFile: location.wecomConfigFile || path.join(location.home, 'wecom/.env'),
     root: location.home,
   });
 }
@@ -462,32 +560,31 @@ function refreshManagedSkill(
 
 function setup(location: InstanceLocation, runtime: CliRuntime): number {
   prepareDirectories(location.home);
-  const templateFile = path.join(runtime.packageRoot, '.env.example');
-  const template = fs.readFileSync(templateFile, 'utf8');
-  const configInsideHome = isPathInside(location.home, location.configFile);
+  const configFile = location.wecomConfigFile || path.join(location.home, 'wecom/.env');
+  const configInsideHome = isPathInside(location.home, configFile);
   const configCreated = writeNewFile(
-    location.configFile,
-    template,
+    configFile,
+    INSTANCE_CONFIG_TEMPLATE,
     configInsideHome ? location.home : undefined,
   );
-  const configStat = privateFile(location.configFile, 'Kintio config');
-  if (!configStat) throw new Error(`Kintio config was not created: ${location.configFile}`);
+  const configStat = privateFile(configFile, 'Kintio config');
+  if (!configStat) throw new Error(`Kintio config was not created: ${configFile}`);
 
   const skill = refreshManagedSkill(
     loadInstanceConfig(location, runtime).codex.workingDirectory,
     runtime,
   );
   const defaultHome = path.join(runtime.homeDirectory, '.kintio');
-  const defaultConfig = path.join(defaultHome, '.env');
+  const defaultConfig = path.join(defaultHome, 'wecom/.env');
   const nextStep =
-    location.home === defaultHome && location.configFile === defaultConfig
-      ? 'run "kintio start".'
-      : 'run "kintio start" with the same --home and --config options.';
+    location.home === defaultHome && configFile === defaultConfig
+      ? 'run "kintio wecom start".'
+      : 'run "kintio wecom start" with the same --home and --config options.';
 
   runtime.stdout(
     `Kintio setup complete.\n` +
     `Home: ${location.home}\n` +
-    `Config: ${location.configFile} (${configCreated ? 'created' : 'kept'})\n` +
+    `Config: ${configFile} (${configCreated ? 'created' : 'kept'})\n` +
     `Agent skill: ${skill.file} (${skill.state})\n` +
     `Edit the config, run "codex login status", then ${nextStep}\n`,
   );
@@ -498,10 +595,11 @@ function processEnvironment(
   location: InstanceLocation,
   runtime: CliRuntime,
 ): NodeJS.ProcessEnv {
-  if (!privateFile(location.configFile, 'Kintio config')) {
-    throw new Error(`Kintio config is missing; run "kintio setup": ${location.configFile}`);
+  const configFile = location.wecomConfigFile || path.join(location.home, 'wecom/.env');
+  if (!privateFile(configFile, 'Kintio config')) {
+    throw new Error(`Kintio config is missing; run "kintio wecom setup": ${configFile}`);
   }
-  assertTrustedDirectory(path.dirname(location.configFile), 'Kintio config directory', false);
+  assertTrustedDirectory(path.dirname(configFile), 'Kintio config directory', false);
   prepareDirectories(location.home);
   const environment: NodeJS.ProcessEnv = {
     ...runtime.env,
@@ -511,7 +609,7 @@ function processEnvironment(
   };
   const config = loadInstanceConfig(location, runtime, environment);
   refreshManagedSkill(config.codex.workingDirectory, runtime);
-  return environment;
+  return ilinkDaemonEnvironment(location, runtime);
 }
 
 function removeDaemonMetadata(location: InstanceLocation): void {
@@ -546,7 +644,7 @@ function assertDaemonInstance(
     !samePath(daemon.packageRoot, packageRoot)
   ) {
     throw new Error(
-      'Kintio is running with another config or installation; use "kintio restart" to switch deliberately',
+      'Kintio is running with another config or installation; stop it before switching',
     );
   }
   if (mode && daemon.mode !== mode) {
@@ -583,6 +681,34 @@ async function withLifecycleLock<T>(
   }
 }
 
+async function withInstallationUpdateLock<T>(
+  runtime: CliRuntime,
+  task: () => Promise<T>,
+): Promise<T> {
+  const directory = ensurePrivateDirectory(path.join(
+    runtime.homeDirectory,
+    '.kintio',
+    'data',
+  ));
+  let lock;
+  try {
+    lock = acquireSingleInstanceLock({
+      filePath: path.join(directory, 'installation-update.lock'),
+      hasActiveDatabaseOwner: () => false,
+    });
+  } catch (error: unknown) {
+    if (error instanceof SingleInstanceLockError) {
+      throw new Error('Another Kintio update is already running');
+    }
+    throw error;
+  }
+  try {
+    return await task();
+  } finally {
+    lock.release();
+  }
+}
+
 async function waitForDaemonExit(
   daemon: DaemonProcess,
   timeoutMs: number,
@@ -594,16 +720,20 @@ async function waitForDaemonExit(
 }
 
 function removeLaunchMetadata(location: InstanceLocation, daemonPid: number): void {
-  if (readDaemonRecord(location.home)?.daemonPid === daemonPid) {
-    fs.rmSync(daemonRecordPath(location.home), { force: true });
+  try {
+    if (readDaemonRecord(location.home)?.daemonPid !== daemonPid) return;
+  } catch {
+    // The newly launched target may use a newer metadata schema.
   }
+  fs.rmSync(daemonRecordPath(location.home), { force: true });
 }
 
 async function rollbackLaunch(
   location: InstanceLocation,
   daemon: DaemonProcess,
 ): Promise<void> {
-  const record = readDaemonRecord(location.home);
+  let record: DaemonRecord | null = null;
+  try { record = readDaemonRecord(location.home); } catch {}
   if (record?.daemonPid === daemon.pid) {
     await requestControl(location.home, 'stop').catch(() => undefined);
     if (await waitForDaemonExit(daemon, 5_000)) {
@@ -623,78 +753,99 @@ async function rollbackLaunch(
   removeLaunchMetadata(location, daemon.pid);
 }
 
-async function startBackgroundDaemon(
+async function startBackgroundDaemonLocked(
   location: InstanceLocation,
   runtime: CliRuntime,
   environment: NodeJS.ProcessEnv,
   mode: DaemonMode,
-  restart: boolean,
-): Promise<{ readonly alreadyRunning: boolean; readonly pid: number }> {
-  const timeout = parseStartTimeout(environment.KINTIO_START_TIMEOUT_MS);
-  return withLifecycleLock(location, async () => {
-    const existing = await probeDaemon(location);
-    if (existing && !restart) {
-      assertDaemonInstance(location, runtime.packageRoot, mode);
-      if (existing.phase !== 'running') {
-        await waitUntilRunning(location, Date.now() + timeout);
-      }
-      return {
-        alreadyRunning: true,
-        pid: existing.workerPid || existing.daemonPid,
-      };
+  timeout = parseStartTimeout(environment.KINTIO_START_TIMEOUT_MS),
+): Promise<
+  | { readonly alreadyRunning: true; readonly pid: number }
+  | { readonly alreadyRunning: false; readonly daemon: DaemonProcess; readonly pid: number }
+> {
+  let existing = await probeDaemon(location);
+  if (existing?.phase === 'stopping') {
+    await waitForDaemonStopped(location, DAEMON_STOP_TIMEOUT_MS);
+    existing = undefined;
+  }
+  if (existing) {
+    assertDaemonInstance(location, runtime.packageRoot, mode);
+    if (existing.phase !== 'running') {
+      await waitUntilRunning(location, Date.now() + timeout);
+      existing = await requestControl(location.home, 'ping');
     }
-    if (existing) {
-      await stopDaemon(location, DAEMON_STOP_TIMEOUT_MS);
-    }
-    const deadline = Date.now() + timeout;
-    const daemon = runtime.launchDaemon({
-      file: process.execPath,
-      args: [path.join(runtime.packageRoot, 'dist/daemon.js')],
-      cwd: location.home,
-      env: { ...environment, KINTIO_DAEMON_MODE: mode },
-    });
-    try {
-      await waitUntilRunning(location, deadline);
-    } catch (error: unknown) {
-      await rollbackLaunch(location, daemon);
-      throw error;
-    }
-    const running = await requestControl(location.home, 'ping');
     return {
-      alreadyRunning: false,
-      pid: running.workerPid || running.daemonPid,
+      alreadyRunning: true,
+      pid: existing.workerPid || existing.daemonPid,
     };
+  }
+  return await launchBackgroundDaemon(location, runtime, environment, mode, timeout);
+}
+
+async function launchBackgroundDaemon(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+  environment: NodeJS.ProcessEnv,
+  mode: DaemonMode,
+  timeout = parseStartTimeout(environment.KINTIO_START_TIMEOUT_MS),
+): Promise<{
+  readonly alreadyRunning: false;
+  readonly daemon: DaemonProcess;
+  readonly pid: number;
+}> {
+  const deadline = Date.now() + timeout;
+  const daemon = runtime.launchDaemon({
+    file: process.execPath,
+    args: [path.join(runtime.packageRoot, 'dist/daemon.js')],
+    cwd: location.home,
+    env: { ...environment, KINTIO_DAEMON_MODE: mode },
   });
+  try {
+    await waitUntilRunning(location, deadline);
+  } catch (error: unknown) {
+    await rollbackLaunch(location, daemon);
+    throw error;
+  }
+  const running = await requestControl(location.home, 'ping');
+  return {
+    alreadyRunning: false,
+    daemon,
+    pid: running.workerPid || running.daemonPid,
+  };
 }
 
 async function start(
   location: InstanceLocation,
   runtime: CliRuntime,
-  restart: boolean,
 ): Promise<number> {
-  const result = await startBackgroundDaemon(
-    location,
-    runtime,
-    processEnvironment(location, runtime),
-    'service',
-    restart,
-  );
-  if (result.alreadyRunning) {
-    runtime.stdout(`Kintio is already running (PID ${result.pid}).\n`);
-  }
-  return 0;
+  return withLifecycleLock(location, async () => {
+    const environment = processEnvironment(location, runtime);
+    const config = loadSharedRuntimeConfig({ root: location.home, envFile: location.configFile, environment: runtime.env });
+    const existing = await probeDaemon(location);
+    if (!existing && hasRuntimeOperator(config.state)) {
+      await runtime.wecomControl(config, runtime.packageRoot, 'start', location.wecomConfigFile);
+      runtime.stdout('WeCom is running in the shared Kintio runtime.\n');
+      return 0;
+    }
+    const result = await startBackgroundDaemonLocked(location, runtime, environment, 'shared');
+    await runtime.wecomControl(config, runtime.packageRoot, 'start', location.wecomConfigFile);
+    runtime.stdout(`WeCom is running in the shared Kintio runtime (PID ${result.pid}).\n`);
+    return 0;
+  });
 }
 
 function ilinkDaemonEnvironment(
   location: InstanceLocation,
   runtime: CliRuntime,
 ): NodeJS.ProcessEnv {
-  const config = loadIlinkRuntimeConfig({
+  if (privateFile(location.configFile, 'Kintio config')) {
+    assertTrustedDirectory(path.dirname(location.configFile), 'Kintio config directory', false);
+  }
+  loadIlinkRuntimeConfig({
     environment: { ...runtime.env },
     envFile: location.configFile,
     root: location.home,
   });
-  refreshManagedSkill(config.codex.workingDirectory, runtime);
   return {
     ...runtime.env,
     KINTIO_HOME: location.home,
@@ -703,20 +854,81 @@ function ilinkDaemonEnvironment(
   };
 }
 
-async function startIlinkDaemon(
+function daemonEnvironment(
   location: InstanceLocation,
   runtime: CliRuntime,
-): Promise<void> {
-  const result = await startBackgroundDaemon(
+  _mode: DaemonMode,
+): NodeJS.ProcessEnv {
+  return ilinkDaemonEnvironment(location, runtime);
+}
+
+function loadDaemonRuntimeConfig(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+  _mode: DaemonMode,
+): ReturnType<typeof loadSharedRuntimeConfig> {
+  return loadSharedRuntimeConfig({
+        environment: { ...runtime.env },
+        envFile: location.configFile,
+        root: location.home,
+      });
+}
+
+function prepareDaemonRuntime(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+  mode: DaemonMode,
+) {
+  const config = loadDaemonRuntimeConfig(location, runtime, mode);
+  const environment = daemonEnvironment(location, runtime, mode);
+  return {
+    config,
+    environment,
+    identity: createUpdateRuntimeIdentity(config, {
+      ...environment,
+      KINTIO_DAEMON_MODE: mode,
+    }),
+  };
+}
+
+async function startIlinkDaemonLocked(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+): Promise<{ readonly created: boolean; readonly runId: string }> {
+  const result = await startBackgroundDaemonLocked(
     location,
     runtime,
     ilinkDaemonEnvironment(location, runtime),
-    'ilink',
-    false,
+    'shared',
   );
   if (!result.alreadyRunning) {
     runtime.stdout(`Kintio iLink runtime is running in background (PID ${result.pid}).\n`);
   }
+  const record = readDaemonRecord(location.home);
+  if (!record || record.mode !== 'shared') {
+    if (!result.alreadyRunning) await rollbackLaunch(location, result.daemon);
+    throw new Error('Kintio iLink runtime did not publish its daemon identity');
+  }
+  return { created: !result.alreadyRunning, runId: record.runId };
+}
+
+async function rollbackEmptyIlinkDaemonLocked(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+  config: ReturnType<typeof loadIlinkEnrollmentConfig>,
+  started: { readonly created: boolean; readonly runId: string },
+): Promise<void> {
+  if (!started.created) return;
+  const record = readDaemonRecord(location.home);
+  if (!record || record.mode !== 'shared' || record.runId !== started.runId) return;
+  const snapshot = await runtime.ilinkSnapshot({
+    config,
+    packageRoot: runtime.packageRoot,
+    signal: AbortSignal.timeout(5_000),
+  });
+  if (snapshot.accounts.some((account) => account.runtimeEnabled)) return;
+  if ((await runtime.wecomControl(config, runtime.packageRoot, 'status')).running) return;
+  await stopDaemon(location, DAEMON_STOP_TIMEOUT_MS);
 }
 
 async function waitUntilRunning(
@@ -744,21 +956,25 @@ async function waitUntilRunning(
     if (waitMs > 0) await delay(waitMs);
   }
   throw new Error(
-    `Kintio failed to become ready: ${lastError}; inspect "kintio logs --no-follow"`,
+    `Kintio failed to become ready: ${lastError}; inspect the channel logs with "kintio wecom logs" or "kintio ilink logs"`,
   );
 }
 
 async function stopDaemon(
   location: InstanceLocation,
   timeoutMs: number,
-  onNotRunning?: () => void,
 ): Promise<number> {
   const record = readDaemonRecord(location.home);
-  if (!record) {
-    onNotRunning?.();
-    return 0;
-  }
+  if (!record) return 0;
   await requestControl(location.home, 'stop');
+  await waitForDaemonStopped(location, timeoutMs);
+  return 0;
+}
+
+async function waitForDaemonStopped(
+  location: InstanceLocation,
+  timeoutMs: number,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   const daemonLock = path.join(location.home, 'data/daemon.lock');
   while (
@@ -772,19 +988,422 @@ async function stopDaemon(
     throw new Error('Kintio daemon did not stop within the shutdown budget');
   }
   removeDaemonMetadata(location);
-  return 0;
 }
 
-async function stop(
+type PendingKintioUpdate = Extract<
+  PreparedKintioUpdate,
+  { readonly kind: 'update' }
+>;
+
+interface UpdateSignalGuard {
+  readonly throwIfInterrupted: () => void;
+}
+
+async function withUpdateSignalGuard<T>(
+  task: (guard: UpdateSignalGuard) => Promise<T>,
+): Promise<T> {
+  const signals: readonly NodeJS.Signals[] = process.platform === 'win32'
+    ? ['SIGINT', 'SIGTERM']
+    : ['SIGINT', 'SIGTERM', 'SIGHUP'];
+  let interruptedBy: NodeJS.Signals | undefined;
+  const listeners = signals.map((signal) => ({
+    signal,
+    listener: () => { interruptedBy ||= signal; },
+  }));
+  for (const { signal, listener } of listeners) process.on(signal, listener);
+  try {
+    return await task({
+      throwIfInterrupted() {
+        if (interruptedBy) {
+          throw new Error(`Kintio update was interrupted by ${interruptedBy}`);
+        }
+      },
+    });
+  } finally {
+    for (const { signal, listener } of listeners) process.off(signal, listener);
+  }
+}
+
+function runtimeAtPackage(
   runtime: CliRuntime,
+  packageRoot: string,
+): CliRuntime {
+  return { ...runtime, packageRoot };
+}
+
+function daemonModeLabel(_mode: DaemonMode): string {
+  return 'shared';
+}
+
+function runtimeAtState(
+  runtime: CliRuntime,
+  state: RuntimeStateIdentity,
+): CliRuntime {
+  if (path.basename(state.lockFile) !== 'kintio.lock') {
+    throw new Error(`Unsupported Kintio state lock identity: ${state.lockFile}`);
+  }
+  return { ...runtime, env: { ...runtime.env, KINTIO_DB_FILE: state.databaseFile } };
+}
+
+function assertSameState(
+  actual: RuntimeStateIdentity,
+  expected: RuntimeStateIdentity,
+): void {
+  if (
+    !samePath(actual.databaseFile, expected.databaseFile) ||
+    !samePath(actual.lockFile, expected.lockFile)
+  ) {
+    throw new Error('Kintio could not preserve the running Runtime state identity');
+  }
+}
+
+function reserveInstanceForUpdate(
+  state: { readonly databaseFile: string; readonly lockFile: string },
+): InstanceLock {
+  try {
+    return acquireSingleInstanceLock({
+      filePath: state.lockFile,
+      hasActiveDatabaseOwner: () =>
+        StatePersistence.hasActiveWriter(state.databaseFile),
+    });
+  } catch (error: unknown) {
+    if (error instanceof SingleInstanceLockError) {
+      throw new Error(
+        'A foreground Kintio Runtime or iLink login is active; stop it before updating',
+      );
+    }
+    throw error;
+  }
+}
+
+async function restoreBackgroundRuntime(
   location: InstanceLocation,
-): Promise<number> {
-  return withLifecycleLock(location, async () => {
-    return await stopDaemon(
+  runtime: CliRuntime,
+  mode: DaemonMode,
+  expected: RuntimeUpdateSnapshot,
+): Promise<void> {
+  const prepared = prepareDaemonRuntime(location, runtime, mode);
+  assertSameState(prepared.config.state, expected.state);
+  if (!sameUpdateRuntimeIdentity(prepared.identity, expected.identity)) {
+    throw new Error('Kintio configuration changed during the package update');
+  }
+  const launched = await launchBackgroundDaemon(
+    location,
+    runtime,
+    prepared.environment,
+    mode,
+  );
+  try {
+    assertDaemonInstance(location, runtime.packageRoot, mode);
+    const record = readDaemonRecord(location.home);
+    if (!record) {
+      throw new Error('Restored Kintio Runtime did not publish safe identity metadata');
+    }
+    assertSameState(record.state, expected.state);
+    const after = prepareDaemonRuntime(location, runtime, mode);
+    assertSameState(after.config.state, expected.state);
+    if (!sameUpdateRuntimeIdentity(after.identity, expected.identity)) {
+      throw new Error('Kintio configuration changed while restoring the Runtime');
+    }
+  } catch (error: unknown) {
+    try {
+      await rollbackLaunch(location, launched.daemon);
+    } catch (stopError: unknown) {
+      throw new Error(
+        `Restored Kintio Runtime identity could not be verified (${
+          error instanceof Error ? error.message : String(error)
+        }) and the Runtime could not be stopped: ${
+          stopError instanceof Error ? stopError.message : String(stopError)
+        }`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+}
+
+async function recoverRuntimeAfterUpdateFailure(
+  update: PendingKintioUpdate,
+  location: InstanceLocation,
+  runtime: CliRuntime,
+  mode: DaemonMode,
+  expected: RuntimeUpdateSnapshot,
+  originalError: unknown,
+): Promise<never> {
+  try {
+    readInstalledPackageIdentity(update.installation.packageRoot);
+    await restoreBackgroundRuntime(
       location,
-      DAEMON_STOP_TIMEOUT_MS,
-      () => runtime.stdout('Kintio is not running.\n'),
+      runtimeAtPackage(runtime, update.installation.packageRoot),
+      mode,
+      expected,
     );
+    runtime.stdout(
+      `Kintio ${daemonModeLabel(mode)} Runtime was restored after the failed update.\n`,
+    );
+  } catch (recoveryError: unknown) {
+    throw new Error(
+      `Kintio update failed (${
+        originalError instanceof Error ? originalError.message : String(originalError)
+      }); the previous Runtime could not be restored: ${
+        recoveryError instanceof Error ? recoveryError.message : String(recoveryError)
+      }`,
+      { cause: originalError },
+    );
+  }
+  throw originalError;
+}
+
+async function daemonStoppedAfterUncertainGate(
+  location: InstanceLocation,
+  record: DaemonRecord,
+): Promise<boolean> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    const current = readDaemonRecord(location.home);
+    if (!current) return true;
+    if (current.runId !== record.runId || current.daemonPid !== record.daemonPid) {
+      throw new Error('Kintio Runtime identity changed during its update gate');
+    }
+    if (!processIsAlive(record.daemonPid)) {
+      removeDaemonMetadata(location);
+      return true;
+    }
+    try {
+      const state = await requestControl(location.home, 'ping', 500);
+      if (state.phase === 'running' || state.phase === 'backoff' || state.phase === 'failed') {
+        return false;
+      }
+      if (state.phase === 'stopping') {
+        await waitForDaemonStopped(location, DAEMON_STOP_TIMEOUT_MS);
+        return true;
+      }
+    } catch {
+      // The accepted gate may already be closing the control socket.
+    }
+    await delay(50);
+  }
+  throw new Error(
+    'Kintio Runtime state is uncertain after the update idle gate; no package was installed',
+  );
+}
+
+async function updateKintio(
+  location: InstanceLocation,
+  runtime: CliRuntime,
+): Promise<number> {
+  runtime.stdout('Checking for Kintio updates...\n');
+  const prepared = await runtime.updater.prepare({
+    packageRoot: runtime.packageRoot,
+    currentVersion: KINTIO_VERSION,
+    cwd: runtime.homeDirectory,
+    inheritedEnvironment: runtime.env,
+  });
+  if (prepared.kind === 'current') {
+    runtime.stdout(
+      `No newer Kintio version is available (installed ${KINTIO_VERSION}, ` +
+      `Registry ${prepared.targetVersion}).\n`,
+    );
+    return 0;
+  }
+
+  const locations = [...new Map([
+    location,
+    // A custom home must not hide the default shared runtime from the update gate.
+    instanceLocation({ home: path.join(runtime.homeDirectory, '.kintio') }, runtime, 'ilink'),
+  ].map((item) => [path.resolve(item.home), item])).values()];
+
+  return await withUpdateSignalGuard(async (signal) => {
+    return await withInstallationUpdateLock(runtime, async () => {
+      // Hold the shared lifecycle gate throughout the installation update.
+      const coordinate = async (index: number): Promise<number> => {
+        const candidate = locations[index];
+        if (candidate) {
+          prepareDirectories(candidate.home);
+          return withLifecycleLock(candidate, () => coordinate(index + 1));
+        }
+        const active: InstanceLocation[] = [];
+        for (const item of locations) {
+          if (await probeDaemon(item)) active.push(item);
+        }
+        if (active.length > 1) {
+          throw new Error('Multiple Kintio homes are running; stop the other runtime before updating. No package was changed.');
+        }
+        location = active[0] || location;
+        signal.throwIfInterrupted();
+        const diskVersion = readInstalledPackageIdentity(
+          prepared.installation.packageRoot,
+        ).version;
+        if (
+          diskVersion !== prepared.currentVersion &&
+          diskVersion !== prepared.targetVersion
+        ) {
+          throw new Error(
+            `Installed Kintio changed from ${prepared.currentVersion} to ${diskVersion} ` +
+            'while this update was waiting',
+          );
+        }
+        const existing = await probeDaemon(location);
+        const record = existing ? readDaemonRecord(location.home) : null;
+        let restoredLocation = location;
+        let restoredRuntime = runtime;
+        let state: RuntimeStateIdentity;
+        let snapshot: RuntimeUpdateSnapshot | undefined;
+        if (existing) {
+          if (!record) throw new Error('Kintio daemon record disappeared during update');
+          restoredLocation = {
+            home: location.home,
+            configFile: record.configFile,
+          };
+          state = record.state;
+          restoredRuntime = runtimeAtState(runtime, state);
+          assertDaemonInstance(
+            restoredLocation,
+            runtime.packageRoot,
+            record.mode,
+          );
+          const daemonRuntime = prepareDaemonRuntime(
+            restoredLocation,
+            restoredRuntime,
+            record.mode,
+          );
+          assertSameState(daemonRuntime.config.state, state);
+          snapshot = { identity: daemonRuntime.identity, state };
+        } else {
+          state = loadIlinkEnrollmentConfig({
+            environment: { ...runtime.env },
+            envFile: restoredLocation.configFile,
+            root: restoredLocation.home,
+          }).state;
+        }
+
+        if (record) {
+          if (!snapshot) throw new Error('Kintio update snapshot is missing');
+          signal.throwIfInterrupted();
+          let decision: ControlResponse;
+          try {
+            decision = await runtime.stopIfIdle(location.home, snapshot.identity);
+          } catch (error: unknown) {
+            if (await daemonStoppedAfterUncertainGate(restoredLocation, record)) {
+              return await recoverRuntimeAfterUpdateFailure(
+                prepared,
+                restoredLocation,
+                restoredRuntime,
+                record.mode,
+                snapshot,
+                error,
+              );
+            }
+            throw error;
+          }
+          if (!decision.idle) {
+            signal.throwIfInterrupted();
+            throw new Error(
+              'Kintio has active conversation work; no update was installed',
+            );
+          }
+          await waitForDaemonStopped(restoredLocation, DAEMON_STOP_TIMEOUT_MS);
+          try {
+            signal.throwIfInterrupted();
+          } catch (error: unknown) {
+            return await recoverRuntimeAfterUpdateFailure(
+              prepared,
+              restoredLocation,
+              restoredRuntime,
+              record.mode,
+              snapshot,
+              error,
+            );
+          }
+        }
+
+        let instanceReservation: InstanceLock;
+        try {
+          instanceReservation = reserveInstanceForUpdate(state);
+        } catch (error: unknown) {
+          if (record) {
+            return await recoverRuntimeAfterUpdateFailure(
+              prepared,
+              restoredLocation,
+              restoredRuntime,
+              record.mode,
+              snapshot!,
+              error,
+            );
+          }
+          throw error;
+        }
+
+        const installedRuntime = runtimeAtPackage(
+          restoredRuntime,
+          prepared.installation.packageRoot,
+        );
+        try {
+          signal.throwIfInterrupted();
+          if (diskVersion !== prepared.targetVersion) {
+            runtime.stdout(
+              `Updating Kintio ${prepared.currentVersion} -> ${prepared.targetVersion} ` +
+              `with ${prepared.installation.manager}...\n`,
+            );
+            await runtime.updater.install(prepared);
+          }
+          signal.throwIfInterrupted();
+          await runtime.updater.verify(prepared);
+          signal.throwIfInterrupted();
+        } catch (error: unknown) {
+          instanceReservation.release();
+          if (error instanceof ProcessTreeTerminationError) {
+            throw new Error(
+              `${error.message}; the Kintio Runtime remains stopped because package ` +
+              'installation may still be changing',
+              { cause: error },
+            );
+          }
+          if (record) {
+            return await recoverRuntimeAfterUpdateFailure(
+              prepared,
+              restoredLocation,
+              restoredRuntime,
+              record.mode,
+              snapshot!,
+              error,
+            );
+          }
+          throw error;
+        }
+        instanceReservation.release();
+
+        if (record) {
+          try {
+            await restoreBackgroundRuntime(
+              restoredLocation,
+              installedRuntime,
+              record.mode,
+              snapshot!,
+            );
+            runtime.stdout(
+              `Kintio ${daemonModeLabel(record.mode)} Runtime was restored.\n`,
+            );
+          } catch (error: unknown) {
+            throw new Error(
+              `Kintio ${prepared.targetVersion} was installed, but the ${record.mode} ` +
+              `Runtime was not restored: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+              { cause: error },
+            );
+          }
+        }
+        signal.throwIfInterrupted();
+        runtime.stdout(
+          diskVersion === prepared.targetVersion
+            ? `Kintio ${prepared.targetVersion} is installed and verified.\n`
+            : `Kintio ${prepared.targetVersion} was installed successfully.\n`,
+        );
+        return 0;
+      };
+      return coordinate(0);
+    });
   });
 }
 
@@ -869,6 +1488,23 @@ async function followLog(
   }
 }
 
+async function runConfiguredIlinkLogin(
+  runtime: CliRuntime,
+  config: ReturnType<typeof loadIlinkEnrollmentConfig>,
+  signal: AbortSignal,
+  qrOutputPath?: string,
+): Promise<number> {
+  return await runtime.ilinkLogin({
+    config,
+    packageRoot: runtime.packageRoot,
+    stdout: runtime.stdout,
+    stdoutIsTTY: runtime.stdoutIsTTY,
+    stdoutColumns: runtime.stdoutColumns,
+    ...(qrOutputPath ? { qrOutputPath } : {}),
+    signal,
+  });
+}
+
 export async function runCli(
   args: readonly string[],
   overrides: Partial<CliRuntime> = {},
@@ -912,38 +1548,45 @@ export async function runCli(
       runtime.stdout(HELP);
       return 0;
     }
-    if (!COMMANDS.has(command)) throw new Error(`Unknown command: ${command}`);
-    if (command === 'ilink') {
-      if (parsed.values.help && parsed.positionals.length === 1) {
-        runtime.stdout(ILINK_HELP);
+    if (!COMMANDS.has(command)) {
+      throw new Error(`Unknown command: ${command}. Use "kintio wecom --help" or "kintio ilink --help".`);
+    }
+    const lifecycleCommand = command === 'wecom' || command === 'ilink' ? subcommand : command;
+    if (command === 'wecom' || command === 'ilink') {
+      if ((parsed.values.help || !subcommand) && parsed.positionals.length === 1) {
+        runtime.stdout(command === 'wecom' ? WECOM_HELP : ILINK_HELP);
         return 0;
       }
       if (
-        !subcommand || !ILINK_COMMANDS.has(subcommand) ||
+        !subcommand || !(command === 'wecom' ? WECOM_COMMANDS : ILINK_COMMANDS).has(subcommand) ||
         parsed.positionals.length !== 2
       ) {
-        throw new Error('Usage: kintio ilink <login|list|start|stop|delete>');
+        throw new Error(command === 'wecom'
+          ? 'Usage: kintio wecom <setup|start|run|stop|restart|status|logs>'
+          : 'Usage: kintio ilink <login|list|start|stop|delete|restart|status|logs>');
       }
     } else if (parsed.positionals.length !== 1) {
       throw new Error(`Unexpected argument: ${subcommand}`);
     }
     if (parsed.values.help) {
       runtime.stdout(
-        command !== 'ilink'
-          ? HELP
+        command === 'update' || command === 'upgrade'
+          ? UPDATE_HELP
+          : command === 'wecom'
+            ? WECOM_HELP
           : subcommand === 'login' ? ILINK_LOGIN_HELP
             : subcommand === 'list' ? ILINK_LIST_HELP
               : subcommand === 'start' ? ILINK_START_HELP
                 : subcommand === 'stop' ? ILINK_STOP_HELP
-                  : ILINK_DELETE_HELP,
+                  : subcommand === 'delete' ? ILINK_DELETE_HELP : ILINK_HELP,
       );
       return 0;
     }
     if (
-      command !== 'logs' &&
+      lifecycleCommand !== 'logs' &&
       (parsed.values.lines !== undefined || parsed.values['no-follow'])
     ) {
-      throw new Error('--lines and --no-follow are valid only for "kintio logs"');
+      throw new Error('--lines and --no-follow are valid only for "kintio wecom logs" or "kintio ilink logs"');
     }
     if (
       (command !== 'ilink' || subcommand !== 'login') &&
@@ -969,14 +1612,14 @@ export async function runCli(
     if (parsed.values.foreground && (command !== 'ilink' || subcommand !== 'start')) {
       throw new Error('--foreground is valid only for "kintio ilink start"');
     }
-    const location = instanceLocation(parsed.values, runtime);
+    const location = instanceLocation(parsed.values, runtime, command === 'wecom' ? 'wecom' : 'ilink');
     const qrOutputPath = parsed.values['qr-output'] === undefined
       ? undefined
       : resolveInputPath(parsed.values['qr-output'], runtime.cwd);
     if (qrOutputPath && !samePath(path.dirname(qrOutputPath), location.home)) {
       throw new Error('iLink QR output must be directly inside the instance directory');
     }
-    if (command === 'ilink') {
+    if (command === 'ilink' && ILINK_ACCOUNT_COMMANDS.has(subcommand!)) {
       if (privateFile(location.configFile, 'Kintio config')) {
         assertTrustedDirectory(
           path.dirname(location.configFile),
@@ -985,110 +1628,281 @@ export async function runCli(
         );
       }
       prepareDirectories(location.home);
-      return await runWithIlinkSignals(async (signal) => {
-        const enrollmentConfig = loadIlinkEnrollmentConfig({
-          environment: { ...runtime.env },
-          envFile: location.configFile,
-          root: location.home,
-        });
-        if (subcommand === 'login') {
-          return await runtime.ilinkLogin({
-            config: enrollmentConfig,
-            packageRoot: runtime.packageRoot,
-            stdout: runtime.stdout,
-            stdoutIsTTY: runtime.stdoutIsTTY,
-            stdoutColumns: runtime.stdoutColumns,
-            ...(qrOutputPath ? { qrOutputPath } : {}),
-            signal,
-          });
-        }
-        const foreground = Boolean(parsed.values.foreground);
-        const commandResult = await runtime.ilinkAccount({
-          command: subcommand as 'list' | 'start' | 'stop' | 'delete',
-          ...(parsed.values.account ? { selector: parsed.values.account } : {}),
-          confirmed: Boolean(parsed.values.yes),
-          config: enrollmentConfig,
-          packageRoot: runtime.packageRoot,
-          signal,
-          stdout: runtime.stdout,
-          ...(subcommand === 'start'
-            ? { deferStandaloneStart: !foreground }
-            : {}),
-        });
-        if (subcommand === 'start' && commandResult.runtimeRequired) {
-          const runtimeConfig = loadIlinkRuntimeConfig({
+      const foreground = Boolean(parsed.values.foreground);
+      const interactive = runtime.stdinIsTTY && runtime.stdoutIsTTY;
+      const operation = () => runWithIlinkSignals(async (signal) => {
+        let automaticLoginSucceeded = false;
+        let preserveErrorAfterAbort = false;
+        try {
+          const enrollmentConfig = loadIlinkEnrollmentConfig({
             environment: { ...runtime.env },
             envFile: location.configFile,
             root: location.home,
           });
-          if (foreground) {
-            refreshManagedSkill(runtimeConfig.codex.workingDirectory, runtime);
-            return await runtime.ilinkStart({
-              config: runtimeConfig,
+          if (subcommand === 'login') {
+            return await runConfiguredIlinkLogin(
+              runtime,
+              enrollmentConfig,
+              signal,
+              qrOutputPath,
+            );
+          }
+          if (subcommand === 'list') {
+            await runtime.ilinkAccount({
+              command: 'list',
+              config: enrollmentConfig,
+              packageRoot: runtime.packageRoot,
               signal,
               stdout: runtime.stdout,
             });
+            return 0;
           }
-          if (!commandResult.selectedAccountKey) {
-            throw new Error('iLink start did not resolve an account identity');
-          }
-          await startIlinkDaemon(location, runtime);
-          await runtime.ilinkAccount({
-            command: 'start',
-            selector: commandResult.selectedAccountKey,
+
+          let snapshot = await runtime.ilinkSnapshot({
             config: enrollmentConfig,
             packageRoot: runtime.packageRoot,
             signal,
-            stdout: runtime.stdout,
           });
-          return 0;
-        }
-        if (
-          (subcommand === 'stop' || subcommand === 'delete') &&
-          commandResult.runningCount === 0 &&
-          readDaemonRecord(location.home)?.mode === 'ilink'
-        ) {
-          await withLifecycleLock(location, async () => {
-            if (readDaemonRecord(location.home)?.mode === 'ilink') {
-              try {
-                await stopDaemon(location, DAEMON_STOP_TIMEOUT_MS);
-              } catch (error: unknown) {
-                if (readDaemonRecord(location.home)) throw error;
-              }
+          const selector = parsed.values.account;
+          if (
+            subcommand === 'start' &&
+            !selector &&
+            snapshot.accounts.length === 0
+          ) {
+            if (!interactive) {
+              throw new Error(
+                'No iLink account is enrolled; run "kintio ilink login" first',
+              );
             }
-          });
+            const login = () => runConfiguredIlinkLogin(
+              runtime,
+              enrollmentConfig,
+              signal,
+            );
+            const loginResult = foreground
+              ? await login()
+              : await withLifecycleLock(location, login);
+            if (loginResult !== 0) return loginResult;
+            signal.throwIfAborted();
+            automaticLoginSucceeded = true;
+            snapshot = await runtime.ilinkSnapshot({
+              config: enrollmentConfig,
+              packageRoot: runtime.packageRoot,
+              signal,
+            });
+            if (snapshot.accounts.length === 0) {
+              throw new Error('iLink login completed without enrolling an account');
+            }
+          }
+
+          if (
+            subcommand === 'delete' &&
+            !interactive &&
+            (!selector || !parsed.values.yes)
+          ) {
+            throw new Error(
+              'Non-interactive iLink deletion requires --account and --yes',
+            );
+          }
+          const selected = selector || snapshot.accounts.length <= 1 || !interactive
+            ? resolveIlinkAccount(
+                snapshot.accounts,
+                selector,
+                snapshot.mode === 'runtime',
+              )
+            : await runtime.ilinkPickAccount({
+                accounts: snapshot.accounts,
+                command: subcommand as 'start' | 'stop' | 'delete',
+                runtimeActive: snapshot.mode === 'runtime',
+                signal,
+              });
+          if (!selected) {
+            runtime.stdout('Cancelled; no changes made.\n');
+            return 0;
+          }
+          signal.throwIfAborted();
+
+          let confirmed = Boolean(parsed.values.yes);
+          if (subcommand === 'delete' && !confirmed) {
+            if (!interactive) {
+              throw new Error('Non-interactive iLink deletion requires --yes');
+            }
+            confirmed = await runtime.ilinkConfirmDelete({
+              account: selected,
+              signal,
+            });
+            if (!confirmed) {
+              runtime.stdout('Cancelled; no changes made.\n');
+              return 0;
+            }
+            signal.throwIfAborted();
+          }
+
+          const dispatchMutation = async <T>(mutation: () => Promise<T>): Promise<T> => {
+            signal.throwIfAborted();
+            let result: T;
+            try {
+              result = await mutation();
+            } catch (error: unknown) {
+              if (signal.aborted) preserveErrorAfterAbort = true;
+              throw error;
+            }
+            signal.throwIfAborted();
+            return result;
+          };
+          const mutate = async (): Promise<number> => {
+            const commandResult = await dispatchMutation(() => runtime.ilinkAccount({
+              command: subcommand as 'start' | 'stop' | 'delete',
+              expectedAccount: selected,
+              requiredMode: snapshot.mode,
+              confirmed,
+              config: enrollmentConfig,
+              packageRoot: runtime.packageRoot,
+              signal,
+              stdout: runtime.stdout,
+              ...(subcommand === 'start'
+                ? { deferStandaloneStart: !foreground }
+                : {}),
+            }));
+            if (subcommand !== 'start' || !commandResult.runtimeRequired) return 0;
+            const runtimeConfig = loadSharedRuntimeConfig({
+              environment: { ...runtime.env },
+              envFile: location.configFile,
+              root: location.home,
+            });
+            if (foreground) {
+              return await runtime.ilinkStart({
+                config: runtimeConfig,
+                signal,
+                stdout: runtime.stdout,
+              });
+            }
+            if (!commandResult.selectedAccountKey) {
+              throw new Error('iLink start did not resolve an account identity');
+            }
+            signal.throwIfAborted();
+            const started = await startIlinkDaemonLocked(location, runtime);
+            try {
+              signal.throwIfAborted();
+              await dispatchMutation(() => runtime.ilinkAccount({
+                command: 'start',
+                expectedAccount: selected,
+                requiredMode: 'runtime',
+                config: enrollmentConfig,
+                packageRoot: runtime.packageRoot,
+                signal,
+                stdout: runtime.stdout,
+              }));
+            } catch (error: unknown) {
+              try {
+                await rollbackEmptyIlinkDaemonLocked(
+                  location,
+                  runtime,
+                  enrollmentConfig,
+                  started,
+                );
+              } catch (rollbackError: unknown) {
+                if (signal.aborted) preserveErrorAfterAbort = true;
+                throw new Error(
+                  `${error instanceof Error ? error.message : String(error)}; ` +
+                  `the newly started iLink Runtime could not be rolled back: ${
+                    rollbackError instanceof Error
+                      ? rollbackError.message
+                      : String(rollbackError)
+                  }`,
+                  { cause: error },
+                );
+              }
+              throw error;
+            }
+            return 0;
+          };
+          return foreground || snapshot.mode === 'runtime'
+            ? await mutate()
+            : await withLifecycleLock(location, mutate);
+        } catch (error: unknown) {
+          if (
+            error instanceof IlinkPromptInterruptedError ||
+            (signal.aborted && !preserveErrorAfterAbort)
+          ) return 130;
+          if (automaticLoginSucceeded) {
+            throw new Error(
+              `${error instanceof Error ? error.message : String(error)}; ` +
+              'iLink login succeeded, retry "kintio ilink start" with the same instance options',
+              { cause: error },
+            );
+          }
+          throw error;
         }
+      });
+      return subcommand === 'login' || (subcommand === 'start' && foreground)
+        ? await withLifecycleLock(location, operation)
+        : await operation();
+    }
+    if (lifecycleCommand === 'setup') return setup(location, runtime);
+    if (lifecycleCommand === 'update' || lifecycleCommand === 'upgrade') {
+      return await updateKintio(location, runtime);
+    }
+    if (lifecycleCommand === 'start') return await start(location, runtime);
+    if (command === 'wecom' && (lifecycleCommand === 'stop' || lifecycleCommand === 'restart')) {
+      if (lifecycleCommand === 'restart') processEnvironment(location, runtime);
+      const config = loadSharedRuntimeConfig({ root: location.home, envFile: location.configFile, environment: runtime.env });
+      if (!hasRuntimeOperator(config.state) && !await probeDaemon(location)) {
+        if (lifecycleCommand === 'restart') return await start(location, runtime);
+        runtime.stdout('WeCom is not running.\n');
+        return 0;
+      }
+      await runtime.wecomControl(config, runtime.packageRoot, lifecycleCommand, location.wecomConfigFile);
+      runtime.stdout(`WeCom ${lifecycleCommand === 'stop' ? 'stopped' : 'restarted'}.\n`);
+      return 0;
+    }
+    if (lifecycleCommand === 'restart') {
+      return await withLifecycleLock(location, async () => {
+        const config = loadSharedRuntimeConfig({ root: location.home, envFile: location.configFile, environment: runtime.env });
+        if (hasRuntimeOperator(config.state)) {
+          await runtime.ilinkRestart(config, runtime.packageRoot);
+        } else {
+          const result = await startBackgroundDaemonLocked(location, runtime, ilinkDaemonEnvironment(location, runtime), 'shared');
+          if (result.alreadyRunning) await runtime.ilinkRestart(config, runtime.packageRoot);
+        }
+        runtime.stdout('Enabled iLink listeners restarted.\n');
         return 0;
       });
     }
-    if (command === 'setup') return setup(location, runtime);
-    if (command === 'start') return await start(location, runtime, false);
-    if (command === 'restart') return await start(location, runtime, true);
-    if (command === 'run') {
+    if (lifecycleCommand === 'run') {
       const environment = processEnvironment(location, runtime);
-      return await runtime.execute({
-        file: process.execPath,
-        args: [path.join(runtime.packageRoot, 'dist/index.js')],
-        env: { ...environment, KINTIO_MANAGED_WORKER: '1' },
-      });
+      return await withLifecycleLock(location, () => runtime.execute({
+          file: process.execPath,
+          args: [path.join(runtime.packageRoot, 'dist/worker.js')],
+          env: { ...environment, KINTIO_START_WECOM: location.wecomConfigFile || path.join(location.home, 'wecom/.env'), KINTIO_MANAGED_WORKER: '1' },
+        }));
     }
-    if (command === 'stop') return await stop(runtime, location);
-    if (command === 'status') {
+    if (lifecycleCommand === 'status') {
       const existing = await probeDaemon(location);
       if (!existing) {
+        const config = loadSharedRuntimeConfig({ root: location.home, envFile: location.configFile, environment: runtime.env });
+        if (hasRuntimeOperator(config.state)) {
+          const snapshot = await runtime.ilinkSnapshot({ config, packageRoot: runtime.packageRoot, signal: AbortSignal.timeout(5_000) });
+          const running = command === 'wecom' ? (await runtime.wecomControl(config, runtime.packageRoot, 'status')).running : snapshot.accounts.some((account) => account.runtimeEnabled);
+          runtime.stdout(`${command === 'wecom' ? 'WeCom' : 'iLink'} is ${running ? 'running' : 'stopped'} in the foreground Kintio runtime.\n`);
+          return 0;
+        }
         runtime.stdout('Kintio is not running.\n');
         return 0;
       }
       assertDaemonInstance(location, runtime.packageRoot);
+      const wecom = command === 'wecom' && existing.phase === 'running'
+        ? await runtime.wecomControl(loadSharedRuntimeConfig({ root: location.home, envFile: location.configFile, environment: runtime.env }), runtime.packageRoot, 'status')
+        : undefined;
       runtime.stdout(
-        `Kintio is ${existing.phase} in ${readDaemonRecord(location.home)?.mode || 'service'} mode ` +
+        `${wecom ? `WeCom is ${wecom.running ? 'running' : 'stopped'}; ` : ''}Kintio shared runtime is ${existing.phase} ` +
         `(daemon PID ${existing.daemonPid}` +
         `${existing.workerPid ? `, worker PID ${existing.workerPid}` : ''}).` +
         `${existing.message ? ` ${existing.message}` : ''}\n`,
       );
       return existing.phase === 'failed' ? 1 : 0;
     }
-    if (command === 'logs') {
+    if (lifecycleCommand === 'logs') {
       const filePath = logFilePath(location);
       const lines = positiveLineCount(parsed.values.lines);
       if (parsed.values['no-follow']) {

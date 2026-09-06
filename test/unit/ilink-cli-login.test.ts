@@ -6,13 +6,13 @@ import path from 'node:path';
 import type { TestContext } from 'vitest';
 import { test, vi } from 'vitest';
 
-import { loadConfig } from '../../src/config.ts';
+import { loadIlinkRuntimeConfig } from '../../src/config.ts';
 import { runIlinkCliLogin } from '../../src/ilink/cli-login.ts';
 import type { IlinkLoginStatus } from '../../src/ilink/login-store.ts';
 
 function config() {
   const root = path.join(os.tmpdir(), 'kintio-ilink-cli-config');
-  return loadConfig({
+  return loadIlinkRuntimeConfig({
     root,
     environment: {
       ILINK_ENABLED: 'true',

@@ -5,13 +5,17 @@ import path from 'node:path';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { test } from 'vitest';
 
-import { createConfig } from '../../src/config.ts';
+import { loadIlinkRuntimeConfig } from '../../src/config.ts';
 import { runIlinkAccountCommand } from '../../src/ilink/cli-accounts.ts';
 import { runIlinkCliLogin } from '../../src/ilink/cli-login.ts';
 import { IlinkLoginManager } from '../../src/ilink/login-manager.ts';
 import type { IlinkQrStatusResponse } from '../../src/ilink/protocol/types.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
-import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
+import {
+  assertIlinkAccountRevision,
+  createIlinkAccountIncarnation,
+  createIlinkAccountKey,
+} from '../../src/ilink/store-types.ts';
 import { createIlinkLoginMcpServer } from '../../src/mcp/ilink-login-server.ts';
 import { McpIpcHost } from '../../src/mcp/ipc-host.ts';
 import { operatorMcpInstanceKey } from '../../src/mcp/ipc-protocol.ts';
@@ -22,12 +26,12 @@ test('non-TTY QR output reaches the Worker through private local MCP and cleans 
   const root = temp.directory;
   let now = 1_000_000;
   const storageKey = Buffer.alloc(32, 44).toString('base64url');
-  const config = createConfig({
+  const config = loadIlinkRuntimeConfig({ environment: {
     ILINK_ENABLED: 'true',
     KINTIO_DB_FILE: temp.filePath,
     CODEX_WORKING_DIRECTORY: path.join(root, 'codex-workspace'),
     ILINK_STORAGE_KEY: storageKey,
-  }, root);
+  }, root: root });
   const persistence = temp.openInjectedPersistenceForTest({ clock: () => now });
   const accounts = persistence.createIlinkStore({ clock: () => now });
   const secretBox = new IlinkSecretBox(storageKey);
@@ -68,6 +72,13 @@ test('non-TTY QR output reaches the Worker through private local MCP and cleans 
   });
   await manager.start();
   const calls = { begin: 0, status: 0, cancel: 0 };
+  const operatorAccount = (stored: NonNullable<ReturnType<typeof accounts.getAccountWithSecret>>) => ({
+    accountKey: stored.account.accountKey,
+    generation: stored.account.generation,
+    incarnation: createIlinkAccountIncarnation(stored.account, stored.secret),
+    providerAccountId: stored.account.providerAccountId,
+    runtimeEnabled: stored.account.runtimeEnabled,
+  });
   const host = new McpIpcHost({
     instanceKey: operatorMcpInstanceKey(config.state.lockFile),
     stateDirectory: path.dirname(config.state.lockFile),
@@ -87,30 +98,22 @@ test('non-TTY QR output reaches the Worker through private local MCP and cleans 
         calls.cancel += 1;
         return manager.cancel(offerId);
       },
-      listAccounts: () => accounts.listActiveAccounts().map((account) => ({
-        accountKey: account.accountKey,
-        providerAccountId: account.providerAccountId,
-        runtimeEnabled: account.runtimeEnabled,
-      })),
-      async setAccountRuntime(accountKey, enabled) {
+      listAccounts: () => accounts.listActiveAccountsWithSecrets().map(operatorAccount),
+      async setAccountRuntime(accountKey, enabled, expected) {
+        const before = accounts.getAccountWithSecret(accountKey as `ia_${string}`);
+        assertIlinkAccountRevision(before ? operatorAccount(before) : undefined, expected);
         const account = accounts.setRuntimeEnabled(accountKey as `ia_${string}`, enabled);
         return {
-          account: {
-            accountKey: account.accountKey,
-            providerAccountId: account.providerAccountId,
-            runtimeEnabled: account.runtimeEnabled,
-          },
+          account: operatorAccount({ account, secret: before!.secret }),
           runningCount: accounts.listRuntimeAccountsWithSecrets().length,
         };
       },
-      async deleteAccount(accountKey) {
+      async deleteAccount(accountKey, expected) {
+        const before = accounts.getAccountWithSecret(accountKey as `ia_${string}`);
+        assertIlinkAccountRevision(before ? operatorAccount(before) : undefined, expected);
         const account = accounts.deleteAccountCompletely(accountKey as `ia_${string}`);
         return {
-          account: {
-            accountKey: account.accountKey,
-            providerAccountId: account.providerAccountId,
-            runtimeEnabled: account.runtimeEnabled,
-          },
+          account: operatorAccount({ account, secret: before!.secret }),
           runningCount: accounts.listRuntimeAccountsWithSecrets().length,
         };
       },

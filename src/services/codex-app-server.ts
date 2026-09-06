@@ -100,6 +100,7 @@ export type SpawnProcess = (
   argumentsList: readonly string[],
   options: {
     readonly stdio: readonly ['pipe', 'pipe', 'pipe'];
+    readonly windowsHide: true;
   },
 ) => ProcessLike;
 
@@ -261,6 +262,7 @@ export class CodexAppServer implements CodexBoundary {
     const argumentsList = ['app-server', '--stdio', ...configArguments];
     const child = this.#options.spawnProcess(command, argumentsList, {
       stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
     });
     this.#process = child;
     child.once('error', (error) => {

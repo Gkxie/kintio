@@ -71,7 +71,11 @@ export class IlinkLoginManager {
   readonly #clock: () => number;
   readonly #onAccountsChanged: () => void | Promise<void>;
   readonly #sleep: IlinkLoginSleep;
-  readonly #running = new Map<string, { controller: AbortController; task: Promise<void> }>();
+  readonly #running = new Map<string, {
+    controller: AbortController;
+    initiatorKind: IlinkLoginRuntimeOffer['initiatorKind'];
+    task: Promise<void>;
+  }>();
   #closed = false;
 
   constructor({
@@ -190,6 +194,12 @@ export class IlinkLoginManager {
     return this.#offers.finish(offerId, 'cancelled');
   }
 
+  hasActiveLocalOperatorLogin(): boolean {
+    return [...this.#running.values()].some(
+      ({ initiatorKind }) => initiatorKind === 'local_operator',
+    );
+  }
+
   #startPolling(offer: IlinkLoginRuntimeOffer): void {
     if (this.#running.has(offer.offerId) || this.#closed) return;
     const controller = new AbortController();
@@ -212,7 +222,11 @@ export class IlinkLoginManager {
         this.#running.delete(offer.offerId);
       }
     });
-    this.#running.set(offer.offerId, { controller, task });
+    this.#running.set(offer.offerId, {
+      controller,
+      initiatorKind: offer.initiatorKind,
+      task,
+    });
   }
 
   async #poll(initial: IlinkLoginRuntimeOffer, signal: AbortSignal): Promise<void> {

@@ -4,6 +4,47 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- **Breaking:** move callback-channel commands under `kintio wecom` and remove
+  ungrouped startup. WeCom configuration lives in `~/.kintio/wecom`; iLink keeps
+  `~/.kintio`. A shared worker owns SQLite, recovery, and the global scheduler;
+  the singleton WeCom listener and iLink accounts can be started/stopped independently. Manage iLink enrollment through `kintio ilink`; the WeCom invitation tool
+  is removed and iLink no longer installs the WeCom reply Skill.
+
+- Removed historical database migrations, retired configuration aliases, and
+  old daemon metadata support. Kintio now uses only its current data formats;
+  schema 24 receives an additive singleton-state table upgrade to 25; other
+  incompatible databases are rejected and never reset silently.
+
+- Reduced the npm artifact to runtime resources, generated new instance
+  configuration directly inside the Kintio home, and published a Changelog
+  that starts at the packaged version without repository-only headings
+  ([#84](https://github.com/Gkxie/kintio/issues/84)).
+
+## 0.8.0
+
+- Removed the redundant Owner PR/manual hosted Codex workflow so the protected,
+  deterministic Release Bot check is the only hosted real-Codex validation path
+  ([#80](https://github.com/Gkxie/kintio/issues/80)).
+
+- Allowed deterministic Release Bot pull requests to expose the optional,
+  maintainer-approved real Codex smoke test only after a secret-free validation
+  of the exact three-file release plan ([#78](https://github.com/Gkxie/kintio/issues/78)).
+
+- Added equivalent `kintio update` and `kintio upgrade` commands that update an
+  identified global npm or pnpm installation to one exact published version,
+  refuse active Agent work, and restore an idle background instance in its
+  original service or iLink mode ([#74](https://github.com/Gkxie/kintio/issues/74)).
+- Made `kintio ilink start` open login automatically when no account exists and
+  added searchable account selection plus default-No deletion confirmation;
+  explicit `--account` and `--yes` remain available for automation
+  ([#74](https://github.com/Gkxie/kintio/issues/74)).
+
+## 0.7.2
+
+- Prevented the background Agent process on Windows from opening a persistent
+  empty `cmd.exe` window while preserving its stdio transport and lifecycle
+  ownership ([#70](https://github.com/Gkxie/kintio/issues/70)).
+
 ## 0.7.1
 
 - Made `kintio ilink start` use the managed background daemon by default while

@@ -30,6 +30,11 @@ export interface IlinkAccountRecord {
   readonly updatedAt: number;
 }
 
+export interface IlinkAccountRevision {
+  readonly generation: number;
+  readonly incarnation: `ii_${string}`;
+}
+
 export interface IlinkAccountSecretRecord {
   readonly accountKey: IlinkAccountKey;
   readonly ownerPeerId: string;
@@ -100,6 +105,43 @@ export class IlinkStoreContractError extends Error {
     this.name = 'IlinkStoreContractError';
     this.code = code;
   }
+}
+
+export function assertIlinkAccountRevision(
+  account: IlinkAccountRevision | undefined,
+  expected: IlinkAccountRevision,
+): void {
+  if (
+    !account ||
+    account.generation !== expected.generation ||
+    account.incarnation !== expected.incarnation
+  ) {
+    contractError('The selected iLink account changed; select it again', 'account_revision_changed');
+  }
+}
+
+export function createIlinkAccountIncarnation(
+  account: IlinkAccountRecord,
+  secret: IlinkAccountSecretRecord,
+): `ii_${string}` {
+  if (
+    account.accountKey !== secret.accountKey ||
+    account.generation !== secret.accountGeneration
+  ) {
+    contractError('iLink account secret generation is stale', 'generation_conflict');
+  }
+  const sealed = secret.sealedBotToken;
+  return `ii_${createHash('sha256')
+    .update(account.accountKey)
+    .update('\0')
+    .update(String(account.generation))
+    .update('\0')
+    .update(sealed.nonce)
+    .update('\0')
+    .update(sealed.ciphertext)
+    .update('\0')
+    .update(sealed.authTag)
+    .digest('hex')}`;
 }
 
 function contractError(message: string, code: string): never {

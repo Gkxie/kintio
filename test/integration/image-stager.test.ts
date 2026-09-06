@@ -93,8 +93,8 @@ test('staged image inputs use private files and always clean their directory', a
   await fs.mkdir(unrelated);
   cleanupStagedImageOrphans(root);
   await assert.rejects(fs.access(orphan), { code: 'ENOENT' });
-  await assert.rejects(fs.access(talkFerryOrphan), { code: 'ENOENT' });
-  await assert.rejects(fs.access(originalOrphan), { code: 'ENOENT' });
+  await fs.access(talkFerryOrphan);
+  await fs.access(originalOrphan);
   await fs.access(unrelated);
   if (process.platform !== 'win32') {
     assert.equal((await fs.stat(root)).mode & 0o777, 0o755);

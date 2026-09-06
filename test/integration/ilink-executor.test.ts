@@ -161,7 +161,7 @@ test('WeChat delivery failures cannot change iLink attempts in either order', as
 
 test('iLink session cannot trigger any WeChat KF media or send side effect', async (t) => {
   const created = await fixture(t);
-  const calls = { upload: 0, clone: 0, thumbnail: 0, send: 0, offer: 0 };
+  const calls = { upload: 0, clone: 0, thumbnail: 0, send: 0 };
   const executor = new WechatKfToolExecutor({
     store: created.store,
     apiClient: {
@@ -184,13 +184,6 @@ test('iLink session cannot trigger any WeChat KF media or send side effect', asy
         return 'must-not-thumbnail';
       },
     },
-    ilinkOffers: {
-      async offer() {
-        calls.offer += 1;
-        return { offerId: 'must-not-offer', png: Buffer.alloc(8) };
-      },
-      cancel() {},
-    },
     observeMs: 0,
   });
   const session = created.session.token;
@@ -205,7 +198,6 @@ test('iLink session cannot trigger any WeChat KF media or send side effect', asy
     ['send_location', {
       name: 'location', address: 'address', latitude: 1, longitude: 2,
     }],
-    ['offer_weixin_bot_channel', {}],
   ] as const) {
     await assert.rejects(
       executor.execute(tool, { session, ...input }),
@@ -215,7 +207,7 @@ test('iLink session cannot trigger any WeChat KF media or send side effect', asy
       ),
     );
   }
-  assert.deepEqual(calls, { upload: 0, clone: 0, thumbnail: 0, send: 0, offer: 0 });
+  assert.deepEqual(calls, { upload: 0, clone: 0, thumbnail: 0, send: 0 });
 });
 
 test('iLink executor distinguishes definitive and uncertain failures without retry', async (t) => {
