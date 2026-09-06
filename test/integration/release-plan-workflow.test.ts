@@ -89,6 +89,7 @@ function fixture(): {
 function verify(
   repository: string,
   baseSha: string,
+  title = 'chore(release): prepare v0.7.0',
 ): CommandResult {
   return run(
     repository,
@@ -101,7 +102,7 @@ function verify(
       HEAD_REF: 'release/next',
       HEAD_REPOSITORY: 'Gkxie/kintio',
       PR_AUTHOR: 'kintio-release[bot]',
-      PR_TITLE: 'chore(release): prepare v0.7.0',
+      PR_TITLE: title,
       RELEASE_BOT_LOGIN: 'kintio-release[bot]',
     },
   );
@@ -114,6 +115,30 @@ afterEach(() => {
 });
 
 describe('Release plan check', () => {
+  test('revalidates corrected PR metadata without changing the candidate commit', () => {
+    const workflow = fs.readFileSync('.github/workflows/release-plan.yml', 'utf8')
+      .replaceAll('\r\n', '\n');
+    assert.match(
+      workflow,
+      /^  pull_request:\n    branches: \[master\]\n    types: \[opened, synchronize, reopened, edited\]$/mu,
+    );
+    assert.match(
+      workflow,
+      /^concurrency:\n  group: release-plan-\$\{\{ github\.event\.pull_request\.number \}\}\n  cancel-in-progress: true$/mu,
+    );
+
+    const { baseSha, repository } = fixture();
+    const headSha = git(repository, 'rev-parse', 'HEAD');
+    const stale = verify(repository, baseSha, 'chore(release): prepare v0.6.2');
+    assert.notEqual(stale.status, 0);
+    assert.match(stale.stderr, /Release PR title must be chore\(release\): prepare v0\.7\.0/u);
+
+    const corrected = verify(repository, baseSha);
+    assert.equal(corrected.status, 0, corrected.stderr || corrected.stdout);
+    assert.equal(git(repository, 'rev-parse', 'HEAD'), headSha);
+    assert.equal(git(repository, 'status', '--porcelain'), '');
+  });
+
   test('accepts the exact deterministic three-file candidate', () => {
     const { baseSha, repository } = fixture();
     const result = verify(repository, baseSha);
