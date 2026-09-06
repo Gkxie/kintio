@@ -22,7 +22,6 @@ import {
   parseWorkerStopIfIdleResponse,
   sameUpdateRuntimeIdentity,
   type ControlResponse,
-  type DaemonMode,
   type DaemonPhase,
   type WorkerStopIfIdleRequest,
   writeDaemonRecord,
@@ -87,14 +86,12 @@ export async function runNativeDaemon({
   home,
   configFile,
   packageRoot,
-  mode = 'shared',
   environment = process.env,
   workerControlTimeoutMs = DEFAULT_WORKER_CONTROL_TIMEOUT_MS,
 }: {
   home: string;
   configFile: string;
   packageRoot: string;
-  mode?: DaemonMode;
   environment?: NodeJS.ProcessEnv;
   workerControlTimeoutMs?: number;
 }): Promise<void> {
@@ -480,7 +477,7 @@ export async function runNativeDaemon({
       runId,
       daemonPid: process.pid,
       configFile: instanceConfig,
-      mode,
+      mode: 'shared',
       packageRoot: instancePackageRoot,
       token,
       state: {

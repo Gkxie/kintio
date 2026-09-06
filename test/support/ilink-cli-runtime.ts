@@ -8,6 +8,20 @@ import type { TestContext } from 'vitest';
 import type { runCli } from '../../src/cli.ts';
 import { requestControl, readDaemonRecord } from '../../src/runtime/daemon-protocol.ts';
 import { runNativeDaemon } from '../../src/runtime/native-daemon.ts';
+import { processIsAlive } from '../../src/runtime/single-instance-lock.ts';
+
+function processExited(pid: number): boolean {
+  if (!processIsAlive(pid)) return true;
+  if (process.platform !== 'linux') return false;
+  try {
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // An adopted zombie has exited and released its files, even before PID 1 reaps it.
+    return stat.slice(stat.lastIndexOf(')') + 2, stat.lastIndexOf(')') + 3) === 'Z';
+  } catch (error) {
+    if (error instanceof Error && 'code' in error && error.code === 'ENOENT') return true;
+    throw error;
+  }
+}
 
 export function fakeIlinkFetch(directory: string): typeof fetch {
   let nextQr = 0;
@@ -47,6 +61,7 @@ export async function createIlinkCliRuntime(t: TestContext) {
   const stdout: string[] = [];
   const stderr: string[] = [];
   const daemons: Promise<void>[] = [];
+  const detachedProcesses = new Set<number>();
   fs.mkdirSync(path.join(packageRoot, 'dist'), { recursive: true });
   fs.writeFileSync(path.join(packageRoot, 'package.json'), '{"type":"module"}\n');
   fs.writeFileSync(path.join(directory, 'replies.json'), '{}');
@@ -82,8 +97,12 @@ export async function createIlinkCliRuntime(t: TestContext) {
   t.onTestFinished(async () => {
     await requestControl(home, 'stop').catch(() => undefined);
     await Promise.allSettled(daemons);
-    await eventually(() => !readDaemonRecord(home));
-    fs.rmSync(directory, { recursive: true, force: true });
+    await waitForStopped();
+    fs.rmSync(directory, {
+      recursive: true,
+      force: true,
+      ...(process.platform === 'win32' ? { maxRetries: 5, retryDelay: 50 } : {}),
+    });
   });
   const eventually = async (condition: () => boolean) => {
     for (let attempt = 0; attempt < 500; attempt += 1) {
@@ -91,6 +110,10 @@ export async function createIlinkCliRuntime(t: TestContext) {
       await new Promise<void>((resolve) => setTimeout(resolve, 20));
     }
     assert.fail(`Timed out waiting for synthetic runtime: ${stderr.join('')}`);
+  };
+  const waitForStopped = async () => {
+    await eventually(() => !readDaemonRecord(home));
+    await eventually(() => [...detachedProcesses].every(processExited));
   };
   return {
     directory, home, packageRoot, stdout, stderr, overrides, eventually,
@@ -102,6 +125,13 @@ export async function createIlinkCliRuntime(t: TestContext) {
     },
     requests: () => fs.readFileSync(path.join(directory, 'requests.jsonl'), 'utf8').trim()
       .split('\n').filter(Boolean).map((line) => JSON.parse(line) as { path: string; body: { qrcode?: string } }),
-    waitForStopped: () => eventually(() => !readDaemonRecord(home)),
+    async captureRuntimeProcesses() {
+      const current = await requestControl(home, 'ping');
+      for (const pid of [current.daemonPid, current.workerPid]) {
+        if (pid && pid !== process.pid) detachedProcesses.add(pid);
+      }
+      return [...detachedProcesses];
+    },
+    waitForStopped,
   };
 }

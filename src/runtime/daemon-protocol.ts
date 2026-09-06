@@ -10,7 +10,6 @@ import { ensurePrivateDirectory } from '../lib/private-directory.ts';
 
 export type ControlCommand = 'ping' | 'stop' | 'stop-if-idle' | 'stop-if-unused';
 export type DaemonPhase = 'starting' | 'running' | 'backoff' | 'stopping' | 'failed';
-export type DaemonMode = 'shared';
 
 export const CONTROL_MAX_BYTES = 4 * 1024;
 export const CONTROL_TIMEOUT_MS = 2_000;

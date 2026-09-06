@@ -273,7 +273,6 @@ test('iLink daemon launches its worker and honors a last-account shutdown reques
     home,
     configFile,
     packageRoot,
-    mode: 'shared',
     environment: {},
   });
   t.onTestFinished(async () => {
@@ -309,7 +308,6 @@ test('real iLink worker publishes readiness and drains after daemon shutdown', a
     home,
     configFile: path.join(home, '.env'),
     packageRoot,
-    mode: 'shared',
     environment: {},
   });
   t.onTestFinished(async () => {

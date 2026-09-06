@@ -111,6 +111,7 @@ test('closing one terminal process cancels its QR without stopping another termi
   await first.waitForMessage('ready');
   const second = startTestChild(t, entry, { timeoutMs: 10_000 });
   await second.waitForMessage('ready');
+  assert.equal((await fixture.captureRuntimeProcesses()).length, 2);
   await first.stop('SIGTERM');
   assert.equal(second.child.exitCode, null);
   assert.equal((await requestControl(fixture.home, 'stop-if-idle')).idle, false);
@@ -127,9 +128,26 @@ test.for(['SIGTERM', 'SIGKILL'] as const)('closing the last terminal with %s rel
   const fixture = await createIlinkCliRuntime(t);
   const terminal = startTestChild(t, terminalEntry(fixture), { timeoutMs: 10_000 });
   await terminal.waitForMessage('ready');
+  assert.equal((await fixture.captureRuntimeProcesses()).length, 2);
   await terminal.stop(signal);
   await fixture.waitForStopped();
   assert.equal(fs.existsSync(path.join(fixture.home, 'data/kintio.lock')), false);
+});
+
+test('fixture cleanup waits for a detached daemon after its control metadata is retired', async (t) => {
+  const fixture = await createIlinkCliRuntime(t);
+  const exited = path.join(fixture.directory, 'daemon-exit-reached');
+  fs.appendFileSync(path.join(fixture.packageRoot, 'dist/daemon.js'), [
+    '',
+    'await new Promise((resolve) => setTimeout(resolve, 200));',
+    `(await import('node:fs')).writeFileSync(${JSON.stringify(exited)}, 'finished');`,
+  ].join('\n'));
+  const terminal = startTestChild(t, terminalEntry(fixture), { timeoutMs: 10_000 });
+  await terminal.waitForMessage('ready');
+  assert.equal((await fixture.captureRuntimeProcesses()).length, 2);
+  await terminal.stop('SIGKILL');
+  await fixture.waitForStopped();
+  assert.equal(fs.readFileSync(exited, 'utf8'), 'finished');
 });
 
 test('a locked instance without operator control never launches another writer', async (t) => {
