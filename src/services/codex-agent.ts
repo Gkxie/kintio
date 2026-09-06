@@ -500,17 +500,18 @@ export class CodexAgent {
     }
   }
 
-  hasApproval(conversationId: string, code: string, option?: number): boolean {
+  pendingApproval(conversationId: string, code: string, option?: number): { primaryMessageKey: string; turnId: string } | undefined {
     const pending = this.#approvals.get(code);
-    return Boolean(pending?.delivered && (option === undefined || Number.isInteger(option) && pending.choices[option - 1]) &&
+    return pending?.delivered && (option === undefined || Number.isInteger(option) && pending.choices[option - 1]) &&
       this.#active.get(conversationId) === pending.state &&
-      pending.state.approvalTurn === pending.turn && !pending.request.signal.aborted && pending.allowed());
+      pending.state.approvalTurn === pending.turn && !pending.request.signal.aborted && pending.allowed()
+      ? { primaryMessageKey: pending.state.primaryMessageKey, turnId: pending.request.turnId } : undefined;
   }
 
   respondApproval(conversationId: string, code: string, option: number, isCurrent: () => boolean): boolean {
     const pending = this.#approvals.get(code);
     const decision = pending?.choices[option - 1];
-    if (!pending || !decision || !this.hasApproval(conversationId, code)) return false;
+    if (!pending || !decision || !this.pendingApproval(conversationId, code)) return false;
     pending.isCurrent = isCurrent;
     this.#approvals.delete(code);
     pending.resolve(decision);
@@ -757,9 +758,10 @@ export class CodexAgent {
   async #steer(
     state: ActiveState,
     input: AgentInput,
+    approval = false,
   ): Promise<Extract<AgentSubmission, { kind: 'steered' }>> {
     const { message } = input;
-    if (state.finishing) throw new Error('Codex active turn already completed');
+    if (state.finishing && !approval) throw new Error('Codex active turn already completed');
     state.latestClientInputId = input.clientInputId || message.messageKey;
     state.toolSessionToken = input.toolSessionToken;
     state.publishArtifact = input.publishArtifact || state.publishArtifact;
@@ -799,8 +801,9 @@ export class CodexAgent {
       if (active) await active.completion?.catch(() => undefined);
       return this.#start(input);
     }
-    if (!active || active.finishing) throw new Error('Agent turn is no longer steerable');
-    return this.#steer(active, input);
+    const approval = Boolean(input.approvalCode && this.pendingApproval(key, input.approvalCode));
+    if (!active || active.finishing && !approval) throw new Error('Agent turn is no longer steerable');
+    return this.#steer(active, input, approval);
   }
 
   activePrimary(conversationId: string): string | undefined {

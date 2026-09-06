@@ -33,13 +33,14 @@ class Peer extends EventEmitter {
     if (message.method === 'initialize') this.send({ id: message.id, result: {} });
     if (message.method === 'thread/start') this.send({ id: message.id, result: { thread: { id: 'thread-one' } } });
     if (message.method === 'turn/start') {
-      this.token = /<channel_tool_session>([^<]+)</u.exec(message.params.input[0].text)?.[1] || '';
+      this.token = /<channel_tool_session>([^<]+)</u.exec(message.params.input[0].text)?.[1] || this.token;
+      this.turnId = ++this.turns === 1 ? 'turn-one' : `turn-${this.turns}`;
       if (this.earlyApproval) this.ask();
-      this.send({ id: message.id, result: { turn: { id: 'turn-one' } } });
+      this.send({ id: message.id, result: { turn: { id: this.turnId } } });
     }
     if (message.method === 'turn/steer') {
       this.token = /<channel_tool_session>([^<]+)</u.exec(message.params.input[0].text)?.[1] || '';
-      if (!this.holdSteer) this.send({ id: message.id, result: { turnId: 'turn-one' } });
+      if (!this.holdSteer) this.send({ id: message.id, result: { turnId: this.wrongSteer ? 'wrong-turn' : this.turnId } });
     }
     if (message.method === 'turn/interrupt') {
       this.send({ id: message.id, result: {} });
@@ -49,6 +50,9 @@ class Peer extends EventEmitter {
   } });
   exitCode: number | null = null;
   token = '';
+  turnId = 'turn-one';
+  turns = 0;
+  wrongSteer = false;
   holdSteer = false;
   earlyApproval = false;
   send(message: Message) { this.stdout.write(`${JSON.stringify(message)}\n`); }
@@ -58,7 +62,7 @@ class Peer extends EventEmitter {
   }
   ask(params: Message = {}) {
     this.send({ id: 'approve-one', method: 'item/commandExecution/requestApproval', params: {
-      threadId: 'thread-one', turnId: 'turn-one', itemId: 'command-one',
+      threadId: 'thread-one', turnId: this.turnId, itemId: 'command-one',
       command: 'git status', cwd: '/synthetic/workspace', ...params,
     } });
   }
@@ -210,7 +214,7 @@ for (const change of ['stop', 'delete', 'relogin'] as const) {
     h.agent.invalidateApprovals();
     await until(() => h.peer.decision() !== undefined);
     assert.equal(h.peer.decision(), 'cancel');
-    assert.equal(h.agent.hasApproval('not-the-conversation', code), false);
+    assert.equal(h.agent.pendingApproval('not-the-conversation', code), undefined);
   });
 }
 
@@ -389,4 +393,28 @@ test('a changed file patch invalidates the preview already awaiting approval', a
   const code = /\/kintio approval ([A-F0-9]+) 1/u.exec(h.sent[0]!)![1]!;
   await h.processor.enqueue(h.ingest(`/kintio approval ${code} 1`));
   assert.equal(h.peer.messages.filter((message) => message.id === 'approve-one').length, 1);
+});
+
+test('an approval during a delivery-correction turn refreshes that exact active turn', async (t) => {
+  const h = await harness(t);
+  await h.processor.enqueue(h.ingest('Inspect the repository'));
+  h.peer.send({ method: 'turn/completed', params: { threadId: 'thread-one', turn: { id: 'turn-one', status: 'completed' } } });
+  await until(() => h.peer.turnId === 'turn-2');
+  h.peer.ask();
+  await until(() => h.sent.length > 0);
+  await tick();
+  const code = /\/kintio approval ([A-F0-9]+) 1/u.exec(h.sent[0]!)![1]!;
+  await h.processor.enqueue(h.ingest(`/kintio approval ${code} 1`));
+  assert.equal(h.peer.messages.find((message) => message.method === 'turn/steer')?.params.expectedTurnId, 'turn-2');
+  await until(() => h.peer.decision() !== undefined);
+  assert.equal(h.peer.decision(), 'accept');
+});
+
+test('a steering ACK for a different turn cannot approve the pending action', async (t) => {
+  const h = await harness(t);
+  const { code } = await h.ask();
+  h.peer.wrongSteer = true;
+  await h.processor.enqueue(h.ingest(`/kintio approval ${code} 1`));
+  await until(() => h.peer.decision() !== undefined);
+  assert.equal(h.peer.decision(), 'cancel');
 });

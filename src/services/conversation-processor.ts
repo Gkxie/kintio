@@ -82,6 +82,7 @@ type UnboundAgentInput = Omit<
   | 'threadId'
   | 'toolSessionToken'
   | 'approvals'
+  | 'approvalCode'
 >;
 
 function errorMessage(error: unknown): string {
@@ -568,7 +569,12 @@ export class ConversationProcessor {
     if (!this.#admit(record, boundaryMessageKey)) return;
     const opaqueConversationId = conversationId(record);
     const agentAccess = this.#agentAccess(record);
-    const activePrimary = this.#pipeline.agent.activePrimary(opaqueConversationId);
+    const approval = options.approvalReply
+      ? this.#pipeline.agent.pendingApproval?.(opaqueConversationId, options.approvalReply.code, options.approvalReply.option)
+      : undefined;
+    const activePrimary = approval?.primaryMessageKey || (options.approvalReply
+      ? undefined
+      : this.#pipeline.agent.activePrimary(opaqueConversationId));
     if (options.approvalReply && !activePrimary) {
       this.#store.markInboundIgnored(record.messageKey);
       return;
@@ -596,6 +602,7 @@ export class ConversationProcessor {
           agentAccess,
           channel: record.channel,
           mode: 'steer',
+          ...(options.approvalReply ? { approvalCode: options.approvalReply.code } : {}),
           conversationId: opaqueConversationId,
           threadId: this.#store.getConversation(
             record.channel,
@@ -615,6 +622,9 @@ export class ConversationProcessor {
         });
         if (submission.kind !== 'steered') {
           throw new Error('Active Agent turn did not accept steering');
+        }
+        if (approval && submission.turnId !== approval.turnId) {
+          throw new Error('Approval steering acknowledged a different turn');
         }
         this.#store.confirmInboundSteered(record.messageKey, {
           codexTurnId: submission.turnId,
@@ -785,7 +795,7 @@ export class ConversationProcessor {
     if (message.type === COMMON_MESSAGE_TYPES.TEXT && /^\/kintio approval(?:\s|$)/u.test(message.text)) {
       const reply = /^\/kintio approval ([A-F0-9]{12}) ([1-3])$/u.exec(message.text.trim());
       const key = conversationId(record);
-      if (!reply || !this.#approvalBinding(record) || !this.#pipeline.agent.hasApproval?.(key, reply[1]!, Number(reply[2]))) {
+      if (!reply || !this.#approvalBinding(record) || !this.#pipeline.agent.pendingApproval?.(key, reply[1]!, Number(reply[2]))) {
         this.#store.markInboundIgnored(record.messageKey);
         if (this.#approvalBinding(record)) {
           await this.#pipeline.approvals?.notify(record, 'This approval code or option is invalid, expired, or already used. No action was approved.', new AbortController().signal);

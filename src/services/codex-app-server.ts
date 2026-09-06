@@ -706,6 +706,7 @@ class CodexAppServerThread implements CodexThread {
       expectedTurnId: this.#activeTurnId,
       ...(clientUserMessageId ? { clientUserMessageId } : {}),
     });
+    if (result.turnId !== this.#activeTurnId) throw new Error('Codex steering acknowledged a different turn');
     this.#lastSteerSequence = this.#server.eventSequence;
     this.#lastSteerClientId = clientUserMessageId || '';
     return result.turnId;

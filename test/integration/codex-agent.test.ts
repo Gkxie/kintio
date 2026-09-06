@@ -250,8 +250,8 @@ test('host approval is explicit, scoped to its active conversation, and consumed
   await new Promise<void>((resolve) => setImmediate(resolve));
   const code = /\/kintio approval ([A-Z0-9]+) 1/u.exec(prompt)?.[1];
   assert.ok(code);
-  assert.equal(agent.hasApproval('different-conversation', code), false);
-  assert.equal(agent.hasApproval('cv-test', code), true);
+  assert.equal(agent.pendingApproval('different-conversation', code), undefined);
+  assert.deepEqual(agent.pendingApproval('cv-test', code), { primaryMessageKey: 'approval-primary', turnId: 'approval-turn' });
   assert.equal(agent.respondApproval('different-conversation', code, 1, () => true), false);
   assert.equal(agent.respondApproval('cv-test', code, 99, () => true), false);
   assert.equal(agent.respondApproval('cv-test', code, 1, () => true), true);
