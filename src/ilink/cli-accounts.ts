@@ -1,11 +1,8 @@
 import fs from 'node:fs';
 
 import type { IlinkEnrollmentConfig } from '../config.ts';
-import {
-  openIlinkOperatorControl,
-  type IlinkOperatorAccount,
-  type IlinkOperatorControl,
-} from './cli-login.ts';
+import { openIlinkOperatorControl } from './cli-login.ts';
+import type { IlinkOperatorAccount, IlinkOperatorControl } from '../runtime/operator-client.ts';
 import { assertIlinkAccountRevision } from './store-types.ts';
 
 export type IlinkAccountCommand = 'list' | 'start' | 'stop' | 'delete';

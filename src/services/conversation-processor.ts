@@ -205,6 +205,28 @@ export class ConversationProcessor {
     return this.#pipeline.agentAccess?.(record) === 'host' ? 'host' : 'restricted';
   }
 
+  #authorized(record: ChannelIdentity): boolean {
+    return record.channel !== 'wechat_kf' || this.#allowedUsers.has(record.peerId) ||
+      this.#store.getAuthorization(record.peerId)?.authorized === true;
+  }
+
+  #admit(record: InboundRecord, boundaryMessageKey = record.messageKey): boolean {
+    if (this.#pausedChannels.has(record.channel)) {
+      this.#releaseIfInactive(record);
+      return false;
+    }
+    const reason = !this.#authorized(record)
+      ? 'authorization_revoked'
+      : !this.#store.getAgentSessionBoundary(record.messageKey, boundaryMessageKey)
+        ? 'reply_boundary_unavailable'
+        : '';
+    if (!reason) return true;
+    this.#store.closeAgentSessions(record.messageKey);
+    this.#store.suppressInbound(record.messageKey, reason);
+    this.#releaseIfInactive(record);
+    return false;
+  }
+
   #notifyQueued(record: InboundRecord): void {
     const key = this.#conversationKey(record);
     if (this.#queueNotified.has(key)) return;
@@ -262,7 +284,7 @@ export class ConversationProcessor {
     const [, active] = entry;
     const opaqueId = conversationId(active.record);
     const primary = this.#pipeline.agent.activePrimary(opaqueId);
-    if (!primary || this.#store.listMessageAttempts(primary).length) return;
+    if (!primary || this.#preempting.has(primary) || this.#store.listMessageAttempts(primary).length) return;
     this.#preempting.add(primary);
     try {
       if (!await this.#pipeline.agent.interrupt(opaqueId)) {
@@ -320,6 +342,15 @@ export class ConversationProcessor {
     if (!this.#pipeline.agent.activePrimary(conversationId(record))) {
       this.#release(record);
     }
+  }
+
+  #yieldToLiveInput(record: InboundRecord): boolean {
+    if (
+      this.#activeConversations.get(this.#conversationKey(record))?.priority !== 'low' ||
+      !this.#highWaiters.length || !this.#store.deferActiveInbound(record.messageKey)
+    ) return false;
+    this.#release(record);
+    return true;
   }
 
   enqueue(messageKey: string): Promise<void> {
@@ -441,7 +472,9 @@ export class ConversationProcessor {
       readonly started?: (submission: Extract<AgentSubmission, { kind: 'started' }>) => void;
       readonly priority?: WorkPriority;
     } = {},
-  ): Promise<AgentSubmission> {
+  ): Promise<AgentSubmission | undefined> {
+    const boundaryMessageKey = options.boundaryMessageKey || record.messageKey;
+    if (!this.#admit(record, boundaryMessageKey)) return;
     const opaqueConversationId = conversationId(record);
     const agentAccess = this.#agentAccess(record);
     const activePrimary = options.wait
@@ -504,11 +537,12 @@ export class ConversationProcessor {
       this.#release(record);
       throw new Error('Channel is stopped');
     }
+    if (!this.#admit(record, boundaryMessageKey)) return;
     this.#store.claimInbound({
       messageKey: record.messageKey,
       clientInputId: input.clientInputId || record.messageKey,
     });
-    const boundaryMessageKey = options.boundaryMessageKey || record.messageKey;
+    if (this.#yieldToLiveInput(record)) return;
     const conversationBefore = this.#store.getConversation(
       record.channel,
       record.accountKey,
@@ -536,6 +570,7 @@ export class ConversationProcessor {
       record.accountKey,
       record.peerId,
     )?.memoryThreadId || '';
+    if (!this.#admit(record, boundaryMessageKey) || this.#yieldToLiveInput(record)) return;
     const session = this.#store.createAgentSession({
       messageKey: record.messageKey,
       boundaryMessageKey,
@@ -585,6 +620,8 @@ export class ConversationProcessor {
       submission.completion.then((result) => this.#complete(record, result)),
       record,
     );
+    const liveWaiter = this.#highWaiters[0];
+    if (liveWaiter) void this.#preemptLow(liveWaiter.key);
     if (options.wait) await completion;
     return submission;
   }
@@ -610,11 +647,7 @@ export class ConversationProcessor {
       this.#store.markInboundIgnored(messageKey);
       return;
     }
-    if (
-      channel === 'wechat_kf' &&
-      !this.#allowedUsers.has(peerId) &&
-      this.#store.getAuthorization(peerId)?.authorized !== true
-    ) {
+    if (!this.#authorized(record)) {
       const isTrigger = Boolean(this.#authorization.trigger) &&
         message.type === COMMON_MESSAGE_TYPES.TEXT &&
         message.text === this.#authorization.trigger;
@@ -637,8 +670,10 @@ export class ConversationProcessor {
       this.#store.markInboundIgnored(messageKey);
       return;
     }
+    if (!this.#admit(record, boundaryMessageKey)) return;
 
     await this.#acquire(record, priority);
+    if (!this.#admit(record, boundaryMessageKey)) return;
     if (message.attachments.length) {
       this.#store.rememberInboundMedia({
         messageKey,
@@ -858,12 +893,6 @@ export class ConversationProcessor {
     priority: WorkPriority,
     recoveryBoundary?: string,
   ): Promise<void> {
-    if (primary.status === 'failed') {
-      primary = this.#store.claimInbound({
-        messageKey: primary.messageKey,
-        clientInputId: primary.clientInputId || primary.messageKey,
-      });
-    }
     const decoded = group.flatMap((record) => {
       const message = this.#message(record);
       return message ? [{ record, message }] : [];
@@ -873,6 +902,17 @@ export class ConversationProcessor {
     )?.message;
     if (!primaryMessage) return;
     const validGroup = decoded.map(({ record }) => record);
+    const boundaryMessageKey =
+      recoveryBoundary || validGroup.at(-1)?.messageKey || primary.messageKey;
+    if (!this.#admit(primary, boundaryMessageKey)) return;
+    await this.#acquire(primary, priority);
+    if (!this.#admit(primary, boundaryMessageKey) || this.#yieldToLiveInput(primary)) return;
+    if (primary.status === 'failed') {
+      primary = this.#store.claimInbound({
+        messageKey: primary.messageKey,
+        clientInputId: primary.clientInputId || primary.messageKey,
+      });
+    }
     const conversation = this.#store.getConversation(
       primary.channel,
       primary.accountKey,
@@ -891,6 +931,7 @@ export class ConversationProcessor {
           primary.channel,
         )
       : undefined;
+    if (!this.#admit(primary, boundaryMessageKey) || this.#yieldToLiveInput(primary)) return;
     const missingInput = steering.some((record) => {
       const clientId = record.clientInputId || record.messageKey;
       if (!inspection?.foundClientInputIds.has(clientId)) return true;
@@ -915,6 +956,7 @@ export class ConversationProcessor {
             ? { executedAttemptIds: inspection.executedAttemptIds }
             : {}),
         });
+        this.#releaseIfInactive(primary);
         return;
       }
     }
@@ -945,8 +987,6 @@ export class ConversationProcessor {
     const resolvedMedia = (await Promise.all(
       decoded.map(({ message }) => this.#pipeline.mediaGateway.resolveForCodex(message)),
     )).flat() as ResolvedImage[];
-    const boundaryMessageKey =
-      recoveryBoundary || validGroup.at(-1)?.messageKey || primary.messageKey;
     await this.#submit(primary, {
       message: agentMessage(primaryMessage),
       resolvedMedia,

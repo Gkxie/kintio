@@ -23,7 +23,8 @@ import {
   ensureContainedDirectory,
   ensurePrivateDirectory,
 } from './lib/private-directory.ts';
-import { controlWecom, hasRuntimeOperator, restartIlinkListeners, runIlinkCliLogin } from './ilink/cli-login.ts';
+import { runIlinkCliLogin } from './ilink/cli-login.ts';
+import { controlWecom, hasRuntimeOperator, restartIlinkListeners } from './runtime/operator-client.ts';
 import {
   readIlinkAccountSnapshot,
   resolveIlinkAccount,

@@ -6,14 +6,13 @@ import path from 'node:path';
 import { test, vi } from 'vitest';
 
 import { runCli } from '../../src/cli.ts';
-import { createConfig } from '../../src/config.ts';
+import { loadIlinkEnrollmentConfig } from '../../src/config.ts';
 import {
   IlinkSecretBox,
   readOrCreateIlinkStorageKey,
 } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import { acquireSingleInstanceLock } from '../../src/runtime/single-instance-lock.ts';
-import { createRuntime } from '../../src/runtime.ts';
 import { StatePersistence } from '../../src/state/persistence.ts';
 import { SqliteStore } from '../../src/state/sqlite-store.ts';
 
@@ -183,7 +182,7 @@ test('a missing storage key blocks login but not complete account deletion', asy
   inspected.close();
 });
 
-test('iLink refuses to borrow a WeCom instance database or enrollment capability', async (t) => {
+test('iLink refuses to open a database owned by an instance without operator control', async (t) => {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'kintio-ilink-ipc-owner-'));
   const home = path.join(profile, '.kintio');
   t.onTestFinished(() => fs.rmSync(profile, { recursive: true, force: true }));
@@ -202,16 +201,10 @@ test('iLink refuses to borrow a WeCom instance database or enrollment capability
           baseurl: 'https://ilinkai.weixin.qq.com/',
         });
   });
-  const config = createConfig({
-    WECOM_CORP_ID: 'ww-ipc-owner',
-    WECOM_KF_SECRET: 'not-used',
-    ILINK_ENABLED: 'false',
-  }, home);
-  const runtime = await createRuntime({
-    config,
-    logger: { info() {}, warn() {}, error() {} },
-  });
-  t.onTestFinished(() => runtime.abort());
+  const config = loadIlinkEnrollmentConfig({ root: home, environment: {} });
+  const lock = acquireSingleInstanceLock({ filePath: config.state.lockFile });
+  const owner = new StatePersistence({ filePath: config.state.databaseFile });
+  t.onTestFinished(() => { owner.close(); lock.release(); });
   const stderr: string[] = [];
   const result = await runCli(['ilink', 'login', '--home', home], {
     env: {},
@@ -226,7 +219,8 @@ test('iLink refuses to borrow a WeCom instance database or enrollment capability
   assert.equal(result, 1);
   assert.match(stderr.join(''), /not running|unavailable|locked|owned|connect/i);
   assert.equal(fs.existsSync(config.state.lockFile), true);
-  await runtime.close();
+  owner.close();
+  lock.release();
   assert.equal(fs.existsSync(config.state.lockFile), false);
   const persistence = new StatePersistence({ filePath: config.state.databaseFile });
   t.onTestFinished(() => persistence.close());

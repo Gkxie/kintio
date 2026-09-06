@@ -120,6 +120,7 @@ interface ActiveState {
 
 interface PreparedState {
   readonly thread: CodexThread;
+  readonly threadId: string;
   readonly agentAccess: AgentAccess;
 }
 
@@ -441,7 +442,8 @@ export class CodexAgent {
           }),
     };
     const prepared = this.#prepared.get(key);
-    const thread = prepared?.agentAccess === agentAccess
+    const thread = !startFresh && prepared?.agentAccess === agentAccess &&
+      prepared.threadId === input.threadId
       ? prepared.thread
       : input.threadId && !startFresh
         ? this.#boundary(agentAccess).resumeThread(input.threadId, options)
@@ -473,7 +475,7 @@ export class CodexAgent {
     } else {
       this.#pendingMemoryThreads.delete(conversationId);
     }
-    this.#prepared.set(conversationId, { thread, agentAccess });
+    this.#prepared.set(conversationId, { thread, threadId: ensured, agentAccess });
     return ensured;
   }
 

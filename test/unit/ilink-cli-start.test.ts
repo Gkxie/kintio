@@ -4,11 +4,11 @@ import path from 'node:path';
 
 import { test } from 'vitest';
 
-import { loadIlinkRuntimeConfig } from '../../src/config.ts';
+import { loadSharedRuntimeConfig } from '../../src/config.ts';
 import { runWorker } from '../../src/runtime/run-worker.ts';
 
 function config() {
-  return loadIlinkRuntimeConfig({
+  return loadSharedRuntimeConfig({
     environment: {},
     root: path.join(os.tmpdir(), 'kintio-ilink-cli-start'),
   });
@@ -25,7 +25,7 @@ test('iLink start runs and drains a foreground runtime without Hono', async () =
     create: async ({ config: runtimeConfig }) => {
       assert.equal('wecom' in runtimeConfig, false);
       return {
-        messageProcessor: null,
+        async wecomControl() { return { running: false }; },
         async start() { events.push('start'); },
         stopAcceptingIfIdle() { return true; },
         stopAccepting() { events.push('stop'); },
@@ -52,7 +52,7 @@ test('background worker publishes readiness without terminal instructions', asyn
     stdout: (text) => output.push(text),
     onStarted() { started = true; },
     create: async () => ({
-      messageProcessor: null,
+      async wecomControl() { return { running: false }; },
       async start() {},
       stopAcceptingIfIdle() { return true; },
       stopAccepting() {},
@@ -81,7 +81,7 @@ test('iLink worker control exposes the Runtime atomic idle gate', async () => {
       stopIfIdle = control.stopIfIdleForUpdate;
     },
     create: async () => ({
-      messageProcessor: null,
+      async wecomControl() { return { running: false }; },
       async start() {},
       stopAcceptingIfIdle() {
         calls += 1;
@@ -114,7 +114,7 @@ test('stopping the last account notifies its owner before closing the runtime', 
     create: async ({ onStopRequested }) => {
       requestStop = onStopRequested;
       return {
-        messageProcessor: null,
+        async wecomControl() { return { running: false }; },
         async start() { events.push('start'); },
         stopAcceptingIfIdle() { return true; },
         stopAccepting() { events.push('stop'); },
@@ -137,7 +137,7 @@ test('iLink start closes a runtime whose startup fails', async () => {
     signal: new AbortController().signal,
     stdout() {},
     create: async () => ({
-      messageProcessor: null,
+      async wecomControl() { return { running: false }; },
       async start() {
         events.push('start');
         throw new Error('simulated iLink startup failure');
@@ -179,7 +179,7 @@ test('iLink start force-aborts after its bounded graceful shutdown', async () =>
     signal: controller.signal,
     stdout() {},
     create: async () => ({
-      messageProcessor: null,
+      async wecomControl() { return { running: false }; },
       async start() { events.push('start'); },
       stopAcceptingIfIdle() { return true; },
       stopAccepting() { events.push('stop'); },
