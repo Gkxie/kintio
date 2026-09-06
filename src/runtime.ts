@@ -9,6 +9,7 @@ import { createAdaptorServer, type ServerType } from '@hono/node-server';
 import { createApp } from './app.ts';
 import { installManagedSkill } from './runtime/managed-skill.ts';
 import { samePath } from './lib/path-identity.ts';
+import { ensurePrivateDirectory } from './lib/private-directory.ts';
 import { acquireSingleInstanceLock } from './runtime/single-instance-lock.ts';
 import { CodexAgent, createCodexAppServer } from './services/codex-agent.ts';
 import { ConversationProcessor } from './services/conversation-processor.ts';
@@ -119,6 +120,7 @@ export async function createRuntime({
   let operatorMcpHost: McpIpcHost | undefined;
 
   try {
+    ensurePrivateDirectory(config.codex.workingDirectory);
     persistence = new StatePersistence({ filePath: config.state.databaseFile });
     const activePersistence = persistence;
     const store = activePersistence.core;

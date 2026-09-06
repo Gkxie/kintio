@@ -1,15 +1,47 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { test } from 'vitest';
 
-import { createConfig } from '../../src/config.ts';
+import { createConfig, loadSharedRuntimeConfig } from '../../src/config.ts';
 import { createRuntime } from '../../src/runtime.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
 function sha256(bytes: Buffer): string {
   return createHash('sha256').update(bytes).digest('hex');
+}
+
+for (const workspace of ['default', 'custom']) {
+  test(`shared runtime creates its ${workspace} iLink workspace before Agent or MCP subprocesses launch`, async (t) => {
+    const temporary = await createTempSqlite(t, { prefix: 'ilink-workspace-' });
+    const config = loadSharedRuntimeConfig({
+      root: temporary.directory,
+      environment: {
+        ILINK_STORAGE_KEY: Buffer.alloc(32, 17).toString('base64url'),
+        ...(workspace === 'custom' ? { CODEX_WORKING_DIRECTORY: 'nested/agent-workspace' } : {}),
+      },
+    });
+    await assert.rejects(() => fs.access(config.codex.workingDirectory), { code: 'ENOENT' });
+    const runtime = await createRuntime({
+      config,
+      logger: { info() {}, warn() {}, error() {} },
+    });
+    t.onTestFinished(() => runtime.close());
+    await runtime.start();
+
+    const cwd = execFileSync(process.execPath, ['-e', 'process.stdout.write(process.cwd())'], {
+      cwd: config.codex.workingDirectory,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 5_000,
+    });
+    assert.equal(cwd, await fs.realpath(config.codex.workingDirectory));
+    if (process.platform !== 'win32') {
+      assert.equal((await fs.stat(config.codex.workingDirectory)).mode & 0o777, 0o700);
+    }
+  });
 }
 
 test('runtime never mutates the host Codex configuration', async (t) => {
