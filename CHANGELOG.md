@@ -4,6 +4,9 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Restart the supervised worker after a fatal Agent process or protocol failure
+  instead of leaving chat listeners attached to a permanently closed executor.
+
 - Removed keyword-based image-edit retries so delivery correction cannot override
   a request to describe an image or cancel an edit. Generated artifacts and
   recorded channel outcomes still use the existing delivery path

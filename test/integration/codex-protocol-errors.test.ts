@@ -185,6 +185,82 @@ test('unexpected exit discards raw stderr in every pending rejection', async () 
   await server.close();
 });
 
+for (const fault of ['exit', 'process-error', 'invalid-json', 'output-eof', 'input-error', 'output-error'] as const) {
+  test(`fatal ${fault} exposes one owner failure and rejects pending requests`, async (t) => {
+    const fake = fakeSpawn(standardHandler);
+    const server = new CodexAppServer({ spawnProcess: fake.spawn });
+    t.onTestFinished(() => server.close());
+    await server.initialize();
+    assert.ok(server.failure instanceof Promise);
+    const rejected = assert.rejects(server.request('synthetic/pending', {}));
+    if (fault === 'exit') fake.child().exit(7);
+    else if (fault === 'process-error') fake.child().emit('error', new Error('synthetic process error'));
+    else if (fault === 'output-eof') fake.child().stdout.end();
+    else if (fault === 'input-error') fake.child().stdin.emit('error', new Error('synthetic input error'));
+    else if (fault === 'output-error') fake.child().stdout.emit('error', new Error('synthetic output error'));
+    else fake.child().stdout.write('not-json\n');
+    const failure = await server.failure;
+    await rejected;
+    assert.match(failure.message, /Codex app-server|Invalid JSON/u);
+    fake.child().emit('error', new Error('later failure must not replace the first'));
+    assert.equal(await server.failure, failure);
+    await assert.rejects(server.request('thread/start', {}), /app-server is closed/u);
+  });
+}
+
+test('initialization failure notifies the owner even when spawn throws synchronously', async () => {
+  let spawns = 0;
+  const server = new CodexAppServer({
+    spawnProcess: (() => { spawns += 1; throw new Error('synthetic spawn failure'); }) as SpawnProcess,
+  });
+  await assert.rejects(server.initialize(), /synthetic spawn failure/u);
+  assert.ok(server.failure instanceof Promise);
+  assert.match((await server.failure).message, /initialization failed/u);
+  await assert.rejects(server.initialize(), /app-server is closed/u);
+  assert.equal(spawns, 1);
+  await server.close();
+});
+
+test('failure before turn/start acknowledges early notifications without an unhandled rejection', async (t) => {
+  const fake = fakeSpawn((message, child) => {
+    if (message.method === 'turn/start') {
+      child.send({ method: 'item/started', params: {
+        turnId: 'synthetic-unacknowledged-turn', item: { id: 'synthetic-item' },
+      } });
+    } else standardHandler(message, child);
+  });
+  const server = new CodexAppServer({ spawnProcess: fake.spawn });
+  t.onTestFinished(() => server.close());
+  const rejected = assert.rejects(server.startThread(threadOptions).startRun('synthetic input'));
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  fake.child().exit(7);
+  assert.match((await server.failure).message, /exited with code 7/u);
+  await rejected;
+  await new Promise<void>((resolve) => setImmediate(resolve));
+});
+
+test('ordinary RPC errors and intentional close do not request a worker restart', async () => {
+  const fake = fakeSpawn((message, child) => {
+    if (message.method === 'thread/start') {
+      child.send({ id: message.id, error: { code: -32602, message: 'invalid synthetic request' } });
+    } else standardHandler(message, child);
+  });
+  const server = new CodexAppServer({ spawnProcess: fake.spawn });
+  let fatal = false;
+  try {
+    assert.ok(server.failure instanceof Promise);
+    void server.failure.then(() => { fatal = true; });
+    await server.initialize();
+    await assert.rejects(server.startThread(threadOptions).ensure!(), /request failed: thread\/start/u);
+  } finally {
+    await server.close();
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(fatal, false);
+  await assert.rejects(server.initialize(), /app-server is closed/u);
+  assert.equal(fake.requests.filter((request) => request.method === 'initialize').length, 1);
+});
+
 test('resume and read use persisted IDs and include full turn history', async () => {
   const fake = fakeSpawn(standardHandler);
   const server = new CodexAppServer({ spawnProcess: fake.spawn });

@@ -69,12 +69,18 @@ export async function runWorker(options: WorkerOptions): Promise<number> {
     ...(options.logger ? { logger: options.logger } : {}),
     onStopRequested: requestStop,
   });
+  const failed = runtime.failure.then((error) => { throw error; });
+  // Keep the failure observed even if a lifecycle hook throws synchronously.
+  void failed.catch(() => undefined);
   try {
-    await runtime.start();
-    if (options.startWecom) await runtime.wecomControl('start', options.startWecom);
-    await options.onStarted?.({
-      stopIfIdleForUpdate: () => runtime.stopAcceptingIfIdle(),
-    });
+    await Promise.race([runtime.start(), failed]);
+    if (options.startWecom) {
+      await Promise.race([runtime.wecomControl('start', options.startWecom), failed]);
+    }
+    await Promise.race([
+      options.onStarted?.({ stopIfIdleForUpdate: () => runtime.stopAcceptingIfIdle() }),
+      failed,
+    ]);
     options.stdout(
       options.background
         ? 'Kintio shared runtime is active.\n'
@@ -83,6 +89,7 @@ export async function runWorker(options: WorkerOptions): Promise<number> {
     const reason = await Promise.race([
       waitForAbort(options.signal).then(() => 'signal' as const),
       stopRequested.then(() => 'channel-stop' as const),
+      failed,
     ]);
     // Tell the daemon this is an intentional stop before cleanup can fail.
     if (reason === 'channel-stop') options.onStopRequested?.();
