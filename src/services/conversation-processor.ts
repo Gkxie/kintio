@@ -23,6 +23,7 @@ import type {
   AgentRuntime,
   AgentSubmission,
 } from '../agent/runtime.ts';
+import { AgentTurnCancelledError } from '../agent/runtime.ts';
 import type { CoreState, InboundRecord } from '../state/sqlite-store.ts';
 
 type ChannelMessage = NormalizedMessage & { readonly messageKey: string };
@@ -83,6 +84,7 @@ type UnboundAgentInput = Omit<
   | 'toolSessionToken'
   | 'approvals'
   | 'approvalCode'
+  | 'controlRefresh'
 >;
 
 function errorMessage(error: unknown): string {
@@ -458,7 +460,11 @@ export class ConversationProcessor {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       try {
         let record = this.#store.getInbound(messageKey);
-        if (!record || this.#pausedChannels.has(record.channel)) return;
+        if (!record) return;
+        if (this.#pausedChannels.has(record.channel)) {
+          if (!this.#activeConversations.get(this.#conversationKey(record))?.turn) this.#releaseIfInactive(record);
+          return;
+        }
         const active = this.#activeConversations.get(this.#conversationKey(record));
         if (active && this.#preempting.has(active.record.messageKey)) {
           await active.turn?.completion;
@@ -521,6 +527,13 @@ export class ConversationProcessor {
         return;
       }
       const inbound = this.#store.getInbound(messageKey);
+      if (error instanceof AgentTurnCancelledError) {
+        this.#store.closeAgentSessions(messageKey);
+        this.#store.suppressInbound(messageKey, 'agent_approval_cancelled');
+        this.#onlineRetries.delete(messageKey);
+        return;
+      }
+      if (inbound && ['completed', 'ignored', 'suppressed', 'absorbed'].includes(inbound.status)) return;
       const superseded = inbound && this.#store.listPendingInbound({
         statuses: ['received'],
         channel: inbound.channel,
@@ -563,6 +576,7 @@ export class ConversationProcessor {
       readonly started?: (submission: Extract<AgentSubmission, { kind: 'started' }>) => void;
       readonly priority?: WorkPriority;
       readonly approvalReply?: { readonly code: string; readonly option: number };
+      readonly controlOnly?: boolean;
     } = {},
   ): Promise<PendingTurn | undefined> {
     const boundaryMessageKey = options.boundaryMessageKey || record.messageKey;
@@ -574,8 +588,8 @@ export class ConversationProcessor {
       : undefined;
     const activePrimary = approval?.primaryMessageKey || (options.approvalReply
       ? undefined
-      : this.#pipeline.agent.activePrimary(opaqueConversationId));
-    if (options.approvalReply && !activePrimary) {
+      : this.#pipeline.agent.activePrimary(opaqueConversationId, options.controlOnly));
+    if ((options.approvalReply || options.controlOnly) && !activePrimary) {
       this.#store.markInboundIgnored(record.messageKey);
       return;
     }
@@ -603,6 +617,7 @@ export class ConversationProcessor {
           channel: record.channel,
           mode: 'steer',
           ...(options.approvalReply ? { approvalCode: options.approvalReply.code } : {}),
+          ...(options.controlOnly ? { controlRefresh: true } : {}),
           conversationId: opaqueConversationId,
           threadId: this.#store.getConversation(
             record.channel,
@@ -649,6 +664,12 @@ export class ConversationProcessor {
         if (options.approvalReply) this.#pipeline.agent.cancelApprovals?.(opaqueConversationId);
         this.#store.closeAgentSession(session.token);
         this.#store.requeueInboundSteering(record.messageKey, activePrimary);
+        if (options.controlOnly) {
+          this.#store.suppressInbound(activePrimary, 'approval_control_refresh_failed');
+          this.#store.markInboundIgnored(record.messageKey);
+          await this.#pipeline.agent.interrupt?.(opaqueConversationId);
+          return;
+        }
         throw error;
       }
     }
@@ -796,10 +817,17 @@ export class ConversationProcessor {
       const reply = /^\/kintio approval ([A-F0-9]{12}) ([1-3])$/u.exec(message.text.trim());
       const key = conversationId(record);
       if (!reply || !this.#approvalBinding(record) || !this.#pipeline.agent.pendingApproval?.(key, reply[1]!, Number(reply[2]))) {
-        this.#store.markInboundIgnored(record.messageKey);
         if (this.#approvalBinding(record)) {
-          await this.#pipeline.approvals?.notify(record, 'This approval code or option is invalid, expired, or already used. No action was approved.', new AbortController().signal);
-        }
+          const previousPrimary = this.#pipeline.agent.activePrimary(key, true);
+          await this.#submit(record, {
+            message: agentMessage(message),
+            contextText: 'An invalid or expired approval control message was received. It grants no permission and is not a new task. Continue the previously requested work with this refreshed channel session.',
+          }, { priority, controlOnly: true });
+          const cancelled = previousPrimary && this.#store.getInbound(previousPrimary)?.errorMessage === 'approval_control_refresh_failed';
+          await this.#pipeline.approvals?.notify(record, cancelled
+            ? 'No action was approved. The running task was cancelled because its delivery session could not be refreshed. Send a new instruction to continue.'
+            : 'This approval code or option is invalid, expired, or already used. No action was approved.', new AbortController().signal);
+        } else this.#store.markInboundIgnored(record.messageKey);
         return;
       }
       await this.#submit(record, {

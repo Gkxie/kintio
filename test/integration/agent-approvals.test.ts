@@ -5,6 +5,7 @@ import path from 'node:path';
 import { test, vi, type TestContext } from 'vitest';
 
 import { IlinkSendExecutor } from '../../src/ilink/executor.ts';
+import { AgentTurnCancelledError } from '../../src/agent/runtime.ts';
 import { normalizeIlinkInboundMessage } from '../../src/ilink/message.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey, type IlinkAccountKey } from '../../src/ilink/store-types.ts';
@@ -31,7 +32,9 @@ class Peer extends EventEmitter {
     const message = JSON.parse(String(chunk)) as Message;
     this.messages.push(message);
     if (message.method === 'initialize') this.send({ id: message.id, result: {} });
-    if (message.method === 'thread/start') this.send({ id: message.id, result: { thread: { id: 'thread-one' } } });
+    if (message.method === 'thread/start' || message.method === 'thread/resume') this.send({ id: message.id, result: { thread: { id: 'thread-one' } } });
+    if (message.method === 'thread/read') this.send({ id: message.id, result: { thread: { id: 'thread-one', turns: [] } } });
+    if (message.method === 'thread/list') this.send({ id: message.id, result: { data: [{ id: 'thread-one' }], nextCursor: null } });
     if (message.method === 'turn/start') {
       this.token = /<channel_tool_session>([^<]+)</u.exec(message.params.input[0].text)?.[1] || this.token;
       this.turnId = ++this.turns === 1 ? 'turn-one' : `turn-${this.turns}`;
@@ -44,7 +47,13 @@ class Peer extends EventEmitter {
     }
     if (message.method === 'turn/interrupt') {
       this.send({ id: message.id, result: {} });
-      this.send({ method: 'turn/completed', params: { threadId: 'thread-one', turn: { id: 'turn-one', status: 'interrupted' } } });
+      this.send({ method: 'turn/completed', params: { threadId: 'thread-one', turn: { id: this.turnId, status: 'interrupted' } } });
+    }
+    if (this.completeCancellations && message.result?.decision === 'cancel') {
+      const turnId = this.turnId;
+      const finish = () => this.send({ method: 'turn/completed', params: { threadId: 'thread-one', turn: { id: turnId, status: 'interrupted' } } });
+      if (this.holdCancellation) this.releaseCancellation = finish;
+      else finish();
     }
     done();
   } });
@@ -55,6 +64,9 @@ class Peer extends EventEmitter {
   wrongSteer = false;
   holdSteer = false;
   earlyApproval = false;
+  completeCancellations = false;
+  holdCancellation = false;
+  releaseCancellation?: () => void;
   send(message: Message) { this.stdout.write(`${JSON.stringify(message)}\n`); }
   kill(): boolean {
     if (this.exitCode === null) { this.exitCode = 0; queueMicrotask(() => this.emit('exit', 0, null)); }
@@ -69,7 +81,7 @@ class Peer extends EventEmitter {
   decision(): string | undefined { return this.messages.find((message) => message.id === 'approve-one')?.result?.decision; }
 }
 
-async function harness(t: TestContext, options: { noticeFails?: boolean; approvalTimeoutMs?: number; access?: 'host' | 'restricted' } = {}) {
+async function harness(t: TestContext, options: { noticeFails?: boolean; approvalTimeoutMs?: number; access?: 'host' | 'restricted'; completeCancellations?: boolean } = {}) {
   const temporary = await createTempSqlite(t, { prefix: 'agent-approvals-' });
   const now = Date.now();
   const persistence = temporary.openPersistence();
@@ -77,6 +89,7 @@ async function harness(t: TestContext, options: { noticeFails?: boolean; approva
   const accounts = persistence.createIlinkStore();
   const secrets = new IlinkSecretBox(Buffer.alloc(32, 22).toString('base64url'));
   const sent: string[] = [];
+  const errors: string[] = [];
   const executor = new IlinkSendExecutor({
     store, ilinkStore: accounts, secretBox: secrets,
     createClient: () => ({ async sendMessage(request) {
@@ -85,6 +98,7 @@ async function harness(t: TestContext, options: { noticeFails?: boolean; approva
     } }),
   });
   const peer = new Peer();
+  peer.completeCancellations = options.completeCancellations === true;
   const server = new CodexAppServer({ spawnProcess: () => peer, requestTimeoutMs: 25,
     ...(options.approvalTimeoutMs ? { approvalTimeoutMs: options.approvalTimeoutMs } : {}),
   });
@@ -102,7 +116,7 @@ async function harness(t: TestContext, options: { noticeFails?: boolean; approva
       notify: (record, content, signal) => executor.notifyApproval(record.messageKey, content, signal),
     },
     mediaGateway: { async resolveForCodex() { return []; } }, channel: { async kick() {} },
-    logger: { info() {}, error() {} },
+    logger: { info() {}, error(message) { errors.push(message); } },
   });
   const cursors = new Map<string, string>();
   let sequence = 0;
@@ -150,13 +164,22 @@ async function harness(t: TestContext, options: { noticeFails?: boolean; approva
     await tick();
     return { primary, code: /\/kintio approval ([A-F0-9]+) 1/u.exec(sent[0] || '')?.[1] || '' };
   }
+  async function finish(content = 'The requested work finished.') {
+    const result = await executor.execute('send_text', { session: peer.token, content });
+    assert.equal(result.status, 'accepted');
+    peer.send({ method: 'item/started', params: { turnId: peer.turnId, item: { id: 'delivery', type: 'mcpToolCall' } } });
+    peer.send({ method: 'item/completed', params: { turnId: peer.turnId, item: {
+      id: 'delivery', type: 'mcpToolCall', server: 'weixin_ilink', tool: 'send_text', status: 'completed', result: { structuredContent: result },
+    } } });
+    peer.send({ method: 'turn/completed', params: { threadId: 'thread-one', turn: { id: peer.turnId, status: 'completed' } } });
+  }
   t.onTestFinished(async () => {
     processor.setChannelEnabled('weixin_ilink', false);
     await processor.abort();
     await processor.close();
     await executor.waitForIdle();
   });
-  return { store, accounts, agent, processor, executor, peer, owner, sent, secrets, register, ingest, ask, temporary, persistence };
+  return { store, accounts, agent, processor, executor, peer, owner, sent, secrets, register, ingest, ask, finish, temporary, persistence, errors, server };
 }
 
 test('approval reply renews the iLink capability before its wire decision and final MCP delivery', async (t) => {
@@ -417,4 +440,130 @@ test('a steering ACK for a different turn cannot approve the pending action', as
   await h.processor.enqueue(h.ingest(`/kintio approval ${code} 1`));
   await until(() => h.peer.decision() !== undefined);
   assert.equal(h.peer.decision(), 'cancel');
+});
+
+for (const cancellation of ['operator', 'timeout'] as const) {
+  test(`${cancellation} cancellation followed by interrupted completion never retries the old task and does not swallow new instructions`, async (t) => {
+    const h = await harness(t, { completeCancellations: true,
+      ...(cancellation === 'timeout' ? { approvalTimeoutMs: 20 } : {}),
+    });
+    const { primary, code } = await h.ask();
+    if (cancellation === 'operator') await h.processor.enqueue(h.ingest(`/kintio approval ${code} 3`));
+    await until(() => h.store.getInbound(primary)?.status === 'suppressed' || h.peer.turns > 1);
+    assert.equal(h.peer.turns, 1, 'a cancelled task must not enter the generic retry path');
+    assert.equal(h.store.getInbound(primary)?.status, 'suppressed');
+    const fresh = h.ingest('Now do a different task');
+    await h.processor.enqueue(fresh);
+    assert.equal(h.peer.turns, 2, h.errors.join('\n'));
+    await h.finish();
+    await h.processor.waitForIdle();
+    assert.equal(h.store.getInbound(fresh)?.status, 'completed');
+  });
+}
+
+test('an unknown approval code refuses authorization but refreshes the running task instead of breaking its reply window', async (t) => {
+  const h = await harness(t);
+  const primary = h.ingest('Inspect the repository');
+  await h.processor.enqueue(primary);
+  const oldToken = h.peer.token;
+  const control = h.ingest('/kintio approval ABCDEF123456 1');
+  await h.processor.enqueue(control);
+  assert.equal(h.peer.messages.filter((message) => message.method === 'turn/steer').length, 1);
+  assert.equal(h.peer.turns, 1);
+  assert.equal(h.peer.decision(), undefined);
+  assert.throws(() => h.store.getAgentSession(oldToken));
+  assert.equal(h.store.getAgentSession(h.peer.token).boundaryInboxSeq, h.store.getInbound(control)?.inboxSeq);
+  await h.finish();
+  await h.processor.waitForIdle();
+  assert.equal(h.store.getInbound(primary)?.status, 'completed');
+  assert.equal(h.store.getInbound(control)?.status, 'absorbed');
+});
+
+test('a recovered turn can accept an approval reply through the short admission queue and finish the renewed direction', async (t) => {
+  const h = await harness(t);
+  const primary = h.ingest('Inspect the repository');
+  h.store.claimInbound({ messageKey: primary });
+  const recovered = h.processor.recover(h.store.listRecoverableInbound('weixin_ilink'), { priority: 'low' });
+  await until(() => h.peer.turns === 1);
+  h.peer.ask();
+  await until(() => h.sent.length > 0);
+  await tick();
+  const code = /\/kintio approval ([A-F0-9]+) 1/u.exec(h.sent[0]!)![1]!;
+  const control = h.ingest(`/kintio approval ${code} 1`);
+  await h.processor.enqueue(control);
+  await until(() => h.peer.decision() !== undefined);
+  assert.equal(h.peer.decision(), 'accept');
+  assert.equal(h.peer.turns, 1);
+  await h.finish();
+  await recovered;
+  await h.processor.waitForIdle();
+  assert.equal(h.store.getInbound(primary)?.status, 'completed');
+  assert.equal(h.store.getInbound(control)?.status, 'absorbed');
+});
+
+test('a new instruction arriving before cancellation completes waits without being attached to the cancelled task', async (t) => {
+  const h = await harness(t, { completeCancellations: true });
+  h.peer.holdCancellation = true;
+  const { primary, code } = await h.ask();
+  await h.processor.enqueue(h.ingest(`/kintio approval ${code} 3`));
+  await until(() => Boolean(h.peer.releaseCancellation));
+  const fresh = h.ingest('A new independent instruction');
+  const queued = h.processor.enqueue(fresh);
+  await tick();
+  assert.equal(h.peer.turns, 1);
+  assert.equal(h.peer.messages.filter((message) => message.method === 'turn/steer').length, 1);
+  h.peer.releaseCancellation!();
+  await queued;
+  assert.equal(h.peer.turns, 2, h.errors.join('\n'));
+  assert.equal(h.store.getInbound(primary)?.status, 'suppressed');
+  await h.finish();
+  await h.processor.waitForIdle();
+  assert.equal(h.store.getInbound(fresh)?.status, 'completed');
+});
+
+test('an unknown approval code refreshes a delivery-correction turn without granting anything or starting a new task', async (t) => {
+  const h = await harness(t);
+  const primary = h.ingest('Inspect the repository');
+  await h.processor.enqueue(primary);
+  h.peer.send({ method: 'turn/completed', params: { threadId: 'thread-one', turn: { id: 'turn-one', status: 'completed' } } });
+  await until(() => h.peer.turnId === 'turn-2');
+  const control = h.ingest('/kintio approval ABCDEF123456 1');
+  await h.processor.enqueue(control);
+  assert.equal(h.peer.messages.find((message) => message.method === 'turn/steer')?.params.expectedTurnId, 'turn-2');
+  assert.equal(h.peer.turns, 2);
+  assert.equal(h.peer.decision(), undefined);
+  await h.finish();
+  await h.processor.waitForIdle();
+  assert.equal(h.store.getInbound(primary)?.status, 'completed');
+  assert.equal(h.store.getInbound(control)?.status, 'absorbed');
+});
+
+test('an unconfirmed invalid-code refresh explicitly cancels the running task without retrying it', async (t) => {
+  const h = await harness(t);
+  const primary = h.ingest('Inspect the repository');
+  await h.processor.enqueue(primary);
+  h.peer.holdSteer = true;
+  await h.processor.enqueue(h.ingest('/kintio approval ABCDEF123456 1'));
+  assert.equal(h.store.getInbound(primary)?.status, 'suppressed');
+  assert.equal(h.peer.turns, 1);
+  assert.equal(h.peer.decision(), undefined);
+  assert.ok(h.sent.some((content) => content.includes('running task was cancelled')));
+  h.peer.holdSteer = false;
+  const fresh = h.ingest('A new independent instruction');
+  await h.processor.enqueue(fresh);
+  assert.equal(h.peer.turns, 2, h.errors.join('\n'));
+  await h.finish();
+  await h.processor.waitForIdle();
+  assert.equal(h.store.getInbound(fresh)?.status, 'completed');
+});
+
+test('transport failure while an approval is pending stays a failure rather than being treated as operator cancellation', async (t) => {
+  const h = await harness(t);
+  const { primary } = await h.ask();
+  h.peer.stdout.end();
+  assert.equal((await h.server.failure) instanceof AgentTurnCancelledError, false);
+  await until(() => h.errors.length > 0);
+  assert.notEqual(h.store.getInbound(primary)?.status, 'suppressed');
+  assert.notEqual(h.store.getInbound(primary)?.errorMessage, 'agent_approval_cancelled');
+  assert.equal(h.peer.decision(), undefined);
 });

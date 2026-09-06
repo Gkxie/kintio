@@ -2,6 +2,8 @@ import readline from 'node:readline';
 import type { Readable, Writable } from 'node:stream';
 import crossSpawn from 'cross-spawn';
 
+import { AgentTurnCancelledError } from '../agent/runtime.ts';
+
 import { KINTIO_VERSION } from '../version.ts';
 
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -144,6 +146,7 @@ interface TurnState {
   readonly itemStarts: Map<string, { readonly sequence: number; readonly item: JsonRecord }>;
   readonly waiter: Deferred<CodexTurnResult>;
   failure?: string;
+  approvalCancelled?: boolean;
 }
 
 type ResolvedOptions = CodexAppServerOptions & {
@@ -433,9 +436,8 @@ export class CodexAppServer implements CodexBoundary {
     const controller = new AbortController();
     const timer = setTimeout(() => {
       if (this.#approvals.get(message.id)?.controller !== controller) return;
-      this.#clearApprovals((id) => id === message.id);
       if (!this.#closed) {
-        try { this.#write({ id: message.id, result: { decision: 'cancel' } }); }
+        try { this.#finishApproval(message.id, 'cancel'); }
         catch { this.#fail(new Error('Codex app-server approval cancellation failed')); }
       }
     }, Math.max(1, Math.min(this.#options.approvalTimeoutMs || 300_000, 300_000)));
@@ -454,18 +456,26 @@ export class CodexAppServer implements CodexBoundary {
         if (typeof result === 'string') decision = result === 'decline' ? 'decline' : 'cancel';
         else if (result.isAllowed() && ['accept', 'decline', 'cancel'].includes(result.decision)) decision = result.decision;
       } catch { /* A failed freshness check never grants permission. */ }
-      this.#clearApprovals((id) => id === message.id);
-      this.#write({ id: message.id, result: { decision } });
+      this.#finishApproval(message.id, decision);
     }).catch(() => this.#fail(new Error('Codex app-server approval response failed')));
     return true;
   }
 
-  #clearApprovals(predicate: (id: string | number, request: { threadId: string; turnId: string }) => boolean): void {
+  #finishApproval(id: string | number, decision: CodexApprovalDecision): void {
+    const request = this.#approvals.get(id);
+    if (!request || this.#closed) return;
+    const cancellation = decision === 'cancel' ? new AgentTurnCancelledError() : undefined;
+    if (cancellation) this.#turnState(request.turnId).approvalCancelled = true;
+    this.#clearApprovals((candidate) => candidate === id, cancellation);
+    this.#write({ id, result: { decision } });
+  }
+
+  #clearApprovals(predicate: (id: string | number, request: { threadId: string; turnId: string }) => boolean, reason?: Error): void {
     for (const [id, request] of this.#approvals) {
       if (!predicate(id, request)) continue;
       this.#approvals.delete(id);
       clearTimeout(request.timer);
-      request.controller.abort();
+      request.controller.abort(reason);
     }
   }
 
@@ -501,8 +511,7 @@ export class CodexAppServer implements CodexBoundary {
       if (previous) starts?.set(params.itemId, { sequence: previous.sequence, item: { ...previous.item, changes: params.changes } });
       for (const [id, approval] of this.#approvals) {
         if (approval.threadId !== params.threadId || approval.turnId !== params.turnId || approval.itemId !== params.itemId) continue;
-        this.#clearApprovals((candidate) => candidate === id);
-        this.#write({ id, result: { decision: 'cancel' } });
+        this.#finishApproval(id, 'cancel');
       }
       return;
     }
@@ -537,7 +546,9 @@ export class CodexAppServer implements CodexBoundary {
       if (typeof turn?.id !== 'string') return;
       this.#clearApprovals((_id, request) => request.turnId === turn.id);
       const state = this.#turnState(turn.id);
-      if (turn.status === 'completed') {
+      if (state.approvalCancelled) {
+        state.waiter.reject(new AgentTurnCancelledError());
+      } else if (turn.status === 'completed') {
         state.waiter.resolve({ items: state.items });
       } else {
         const status = turn.status === 'failed' || turn.status === 'interrupted'

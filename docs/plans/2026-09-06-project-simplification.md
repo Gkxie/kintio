@@ -107,7 +107,7 @@ separate approval; delete test threads when such a run is authorized.
 | A1 | PR checks | [#105](https://github.com/Gkxie/kintio/pull/105); fatal transport, early notifications, startup/running failure, normal shutdown tested. Full suite: 674 tests / 92 files passed; independent review completed. |
 | A2 | In progress | #101 merged; active and waiting recovery promotion tests in an isolated branch. |
 | A3 | Merged | [#103](https://github.com/Gkxie/kintio/pull/103); 667 tests passed locally; independent review and all hosted checks passed. |
-| A4 | In review | One-use command/file approval bridge implemented; scoped protocol, SQLite, iLink quota, and runtime-stop regressions. Real pending-approval/steering interoperability remains unverified; see the boundary above. |
+| A4 | In review | One-use command/file bridge integrated with A2. 115 focused tests cover cancellation terminality, independent new instructions, expired-code capability refresh, recovery, quota, and runtime-stop boundaries. Real pending-approval/steering interoperability remains unverified; see the boundary above. |
 | C1 | In progress | Shared operator ownership and per-connection terminal offers; foreground and cancellation regressions. |
 | C2 | Pending | Remove dead modes and relocate cohesive update/lifecycle logic after C1. |
 | R1 / D1 | Merged | [#104](https://github.com/Gkxie/kintio/pull/104); 672 tests passed locally; independent authorization review and all hosted checks passed. |

@@ -2,6 +2,10 @@ import type { ChatChannel, ResolvedImage } from '../types.ts';
 
 export type AgentAccess = 'restricted' | 'host';
 
+export class AgentTurnCancelledError extends Error {
+  constructor() { super('Agent turn intentionally cancelled at the approval boundary'); }
+}
+
 export interface AgentMessage {
   readonly messageKey: string;
   readonly text: string;
@@ -33,6 +37,7 @@ export interface AgentImageArtifact extends AgentArtifact {
 
 export interface AgentInput {
   readonly approvalCode?: string;
+  readonly controlRefresh?: boolean;
   readonly approvals?: {
     readonly isAllowed: () => boolean;
     readonly notify: (content: string, signal: AbortSignal) => Promise<void>;
@@ -101,7 +106,7 @@ export interface AgentRuntime {
     channel?: ChatChannel,
   ): Promise<string>;
   takePendingMemoryThread?(conversationId: string): string;
-  activePrimary(conversationId: string): string | undefined;
+  activePrimary(conversationId: string, includeFinishing?: boolean): string | undefined;
   interrupt?(conversationId: string): Promise<boolean>;
   submit(input: AgentInput): Promise<AgentSubmission>;
   inspectHistory?(

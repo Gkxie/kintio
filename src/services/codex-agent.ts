@@ -10,6 +10,7 @@ import type {
   AgentSubmission,
   HistoryInspection,
 } from '../agent/runtime.ts';
+import { AgentTurnCancelledError } from '../agent/runtime.ts';
 import type { CodexConfig } from '../config.ts';
 import type { LocalMcpLaunches, McpRelayLaunch } from '../mcp/ipc-host.ts';
 import type { ChatChannel } from '../types.ts';
@@ -108,6 +109,7 @@ interface ActiveState {
   completion?: Promise<AgentCompletion>;
   pendingSteer?: Promise<void>;
   finishing: boolean;
+  cancelling: boolean;
   toolSessionToken: string;
   publishArtifact?: AgentInput['publishArtifact'];
   allowNoAction: boolean;
@@ -482,6 +484,10 @@ export class CodexAgent {
       isCurrent: () => false,
     };
     const cancel = () => {
+      if (request.signal.reason instanceof AgentTurnCancelledError && state.approvalTurn === turn) {
+        state.cancelling = true;
+        state.finishing = true;
+      }
       if (this.#approvals.get(code) === pending) this.#approvals.delete(code);
       answer.resolve('cancel');
     };
@@ -494,8 +500,14 @@ export class CodexAgent {
       pending.delivered = true;
       const decision = await answer.promise;
       return { decision, isAllowed: () => !request.signal.aborted && state.approvalTurn === turn && pending.allowed() && pending.isCurrent() };
+    } catch (error) {
+      state.cancelling = true;
+      state.finishing = true;
+      throw error;
     } finally {
-      request.signal.removeEventListener('abort', cancel);
+      // Keep observing until the protocol writes its decision: its final
+      // freshness check can still turn a deferred acceptance into cancellation.
+      if (request.signal.aborted) request.signal.removeEventListener('abort', cancel);
       if (this.#approvals.get(code) === pending) this.#approvals.delete(code);
     }
   }
@@ -504,7 +516,7 @@ export class CodexAgent {
     const pending = this.#approvals.get(code);
     return pending?.delivered && (option === undefined || Number.isInteger(option) && pending.choices[option - 1]) &&
       this.#active.get(conversationId) === pending.state &&
-      pending.state.approvalTurn === pending.turn && !pending.request.signal.aborted && pending.allowed()
+      !pending.state.cancelling && pending.state.approvalTurn === pending.turn && !pending.request.signal.aborted && pending.allowed()
       ? { primaryMessageKey: pending.state.primaryMessageKey, turnId: pending.request.turnId } : undefined;
   }
 
@@ -512,6 +524,10 @@ export class CodexAgent {
     const pending = this.#approvals.get(code);
     const decision = pending?.choices[option - 1];
     if (!pending || !decision || !this.pendingApproval(conversationId, code)) return false;
+    if (decision === 'cancel') {
+      pending.state.cancelling = true;
+      pending.state.finishing = true;
+    }
     pending.isCurrent = isCurrent;
     this.#approvals.delete(code);
     pending.resolve(decision);
@@ -522,6 +538,8 @@ export class CodexAgent {
     const state = this.#active.get(conversationId);
     for (const [code, pending] of this.#approvals) {
       if (pending.state !== state) continue;
+      state.cancelling = true;
+      state.finishing = true;
       this.#approvals.delete(code);
       pending.resolve('cancel');
     }
@@ -530,6 +548,8 @@ export class CodexAgent {
   invalidateApprovals(): void {
     for (const [code, pending] of this.#approvals) {
       if (pending.allowed()) continue;
+      pending.state.cancelling = true;
+      pending.state.finishing = true;
       this.#approvals.delete(code);
       pending.resolve('cancel');
     }
@@ -709,6 +729,7 @@ export class CodexAgent {
       primaryMessageKey: message.messageKey,
       latestClientInputId: input.clientInputId || message.messageKey,
       finishing: false,
+      cancelling: false,
       toolSessionToken: input.toolSessionToken,
       allowNoAction: input.allowNoAction === true,
       toolServer: channelProfile(input.channel).server,
@@ -758,10 +779,16 @@ export class CodexAgent {
   async #steer(
     state: ActiveState,
     input: AgentInput,
-    approval = false,
+    control = false,
   ): Promise<Extract<AgentSubmission, { kind: 'steered' }>> {
     const { message } = input;
-    if (state.finishing && !approval) throw new Error('Codex active turn already completed');
+    if (state.cancelling || state.finishing && !control) throw new Error('Codex active turn already completed');
+    if (control) {
+      const turn = state.approvalTurn;
+      if (!turn || !await turn || state.approvalTurn !== turn || state.cancelling) {
+        throw new Error('Codex control turn is no longer active');
+      }
+    }
     state.latestClientInputId = input.clientInputId || message.messageKey;
     state.toolSessionToken = input.toolSessionToken;
     state.publishArtifact = input.publishArtifact || state.publishArtifact;
@@ -801,20 +828,25 @@ export class CodexAgent {
       if (active) await active.completion?.catch(() => undefined);
       return this.#start(input);
     }
-    const approval = Boolean(input.approvalCode && this.pendingApproval(key, input.approvalCode));
-    if (!active || active.finishing && !approval) throw new Error('Agent turn is no longer steerable');
-    return this.#steer(active, input, approval);
+    const control = Boolean(input.approvalCode && this.pendingApproval(key, input.approvalCode)) ||
+      Boolean(input.controlRefresh && input.agentAccess === 'host' && input.channel === 'weixin_ilink');
+    if (!active || active.cancelling || active.finishing && !control) throw new Error('Agent turn is no longer steerable');
+    return this.#steer(active, input, control);
   }
 
-  activePrimary(conversationId: string): string | undefined {
+  activePrimary(conversationId: string, includeFinishing = false): string | undefined {
     const active = this.#active.get(conversationId);
-    return active && !active.finishing ? active.primaryMessageKey : undefined;
+    return active && !active.cancelling && (!active.finishing || includeFinishing && active.approvalTurn)
+      ? active.primaryMessageKey : undefined;
   }
 
   async interrupt(conversationId: string): Promise<boolean> {
-    this.cancelApprovals(conversationId);
     const active = this.#active.get(conversationId);
-    if (!active || active.finishing || !active.thread.interrupt) return false;
+    const turn = active?.approvalTurn;
+    if (!active || !turn || !active.thread.interrupt) return false;
+    await turn;
+    if (active.approvalTurn !== turn) return false;
+    this.cancelApprovals(conversationId);
     const interrupted = await active.thread.interrupt();
     if (interrupted) await active.completion?.catch(() => undefined);
     return interrupted;

@@ -8,6 +8,7 @@ import type {
   AgentRuntime,
   AgentSubmission,
 } from '../../src/agent/runtime.ts';
+import { AgentTurnCancelledError } from '../../src/agent/runtime.ts';
 import { normalizeWecomMessage } from '../../src/domain/wecom-message.ts';
 import { IlinkSendExecutor } from '../../src/ilink/executor.ts';
 import { normalizeIlinkInboundMessage } from '../../src/ilink/message.ts';
@@ -1175,6 +1176,13 @@ test('low-priority downtime backlog waits for zero working conversations and yie
 
 test('a durable approval notice does not prevent backlog preemption or restore its spent quota', async (t) => {
   const harness = await createHarness(t);
+  const submit = harness.agent.submit.bind(harness.agent);
+  harness.agent.submit = async (input) => {
+    const result = await submit(input);
+    return result.kind === 'started'
+      ? { ...result, completion: result.completion.catch(() => { throw new AgentTurnCancelledError(); }) }
+      : result;
+  };
   const account = harness.registerIlink('approval-backlog');
   const backlogKey = harness.ingestIlink(account, 'background action');
   harness.store.claimInbound({ messageKey: backlogKey });
