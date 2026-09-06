@@ -251,7 +251,7 @@ test('repository workflows preserve executable security boundaries', async () =>
   const releaseCodex = workflows.get('.github/workflows/release-codex.yml') || '';
   assert.match(releaseCodex, /^  pull_request_target:\n    branches: \[master\]$/mu);
   assert.doesNotMatch(releaseCodex, /^  (?:pull_request|push|workflow_dispatch|schedule):/mu);
-  assert.match(releaseCodex, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
+  assert.match(releaseCodex, /types: \[opened, synchronize, reopened, ready_for_review, edited\]/u);
   for (const file of ['CHANGELOG.md', 'package.json', 'src/version.ts']) {
     assert.match(
       releaseCodex,
