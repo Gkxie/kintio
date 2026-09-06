@@ -37,7 +37,7 @@ for (const workspace of ['default', 'custom']) {
       windowsHide: true,
       timeout: 5_000,
     });
-    assert.equal(cwd, await fs.realpath(config.codex.workingDirectory));
+    assert.equal(await fs.realpath(cwd), await fs.realpath(config.codex.workingDirectory));
     if (process.platform !== 'win32') {
       assert.equal((await fs.stat(config.codex.workingDirectory)).mode & 0o777, 0o700);
     }
