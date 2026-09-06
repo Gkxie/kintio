@@ -4,6 +4,11 @@ This file records important user-visible changes after the first public release.
 
 ## Unreleased
 
+- Removed keyword-based image-edit retries so delivery correction cannot override
+  a request to describe an image or cancel an edit. Generated artifacts and
+  recorded channel outcomes still use the existing delivery path
+  ([#102](https://github.com/Gkxie/kintio/issues/102)).
+
 - Recheck current authorization and reply-window validity before recovery can
   use the Agent, retire superseded iLink work, and prevent prepared thread
   caches from reusing an archived or deleted thread. Backlog preparation and

@@ -298,6 +298,41 @@ test('a message arriving after active completion starts a fresh turn', async (t)
   assert.equal(boundary.steerCount, 0);
 });
 
+test('cancelling an image edit during steering keeps delivery correction neutral', async (t) => {
+  const active = deferred<CodexTurnResult>();
+  const boundary = new Boundary([active.promise, { items: [tool('description')] }]);
+  const { agent, input } = await harness(t, boundary);
+  const text = 'Edit this photo';
+  const base = input('image-edit');
+  const submission = await agent.submit({
+    ...base,
+    contextText: text,
+    message: { ...base.message, text, summary: text },
+    resolvedMedia: [{
+      kind: 'image',
+      bytes: Buffer.from('89504e470d0a1a0a03030303', 'hex'),
+      contentType: 'image/png',
+    }],
+  });
+  assert.equal(submission.kind, 'started');
+  if (submission.kind !== 'started') return;
+  const changed = input('describe-instead');
+  const latestText = 'Do not edit the photo. Just describe it.';
+  const steered = await agent.submit({
+    ...changed,
+    mode: 'steer',
+    contextText: latestText,
+    message: { ...changed.message, text: latestText, summary: latestText },
+  });
+  assert.equal(steered.kind, 'steered');
+  active.resolve({ items: [] });
+  assert.deepEqual(await submission.completion, { executedAttemptIds: ['sa_description'] });
+  assert.equal(boundary.startCount, 2);
+  assert.equal(boundary.steerCount, 1);
+  assert.match(String(boundary.inputs[1]), /No deliverable message has been sent/u);
+  assert.doesNotMatch(String(boundary.inputs[1]), /image generation only/u);
+});
+
 test('close waits for active completion while abort closes immediately', async (t) => {
   const active = deferred<CodexTurnResult>();
   const closeBoundary = new Boundary([active.promise]);

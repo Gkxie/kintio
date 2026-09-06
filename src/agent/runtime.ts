@@ -8,7 +8,7 @@ export interface AgentMessage {
   readonly summary: string;
 }
 
-export interface AgentMediaCapability {
+interface AgentMediaCapability {
   readonly ref: string;
   readonly kind: 'image';
   readonly messageKey: string;
