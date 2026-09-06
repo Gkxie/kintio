@@ -1,6 +1,6 @@
 {
   "name": "@kin-tio/cli",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "license": "Apache-2.0",
   "author": "XIE YU",
   "packageManager": "pnpm@10.34.5",
@@ -16,15 +16,9 @@
   "files": [
     "bin/kintio.js",
     "dist",
-    "assets/avatar.svg",
-    "assets/logo.svg",
     "assets/ilink-login-card.png",
     "codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md",
-    ".env.example",
-    "README.md",
-    "README.zh-CN.md",
     "CHANGELOG.md",
-    "LICENSE",
     "THIRD_PARTY_NOTICES"
   ],
   "repository": {
@@ -44,8 +38,6 @@
   ],
   "scripts": {
     "build": "node --input-type=module -e \"import { rmSync } from 'node:fs'; rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
-    "dev": "node --watch index.ts",
-    "start": "pnpm run build && node dist/index.js",
     "test": "vitest run",
     "prepack": "pnpm run build"
   },

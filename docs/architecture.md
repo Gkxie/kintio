@@ -8,82 +8,56 @@ The current agent runtime is Codex CLI. The code exposes a replaceable agent int
 
 A Kintio deployment shares one Codex login. Each provider identity has an independent Codex thread. Kintio does not implement a multi-tenant model with separate agent credentials or working directories for individual messaging users.
 
-## Installation and instance boundary
+## Installation and runtime boundary
 
-The global `kintio` command belongs to the installed package; credentials and
-mutable runtime state do not. By default one instance owns `~/.kintio`, which
-contains its environment file, SQLite state, temporary media, and Agent
-workspace. `KINTIO_HOME` and `KINTIO_CONFIG_FILE`, or their CLI options, select
-an explicit existing instance. Relative configured paths resolve from that
-instance root and never from global `node_modules` or an arbitrary caller
-directory.
+Program files belong to the installed package; mutable state belongs to
+`~/.kintio`. WeCom configuration and its managed Agent workspace live in
+`~/.kintio/wecom/`. iLink retains its existing home and account data. Both
+channels use `~/.kintio/data/kintio.sqlite`, one global Agent scheduler, and
+one set of runtime locks and logs. `--home` selects the Kintio home, not a
+second WeCom instance. There is one WeCom listener, not a WeCom account registry.
 
-[cli.ts](../cli.ts) is the executable entry and [src/cli.ts](../src/cli.ts)
-implements setup and lifecycle commands. Background execution launches a small
-native daemon, which owns logs, local control, and bounded worker restarts. The
-worker entry [index.ts](../index.ts) remains the thin process bootstrap for
-[KintioSupervisor](../src/supervisor.ts). The CLI does not duplicate the SQLite
-schema or invent a second lock; standalone enrollment acquires the canonical
-instance lock only when no runtime owns it. Background start
-succeeds only after the worker publishes readiness following Hono listen and
-runtime initialization. Downtime backlog is a low-priority responsibility and
-is not part of the readiness gate.
+[cli.ts](../cli.ts) and [src/cli.ts](../src/cli.ts) implement the public commands.
+The native daemon provides bounded crash recovery and log rotation for one
+[worker.ts](../worker.ts). The worker composes the shared business services in
+[src/runtime.ts](../src/runtime.ts); Hono is an optional listener inside it,
+not the process entry point.
 
 ```text
-Kintio CLI
-├── ilink login → running owner IPC or temporary Enrollment Service
-├── ilink list/start/stop/delete → running owner IPC or temporary account control
-├── ilink start → Native daemon → channel-neutral Runtime without Hono
-└── start       → Native daemon → Worker → KintioSupervisor
+kintio wecom start/stop ──┐
+                        ├── private local operator IPC ── shared business worker
+kintio ilink commands ───┘                                 ├── WeCom singleton (optional Hono)
+                                                          ├── enabled iLink account listeners
+                                                          ├── SQLite + one Agent scheduler
+                                                          └── Agent CLI + stdio MCP children
 ```
 
-The Supervisor—not Hono—is the process composition root:
+The first background start launches the daemon and worker. Starting another
+channel attaches to that worker instead of creating another database owner.
+iLink login can still run temporarily without any background worker or WeCom
+configuration. Operator tools are available only over private local IPC;
+conversation Agents receive scoped delivery tools, never lifecycle controls.
 
-```text
-Kintio process
-└── Supervisor
-    ├── public HTTP adapter: Hono messaging callbacks
-    └── application runtime
-        ├── private MCP IPC host and stdio relays
-        ├── WeChat message synchronization
-        ├── Weixin iLink polling and login listeners
-        ├── future Feishu WebSocket or another long-lived transport
-        └── SQLite Inbox, scheduler, Agent runtime, and delivery tools
-```
+WeCom start loads its own configuration, installs its Skill, and binds its HTTP
+listener. iLink alone does not load that configuration or bind a TCP port.
+Repeated WeCom start is idempotent. Stopping or restarting a listener does not
+restart the shared worker or another channel's listeners. When the last channel
+is stopped, the worker drains and asks its daemon to exit.
 
-The Supervisor is the callback deployment's process-level composition root;
-`createRuntime()` is the channel-neutral application composition root and can
-also run without Hono through the iLink daemon or `kintio ilink start --foreground`.
-WeChat synchronization is an
-optional Runtime input rather than an iLink prerequisite. Removing that adapter
-in the future should remove its optional Runtime branch without changing the
-iLink enrollment, polling, Agent configuration, or persistence contracts.
-A future long-lived transport belongs
-beside the existing iLink listeners in the runtime's explicit lifecycle, not in
-a Hono route. Extract a shared channel lifecycle only after the second such
-transport exposes real repetition. Separate operating-system processes remain
-an optional future failure-isolation choice, not a prerequisite for Supervisor
-ownership.
+SQLite retains the WeCom enabled flag and each iLink account's enabled flag.
+A whole-worker restart restores only those choices. Startup recovery closes
+or repairs interrupted work once per worker, never when adding a second
+channel. Downtime work remains low-priority under the same global scheduler.
 
-Startup is deliberately phased:
+Shared resources do not share trust: conversation keys include channel,
+account, and participant. WeCom authorization, iLink enrollment, thread history,
+Agent workspace, and MCP delivery capabilities remain scoped. Host-level
+access granted by local iLink login does not authorize a WeCom identity.
 
-1. construct the shared runtime and bind its private MCP IPC endpoint;
-2. bind the Hono HTTP channel while callback ingress returns `503`;
-3. start recovery, polling, and other live listeners;
-4. open callback ingress; and
-5. publish worker readiness to the native daemon over parent IPC.
-
-Shutdown reverses capability rather than merely reversing object creation:
-
-1. close callback and polling ingress to new work;
-2. keep MCP IPC reachable while active Agent turns and sends drain;
-3. close MCP IPC, tools, SQLite, and the instance lock; and
-4. close the HTTP channel.
-
-If graceful drain exceeds its configured limit, abort immediately disables
-tools, Agent work, and listeners without kicking pending sends. The process
-allows at most five additional seconds for cancellation and then exits; SQLite
-and the instance lock use their existing crash-recovery rules on the next start.
+A whole-worker failure affects both channels; the daemon restarts that one
+worker with bounded backoff. This is a deliberate trade-off for avoiding two
+sets of supervision, persistence, recovery, and scheduling. A callback bind
+failure is reported without closing an already-running iLink listener.
 
 ## Message flow
 
@@ -198,7 +172,9 @@ records, and enrollment audit while preserving unrelated accounts and channels.
 ### Agent access provenance
 
 iLink accounts persist an Agent access level derived only from their enrollment source.
-Terminal enrollment grants `host` access; WeChat KF enrollment grants `restricted` access.
+CLI enrollment grants `host` access. Previously restricted accounts keep their
+stored access level until explicitly enrolled by the local operator. WeCom no
+longer offers iLink enrollment tools.
 Provider messages, Agent prompts, MCP arguments, and participant IDs cannot select or
 upgrade this field. Existing host access survives remote credential rotation and can only
 originate from the local operator path.
@@ -242,8 +218,8 @@ The exact recovery, race, and idempotency transitions are specified by these tes
 | Change agent context or steering | `src/services/codex-agent.ts`, `conversation-processor.ts` | `test/integration/codex-*`, `conversation-*` |
 | Change provider send capabilities | `src/mcp/`, `src/domain/send-contract.ts` | `test/integration/*-mcp.test.ts` |
 | Change authorization, queues, or recovery | `src/state/sqlite-store.ts`, `conversation-processor.ts` | `test/recovery/`, `sqlite-*` |
-| Change installation or process lifecycle | `cli.ts`, `daemon.ts`, `src/cli.ts`, `src/runtime/native-daemon.ts`, `src/supervisor.ts` | `test/unit/cli.test.ts`, `test/unit/daemon-protocol.test.ts`, `test/recovery/cli-daemon.test.ts` |
-| Change HTTP callbacks or runtime shutdown | `src/app.ts`, `src/runtime.ts`, `index.ts` | `test/integration/callback.test.ts`, `runtime-*` |
+| Change installation or process lifecycle | `cli.ts`, `daemon.ts`, `src/cli.ts`, `src/runtime/native-daemon.ts`, `worker.ts` | `test/unit/cli.test.ts`, `test/unit/daemon-protocol.test.ts`, `test/recovery/cli-daemon.test.ts` |
+| Change HTTP callbacks or runtime shutdown | `src/app.ts`, `src/runtime.ts`, `worker.ts` | `test/integration/callback.test.ts`, `runtime-*` |
 
 To add a messaging adapter, first implement its listener, identity model, and provider reply window. Then reuse the common Inbox, agent runtime, and MCP receipt contract. Do not leak its payloads or error codes into another adapter, and do not build a generalized framework for hypothetical integrations.
 

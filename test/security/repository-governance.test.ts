@@ -43,7 +43,6 @@ test('English is canonical and Chinese is limited to the entry README', async ()
     .filter((file) => file !== 'README.zh-CN.md');
   const englishFiles = Array.from(new Set([
     ...rootMarkdown,
-    '.env.example',
     'LICENSE',
     'THIRD_PARTY_NOTICES',
     '.github/CODEOWNERS',
@@ -108,15 +107,9 @@ test('package, release version, and public entry points stay aligned', async () 
     packageJson.version,
   );
   assert.deepEqual(packageJson.files?.toSorted(), [
-    '.env.example',
     'CHANGELOG.md',
-    'LICENSE',
-    'README.md',
-    'README.zh-CN.md',
     'THIRD_PARTY_NOTICES',
-    'assets/avatar.svg',
     'assets/ilink-login-card.png',
-    'assets/logo.svg',
     'bin/kintio.js',
     'codex-workspace/.agents/skills/wechat-kf-reply-sop/SKILL.md',
     'dist',
@@ -127,18 +120,18 @@ test('package, release version, and public entry points stay aligned', async () 
   for (const pattern of ['.env.*', '*.pem', '*.key', '*.sqlite', '*.db']) {
     assert.equal(ignored.has(pattern), true, `missing .gitignore pattern ${pattern}`);
   }
-  for (const file of ['README.md', 'README.zh-CN.md']) {
+  for (const [file, logoSource] of [
+    ['README.md', 'https://raw.githubusercontent.com/Gkxie/kintio/master/assets/logo.svg'],
+    ['README.zh-CN.md', 'assets/logo.svg'],
+  ] as const) {
     const readme = await read(file);
-    assert.match(
-      readme,
-      /<h1>\s+<img src="assets\/logo\.svg" alt="Kintio" width="320" \/>\s+<\/h1>/u,
-    );
+    assert.ok(readme.includes(`<img src="${logoSource}" alt="Kintio" width="320" />`));
     const installIndex = readme.indexOf('npm install --global @kin-tio/cli');
-    const setupIndex = readme.indexOf('kintio setup');
+    const setupIndex = readme.indexOf('kintio wecom setup');
     assert.notEqual(installIndex, -1);
     assert.notEqual(setupIndex, -1);
     assert.ok(installIndex < setupIndex);
-    assert.ok(readme.indexOf('kintio start', setupIndex) > setupIndex);
+    assert.ok(readme.indexOf('kintio wecom start', setupIndex) > setupIndex);
   }
   assert.match(logo, /<title id="kintio-wordmark-title">Kintio<\/title>/u);
   assert.match(logo, /fill="#211920"/u);
@@ -168,7 +161,7 @@ test('repository workflows preserve executable security boundaries', async () =>
     '.github/workflows/dependency-review.yml',
     '.github/workflows/prepare-release.yml',
     '.github/workflows/pr-title.yml',
-    '.github/workflows/real-codex.yml',
+    '.github/workflows/release-codex.yml',
     '.github/workflows/release-plan.yml',
     '.github/workflows/release-pr.yml',
     '.github/workflows/release.yml',
@@ -188,16 +181,23 @@ test('repository workflows preserve executable security boundaries', async () =>
   }
 
   const ci = workflows.get('.github/workflows/ci.yml') || '';
+  const packagePreparation = await read('scripts/prepare-package.ts');
   assert.match(ci, /^  pull_request:$/mu);
   assert.doesNotMatch(ci, /^  (?:push|workflow_dispatch):/mu);
   for (const command of [
     'pnpm exec tsc -p tsconfig.test.json',
     'KNIP_DISABLE_RAW_TRANSFER=1 pnpm exec knip',
     'pnpm run build',
+    'scripts/prepare-package.ts',
     'npm pack --json --ignore-scripts',
     'npm install --global',
     'pnpm test',
   ]) assert.ok(ci.includes(command), command);
+  assert.match(ci, /packed Changelog does not start with the package version/u);
+  assert.match(ci, /packed Changelog contains repository-only headings/u);
+  assert.match(packagePreparation, /publishedChangelog/u);
+  assert.match(packagePreparation, /preparePackage/u);
+  assert.match(packagePreparation, /fs\.rm\('README\.zh-CN\.md'\)/u);
   for (const operatingSystem of [
     'ubuntu-latest',
     'macos-latest',
@@ -207,6 +207,14 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(ci, /needs: platform-tests/u);
   assert.doesNotMatch(ci, /pnpm audit|upload-artifact|download-artifact/u);
 
+  for (const file of ['.github/workflows/ci.yml', '.github/workflows/release.yml']) {
+    const workflow = workflows.get(file) || '';
+    assert.ok(workflow.includes('"$RUNNER_TEMP/kintio-global/bin/kintio" wecom setup'), file);
+    assert.ok(workflow.includes('test -f "$RUNNER_TEMP/kintio-profile/.kintio/wecom/.env"'), file);
+    assert.ok(workflow.includes('test ! -e "$RUNNER_TEMP/kintio-profile/.kintio/.env"'), file);
+    assert.doesNotMatch(workflow, /bin\/kintio" setup/u, file);
+  }
+
   const secretScan = workflows.get('.github/workflows/secret-scan.yml') || '';
   assert.match(secretScan, /^  pull_request:$/mu);
   assert.doesNotMatch(secretScan, /^  (?:push|workflow_dispatch):/mu);
@@ -215,6 +223,8 @@ test('repository workflows preserve executable security boundaries', async () =>
 
   const cla = workflows.get('.github/workflows/cla.yml') || '';
   assert.match(cla, /contributor-assistant\/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08/u);
+  assert.match(cla, /lock-pullrequest-aftermerge:\s*false/u);
+  assert.doesNotMatch(cla, /lock-pullrequest-aftermerge:\s*true/u);
   assert.match(cla, /github\.event\.action == 'closed' && github\.event\.pull_request\.merged == true/u);
   assert.match(cla, /path-to-document: https:\/\/github\.com\/Gkxie\/kintio\/blob\/cla-v1\.1\/CLA\.md/u);
   assert.match(cla, /path-to-signatures: signatures\/v1\.1\/cla\.json/u);
@@ -233,46 +243,58 @@ test('repository workflows preserve executable security boundaries', async () =>
     'kintio-release',
   ]));
 
-  const realCodex = workflows.get('.github/workflows/real-codex.yml') || '';
-  assert.match(realCodex, /^  workflow_dispatch:$/mu);
-  assert.match(realCodex, /^  pull_request:\n    branches: \[master\]$/mu);
-  assert.match(realCodex, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
-  assert.match(realCodex, /^    paths:\n(?:      - .+\n){3,}/mu);
-  assert.doesNotMatch(realCodex, /^  (?:push|pull_request_target|schedule):/mu);
-  assert.match(realCodex, /github\.event_name == 'workflow_dispatch'/u);
-  assert.match(realCodex, /github\.event_name == 'pull_request'/u);
-  assert.match(realCodex, /github\.ref == 'refs\/heads\/master'/u);
-  assert.match(realCodex, /startsWith\(github\.ref, 'refs\/heads\/codex\/'\)/u);
-  assert.match(realCodex, /github\.event\.pull_request\.draft == false/u);
-  assert.match(realCodex, /github\.event\.pull_request\.base\.ref == 'master'/u);
-  assert.match(
-    realCodex,
-    /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/u,
+  await assert.rejects(
+    fs.access('.github/workflows/real-codex.yml'),
+    { code: 'ENOENT' },
   );
-  assert.match(realCodex, /github\.event\.pull_request\.user\.login == 'Gkxie'/u);
-  assert.match(realCodex, /github\.actor == 'Gkxie'/u);
-  assert.match(realCodex, /github\.triggering_actor == 'Gkxie'/u);
-  assert.match(realCodex, /github\.run_attempt == 1/u);
-  assert.match(
-    realCodex,
-    /group: real-codex-validation-\$\{\{ github\.event\.pull_request\.number \|\| github\.ref \}\}/u,
-  );
-  assert.match(realCodex, /cancel-in-progress: true/u);
-  assert.match(realCodex, /^    environment: codex-eval$/mu);
-  assert.match(realCodex, /persist-credentials: false/u);
-  assert.match(realCodex, /pnpm install --frozen-lockfile --ignore-scripts/u);
-  assert.match(realCodex, /CODEX_SHA256: [0-9a-f]{64}/u);
-  assert.match(realCodex, /sha256sum --check --strict/u);
-  assert.match(realCodex, /KINTIO_CI_API_KEY: \$\{\{ secrets\.KINTIO_CI_API_KEY \}\}/u);
-  assert.equal(realCodex.match(/secrets\.KINTIO_CI_API_KEY/gu)?.length, 1);
-  assert.match(realCodex, /codex login --with-api-key/u);
-  assert.match(realCodex, /requires_openai_auth = true/u);
-  assert.doesNotMatch(realCodex, /env_key = "KINTIO_CI_API_KEY"/u);
-  assert.match(realCodex, /base_url = "\$KINTIO_CI_BASE_URL"/u);
-  assert.match(realCodex, /model_reasoning_effort = "none"/u);
-  assert.doesNotMatch(realCodex, /^\s+CODEX_(?:MODEL|PATH|REASONING_EFFORT|WEB_SEARCH_MODE):/mu);
-  assert.doesNotMatch(realCodex, /REAL_CODEX_CONCURRENCY|upload-artifact|download-artifact/u);
-  assert.match(realCodex, /name: Remove isolated Codex state\n\s+if: always\(\)/u);
+
+  const releaseCodex = workflows.get('.github/workflows/release-codex.yml') || '';
+  assert.match(releaseCodex, /^  pull_request_target:\n    branches: \[master\]$/mu);
+  assert.doesNotMatch(releaseCodex, /^  (?:pull_request|push|workflow_dispatch|schedule):/mu);
+  assert.match(releaseCodex, /types: \[opened, synchronize, reopened, ready_for_review\]/u);
+  for (const file of ['CHANGELOG.md', 'package.json', 'src/version.ts']) {
+    assert.match(
+      releaseCodex,
+      new RegExp(`^      - ${file.replaceAll('.', '\\.')}$`, 'mu'),
+    );
+  }
+  for (const identity of [
+    "github.event.pull_request.user.login == 'kintio-release[bot]'",
+    "github.actor == 'kintio-release[bot]'",
+    "github.triggering_actor == 'kintio-release[bot]'",
+    "github.actor == 'Gkxie'",
+    "github.triggering_actor == 'Gkxie'",
+  ]) assert.ok(releaseCodex.includes(identity), identity);
+  assert.match(releaseCodex, /github\.event_name == 'pull_request_target'/u);
+  assert.match(releaseCodex, /github\.event\.pull_request\.base\.repo\.full_name == github\.repository/u);
+  assert.match(releaseCodex, /github\.event\.pull_request\.head\.repo\.full_name == github\.repository/u);
+  assert.match(releaseCodex, /github\.event\.pull_request\.head\.ref == 'release\/next'/u);
+  assert.match(releaseCodex, /github\.event\.pull_request\.draft == false/u);
+  assert.match(releaseCodex, /github\.run_attempt == 1/u);
+  assert.match(releaseCodex, /group: release-codex-validation-/u);
+  assert.match(releaseCodex, /cancel-in-progress: true/u);
+  const authorizeJob = /^  authorize:\n([\s\S]*?)(?=^  validate:)/mu.exec(releaseCodex)?.[1] || '';
+  const validateJob = /^  validate:\n([\s\S]*)/mu.exec(releaseCodex)?.[1] || '';
+  assert.match(authorizeJob, /name: Authorize deterministic Release/u);
+  assert.doesNotMatch(authorizeJob, /environment: codex-eval|secrets\./u);
+  assert.match(authorizeJob, /ref: \$\{\{ github\.event\.pull_request\.base\.sha \}\}/u);
+  assert.match(authorizeJob, /ref: \$\{\{ github\.event\.pull_request\.head\.sha \}\}/u);
+  assert.match(authorizeJob, /path: trusted/u);
+  assert.match(authorizeJob, /path: candidate/u);
+  assert.match(authorizeJob, /working-directory: candidate/u);
+  assert.match(authorizeJob, /test "\$\(git rev-parse HEAD\)" = "\$HEAD_SHA"/u);
+  assert.match(authorizeJob, /\.\.\/trusted\/\.github\/scripts\/reconcile-release\.ts verify/u);
+  assert.match(authorizeJob, /authorized=true\\nhead_sha=%s\\n/u);
+  assert.match(validateJob, /needs: authorize/u);
+  assert.match(validateJob, /if: needs\.authorize\.outputs\.authorized == 'true'/u);
+  assert.match(validateJob, /^    environment: codex-eval$/mu);
+  assert.match(validateJob, /ref: \$\{\{ needs\.authorize\.outputs\.head_sha \}\}/u);
+  assert.match(validateJob, /test "\$\(git rev-parse HEAD\)" = "\$AUTHORIZED_HEAD_SHA"/u);
+  assert.match(validateJob, /persist-credentials: false/u);
+  assert.match(validateJob, /pnpm install --frozen-lockfile --ignore-scripts/u);
+  assert.match(validateJob, /KINTIO_CI_API_KEY: \$\{\{ secrets\.KINTIO_CI_API_KEY \}\}/u);
+  assert.equal(releaseCodex.match(/secrets\.KINTIO_CI_API_KEY/gu)?.length, 1);
+  assert.match(validateJob, /name: Remove isolated Codex state\n\s+if: always\(\)/u);
 
   const prepareRelease = workflows.get('.github/workflows/prepare-release.yml') || '';
   assert.match(prepareRelease, /^  push:\n    branches: \[master\]$/mu);
@@ -315,6 +337,7 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(release, /allowedReleaseFiles/u);
   assert.match(release, /Release tags must be annotated tags/u);
   assert.match(release, /contents: read[\s\S]+contents: write/u);
+  assert.match(release, /scripts\/prepare-package\.ts/u);
   assert.match(release, /npm pack --json --ignore-scripts/u);
   assert.match(release, /environment: npm-release/u);
   assert.equal(release.match(/id-token: write/gu)?.length, 1);
@@ -354,7 +377,7 @@ test('repository workflows preserve executable security boundaries', async () =>
   assert.match(verifyJob, /Release tags must be annotated tags/u);
   assert.ok(verifyJob.indexOf('tag_type=$(') < verifyJob.indexOf('npm pack'));
   assert.match(publishJob, /id-token: write/u);
-  assert.doesNotMatch(publishJob, /actions\/checkout|pnpm install/u);
+  assert.doesNotMatch(publishJob, /actions\/checkout|pnpm install|npm pack/u);
   assert.doesNotMatch(smokeJob, /id-token: write/u);
   assert.match(reportJob, /contents: read[\s\S]+pull-requests: write/u);
   assert.doesNotMatch(reportJob, /id-token: write|secrets\./u);

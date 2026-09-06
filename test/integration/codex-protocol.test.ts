@@ -58,7 +58,10 @@ test('app-server starts, steers, preserves the UserMessage boundary, and release
   const spawnProcess = ((command: string, args: readonly string[], options: unknown) => {
     assert.equal(command, 'codex');
     assert.ok(args.includes('app-server'));
-    assert.deepEqual(options, { stdio: ['pipe', 'pipe', 'pipe'] });
+    assert.deepEqual(options, {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
     child = new FakeCodexProcess((message, process) => {
       requests.push(message);
       if (message.method === 'initialize') {

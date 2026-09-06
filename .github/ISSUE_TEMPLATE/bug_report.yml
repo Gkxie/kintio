@@ -43,7 +43,7 @@ body:
         Node: paste `node --version`
         pnpm: paste `pnpm --version`
         Codex CLI: paste `codex --version` or N/A
-        Start method: kintio start / kintio run / external supervisor / other
+        Start method: kintio wecom start / kintio ilink start / external supervisor / other
     validations:
       required: true
 

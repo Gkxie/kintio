@@ -291,6 +291,20 @@ test('transient Agent start failure inspects recovery state and succeeds online'
   assert.equal(harness.store.listMessageAttempts(key).length, 1);
 });
 
+test('processor idle snapshot includes an active background Agent turn', async (t) => {
+  const completion = deferred<SimulatedAgentCompletion>();
+  const harness = await createHarness(t, async (input) => started(input, completion.promise));
+  assert.equal(harness.processor.isIdle(), true);
+
+  const key = harness.ingest(customer('idle-snapshot', 'x'));
+  await harness.processor.enqueue(key);
+  assert.equal(harness.processor.isIdle(), false);
+
+  completion.resolve({ replies: [{ type: 'text', content: 'done' }] });
+  await harness.processor.waitForIdle();
+  assert.equal(harness.processor.isIdle(), true);
+});
+
 test('synchronous steer failure requeues follow-up while primary remains active', async (t) => {
   const pending = new Promise<SimulatedAgentCompletion>(() => {});
   const harness = await createHarness(t, async (input) => {

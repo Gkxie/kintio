@@ -387,6 +387,49 @@ async function createHarness(
   };
 }
 
+test('stopping WeCom releases its queued work without invalidating active iLink sends; restarting recovers it once', async (t) => {
+  const harness = await createHarness(t);
+  const active = Array.from({ length: 10 }, (_, index) =>
+    harness.ingestIlink(harness.registerIlink(`shared-slot-${index}`), 'occupy a shared slot'));
+  await Promise.all(active.map((key) => harness.processor.enqueue(key)));
+  const queued = harness.ingestWecom('paused-wecom', 'wm-working-one');
+  const waiting = harness.processor.enqueue(queued);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(harness.agent.inputs.length, 10);
+  harness.processor.setChannelEnabled('wechat_kf', false);
+  await waiting;
+  await harness.processor.waitForChannelIdle('wechat_kf');
+  assert.equal(harness.store.getInbound(queued)?.status, 'received');
+  await harness.agent.finish(active[0]!, 'iLink capability remains valid');
+  harness.processor.setChannelEnabled('wechat_kf', true);
+  const recovery = harness.processor.recover(harness.store.listRecoverableInbound('wechat_kf'), { priority: 'high' });
+  await waitUntil(() => harness.agent.inputs.some((input) => input.message.messageKey === queued), 'WeCom recovery');
+  await harness.agent.finish(queued, 'resumed WeCom reply');
+  await recovery;
+  await Promise.all(active.slice(1).map((key) => harness.agent.finish(key, 'finish iLink')));
+  await harness.processor.waitForIdle();
+  assert.equal(harness.agent.inputs.filter((input) => input.message.messageKey === queued).length, 1);
+  assert.equal(harness.store.getInbound(queued)?.status, 'completed');
+  assert.equal(harness.agent.maxActive, 10);
+});
+
+test('a WeCom drain waits for its own active turn without waiting for an unrelated iLink turn', async (t) => {
+  const harness = await createHarness(t);
+  const wecom = harness.ingestWecom('draining-wecom', 'wm-working-one');
+  const ilink = harness.ingestIlink(harness.registerIlink('still-working'), 'keep working');
+  await Promise.all([harness.processor.enqueue(wecom), harness.processor.enqueue(ilink)]);
+  harness.processor.setChannelEnabled('wechat_kf', false);
+  let drained = false;
+  const draining = harness.processor.waitForChannelIdle('wechat_kf').then(() => { drained = true; });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(drained, false);
+  await harness.agent.finish(wecom, 'drain current WeCom response');
+  await draining;
+  assert.equal(harness.processor.isIdle(), false);
+  await harness.agent.finish(ilink, 'finish unrelated iLink work');
+  await harness.processor.waitForIdle();
+});
+
 test('the global ten-conversation window queues one iLink conversation and serializes its notice before the formal reply', async (t) => {
   const noticeStarted = deferred<void>();
   const releaseNotice = deferred<void>();

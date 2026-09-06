@@ -10,7 +10,7 @@ import type {
   AgentCompletion,
   AgentInput,
 } from '../../src/agent/runtime.ts';
-import { createConfig } from '../../src/config.ts';
+import { loadIlinkRuntimeConfig } from '../../src/config.ts';
 import { IlinkSecretBox } from '../../src/ilink/secret-box.ts';
 import { createIlinkAccountKey } from '../../src/ilink/store-types.ts';
 import {
@@ -93,13 +93,13 @@ async function fixture(t: TestContext) {
     prefix: 'ilink-active-runtime-',
   });
   const storageKey = Buffer.alloc(32, 41).toString('base64url');
-  const config = createConfig({
+  const config = loadIlinkRuntimeConfig({ environment: {
     WECOM_CALLBACK_TOKEN: 'RuntimeIlinkToken123',
     WECOM_ENCODING_AES_KEY: 'abcdefghijklmnopqrstuvwxyz0123456789ABCDEFG',
     WECOM_CORP_ID: 'ww-ilink-runtime',
     WECOM_KF_SECRET: 'wecom-must-not-connect',
     WECOM_ALLOWED_USER_IDS: 'wm-unrelated-user',
-    WECOM_DB_FILE: temp.filePath,
+    KINTIO_DB_FILE: temp.filePath,
     CODEX_WORKING_DIRECTORY: `${temp.directory}/codex-workspace`,
     CODEX_IMAGE_TMP_DIR: `${temp.directory}/codex-images`,
     ILINK_ENABLED: 'true',
@@ -107,7 +107,7 @@ async function fixture(t: TestContext) {
     ILINK_API_TIMEOUT_MS: '5000',
     ILINK_LONG_POLL_TIMEOUT_MS: '120000',
     ILINK_MAX_ACCOUNTS: '2',
-  }, temp.directory);
+  }, root: temp.directory });
   const accounts = [account('one'), account('two')];
   const persistence = temp.openPersistence();
   const ilink = persistence.createIlinkStore();
@@ -337,6 +337,7 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   assert.deepEqual(
     (await operator.listTools()).tools.map((tool) => tool.name),
     [
+      'restart_accounts',
       'begin_login',
       'login_status',
       'cancel_login',
@@ -346,19 +347,35 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
       'delete_account',
     ],
   );
+  const listed = (await operator.callTool({
+    name: 'list_accounts', arguments: {},
+  })).structuredContent as {
+    accounts: Array<{
+      accountKey: string;
+      generation: number;
+      incarnation: string;
+      providerAccountId: string;
+      runtimeEnabled: boolean;
+    }>;
+  };
   assert.deepEqual(
-    (await operator.callTool({ name: 'list_accounts', arguments: {} })).structuredContent,
-    {
-      accounts: accounts.map((value, index) => ({
-        accountKey: value.accountKey,
-        providerAccountId: value.providerAccountId,
-        runtimeEnabled: index === 0,
-      })),
-    },
+    listed.accounts.map(({ generation, incarnation, ...account }) => account),
+    accounts.map((value, index) => ({
+      accountKey: value.accountKey,
+      providerAccountId: value.providerAccountId,
+      runtimeEnabled: index === 0,
+    })),
   );
+  assert.ok(listed.accounts.every((account) =>
+    account.generation === 1 && /^ii_[0-9a-f]{64}$/u.test(account.incarnation)));
+  const secondAccount = listed.accounts[1]!;
   const secondStarted = await operator.callTool({
     name: 'start_account',
-    arguments: { accountKey: accounts[1]!.accountKey },
+    arguments: {
+      accountKey: secondAccount.accountKey,
+      expectedGeneration: secondAccount.generation,
+      expectedIncarnation: secondAccount.incarnation,
+    },
   });
   assert.equal((secondStarted.structuredContent as { runningCount: number }).runningCount, 2);
   await bounded('operator MCP close', operator.close());
@@ -511,12 +528,20 @@ test('active runtime restores iLink listeners, routes stdio MCP sends, and shuts
   })));
   const firstStopped = await lifecycle.callTool({
     name: 'stop_account',
-    arguments: { accountKey: accounts[0]!.accountKey },
+    arguments: {
+      accountKey: listed.accounts[0]!.accountKey,
+      expectedGeneration: listed.accounts[0]!.generation,
+      expectedIncarnation: listed.accounts[0]!.incarnation,
+    },
   });
   assert.equal((firstStopped.structuredContent as { runningCount: number }).runningCount, 1);
   const secondDeleted = await lifecycle.callTool({
     name: 'delete_account',
-    arguments: { accountKey: accounts[1]!.accountKey },
+    arguments: {
+      accountKey: secondAccount.accountKey,
+      expectedGeneration: secondAccount.generation,
+      expectedIncarnation: secondAccount.incarnation,
+    },
   });
   assert.equal((secondDeleted.structuredContent as { runningCount: number }).runningCount, 0);
   await bounded('lifecycle MCP close', lifecycle.close());

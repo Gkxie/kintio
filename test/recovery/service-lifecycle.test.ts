@@ -10,7 +10,14 @@ import crossSpawn from 'cross-spawn';
 import { isForcedExit, startTestChild } from '../support/child-process.ts';
 import { createTempSqlite } from '../support/temp-sqlite.ts';
 
-const indexFile = fileURLToPath(new URL('../../index.ts', import.meta.url));
+async function callbackConfig(home: string): Promise<string> {
+  const file = path.join(home, 'wecom/.env');
+  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  await fs.writeFile(file, 'CODEX_ENABLED=false\n', { mode: 0o600 });
+  return file;
+}
+
+const indexFile = fileURLToPath(new URL('../../worker.ts', import.meta.url));
 
 async function availablePort(): Promise<number> {
   const server = net.createServer();
@@ -76,14 +83,14 @@ async function waitForPortReleased(port: number, timeoutMs = 5_000): Promise<voi
   throw lastError;
 }
 
-test('outer service answers hello then SIGTERM releases its port and lock', async (t) => {
+test('SIGTERM releases the callback port; graceful shutdown also releases the shared lock', async (t) => {
   const servicePort = await availablePort();
   await waitForPortReleased(servicePort);
   const temporary = await createTempSqlite(t, {
     prefix: 'wechat-service-lifecycle-',
-    filename: 'wecom.sqlite',
+    filename: 'kintio.sqlite',
   });
-  const lockFile = path.join(temporary.directory, 'wecom.lock');
+  const lockFile = path.join(temporary.directory, 'kintio.lock');
   const workingDirectory = path.join(temporary.directory, 'agent-workspace');
   const managedSkill = path.join(
     workingDirectory,
@@ -94,6 +101,7 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
   const child = startTestChild(t, indexFile, {
     timeoutMs: 8_000,
     env: {
+      KINTIO_START_WECOM: await callbackConfig(temporary.directory),
       KINTIO_HOME: temporary.directory,
       PORT: String(servicePort),
       WECOM_CALLBACK_TOKEN: 'LifecycleToken123',
@@ -101,7 +109,7 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
       WECOM_CORP_ID: '',
       WECOM_KF_SECRET: '',
       WECOM_ALLOWED_USER_IDS: '',
-      WECOM_DB_FILE: temporary.filePath,
+      KINTIO_DB_FILE: temporary.filePath,
       CODEX_ENABLED: 'false',
       CODEX_WORKING_DIRECTORY: workingDirectory,
       SHUTDOWN_TIMEOUT_MS: '2000',
@@ -118,8 +126,7 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
       'utf8',
     ),
   );
-  await assert.rejects(fs.access(lockFile), { code: 'ENOENT' });
-
+  await fs.access(lockFile);
   const exit = await child.stop('SIGTERM');
   if (process.platform === 'win32') {
     assert.equal(isForcedExit(exit, 'SIGTERM'), true);
@@ -127,10 +134,15 @@ test('outer service answers hello then SIGTERM releases its port and lock', asyn
     assert.deepEqual(exit, { code: 0, signal: null });
   }
   await waitForPortReleased(servicePort);
-  await assert.rejects(fs.access(lockFile), { code: 'ENOENT' });
+  if (process.platform === 'win32') {
+    // Windows signal termination is forced; startup reclaims this stale owner lock.
+    await fs.access(lockFile);
+  } else {
+    await assert.rejects(fs.access(lockFile), { code: 'ENOENT' });
+  }
   assert.match(child.output().stdout, new RegExp(`Hono server is listening on port ${servicePort}`, 'u'));
   if (process.platform !== 'win32') {
-    assert.match(child.output().stdout, /Received SIGTERM; shutting down/u);
+    assert.match(child.output().stdout, /Stopping Kintio runtime/u);
   }
 });
 
@@ -143,23 +155,25 @@ test('parent shutdown message uses the same graceful close path', async (t) => {
   const child = startTestChild(t, indexFile, {
     timeoutMs: 8_000,
     env: {
+      KINTIO_START_WECOM: await callbackConfig(temporary.directory),
       KINTIO_HOME: temporary.directory,
       PORT: String(servicePort),
       WECOM_CALLBACK_TOKEN: '',
       WECOM_ENCODING_AES_KEY: '',
       WECOM_CORP_ID: '',
       WECOM_KF_SECRET: '',
-      ILINK_ENABLED: 'false',
       KINTIO_DB_FILE: temporary.filePath,
       SHUTDOWN_TIMEOUT_MS: '2000',
     },
   });
 
   assert.equal((await waitForResponse(servicePort, '/')).status, 200);
+  await fs.access(path.join(temporary.directory, 'kintio.lock'));
   assert.equal(child.child.send?.('shutdown'), true);
   assert.deepEqual(await child.waitForExit(), { code: 0, signal: null });
   await waitForPortReleased(servicePort);
-  assert.match(child.output().stdout, /Received parent shutdown; shutting down/u);
+  await assert.rejects(fs.access(path.join(temporary.directory, 'kintio.lock')), { code: 'ENOENT' });
+  assert.match(child.output().stdout, /Stopping Kintio runtime/u);
 });
 
 test('managed Worker notices a parent lost before bootstrap listeners exist', async (t) => {
@@ -222,11 +236,11 @@ test('managed Worker notices a parent lost before bootstrap listeners exist', as
     }),
   ]);
   assert.deepEqual(result, { code: 0, signal: null }, output);
-  assert.match(output, /Received parent disconnect; shutting down/u);
+  assert.match(output, /Stopping Kintio runtime/u);
   await assertPortReleased(servicePort);
 });
 
-test('production script builds and runs dist/index.js', async (t) => {
+test('production script builds and runs dist/worker.js', async (t) => {
   const servicePort = await availablePort();
   await assertPortReleased(servicePort);
   const temporary = await createTempSqlite(t, {
@@ -242,6 +256,7 @@ test('production script builds and runs dist/index.js', async (t) => {
   await fs.writeFile(managedSkill, 'stale dist Worker Skill\n');
   const environment: NodeJS.ProcessEnv = {
     ...process.env,
+    KINTIO_START_WECOM: await callbackConfig(temporary.directory),
     KINTIO_HOME: temporary.directory,
     PORT: String(servicePort),
     WECOM_CALLBACK_TOKEN: 'LifecycleToken123',
@@ -249,7 +264,7 @@ test('production script builds and runs dist/index.js', async (t) => {
     WECOM_CORP_ID: '',
     WECOM_KF_SECRET: '',
     WECOM_ALLOWED_USER_IDS: '',
-    WECOM_DB_FILE: temporary.filePath,
+    KINTIO_DB_FILE: temporary.filePath,
     CODEX_ENABLED: 'false',
     CODEX_WORKING_DIRECTORY: workingDirectory,
     SHUTDOWN_TIMEOUT_MS: '2000',
@@ -270,7 +285,7 @@ test('production script builds and runs dist/index.js', async (t) => {
   });
   assert.equal(buildExit, 0, buildOutput);
 
-  const child = startTestChild(t, path.resolve('dist/index.js'), {
+  const child = startTestChild(t, path.resolve('dist/worker.js'), {
     timeoutMs: 8_000,
     env: environment,
   });

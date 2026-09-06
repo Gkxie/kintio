@@ -30,7 +30,7 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   const logDirectory = path.join(home, 'data/logs');
   await fs.mkdir(logDirectory, { recursive: true });
   await fs.writeFile(
@@ -44,7 +44,14 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
     "if (process.env.KINTIO_MANAGED_WORKER !== '1') process.exit(3);",
     "process.stdout.write('fake worker ready\\n');",
     "process.send?.({ type: 'ready', pid: process.pid });",
-    "process.on('message', (message) => { if (message === 'shutdown') process.exit(0); });",
+    'let idleChecks = 0;',
+    "process.on('message', (message) => {",
+    "  if (message === 'shutdown') process.exit(0);",
+    "  if (message?.type === 'stop-if-idle') {",
+    "    idleChecks += 1;",
+    "    process.send?.({ type: 'stop-if-idle-result', requestId: message.requestId, pid: process.pid, ok: true, idle: idleChecks > 1 });",
+    "  }",
+    "});",
     "process.on('disconnect', () => process.exit(0));",
     'setInterval(() => undefined, 1000).unref();',
   ].join('\n'));
@@ -95,8 +102,13 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   });
   assert.notEqual(second.workerPid, first.workerPid);
   assert.equal(daemonRecord?.configFile, configFile);
-  assert.equal(daemonRecord?.mode, 'service');
+  assert.equal(daemonRecord?.mode, 'shared');
   assert.equal(daemonRecord?.packageRoot, packageRoot);
+  assert.equal(daemonRecord?.version, 2);
+  assert.equal(
+    daemonRecord?.version === 2 ? daemonRecord.state.databaseFile : undefined,
+    path.join(home, 'data/kintio.sqlite'),
+  );
   assert.equal(
     await fs.readFile(path.join(home, 'data/daemon.json'), 'utf8'),
     daemonRecordSource,
@@ -111,8 +123,16 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
     idle.once('error', reject);
   });
   const idleClosed = new Promise<void>((resolve) => idle.once('close', () => resolve()));
-  const stopped = await requestControl(home, 'stop');
+  const busy = await requestControl(home, 'stop-if-idle');
+  assert.equal(busy.idle, false);
+  assert.equal(busy.phase, 'running');
+  const afterBusy = await requestControl(home, 'ping');
+  assert.equal(afterBusy.phase, 'running');
+  assert.equal(afterBusy.workerPid, second.workerPid);
+  const stopped = await requestControl(home, 'stop-if-idle');
   assert.equal(stopped.ok, true);
+  assert.equal(stopped.idle, true);
+  assert.equal(stopped.phase, 'stopping');
   await daemon;
   await idleClosed;
   await assert.rejects(fs.access(daemonRecordPath(home)), { code: 'ENOENT' });
@@ -123,12 +143,122 @@ test('native daemon authenticates control, restarts a crash, logs, and stops', a
   assert.equal((await fs.stat(path.join(logDirectory, 'kintio.log.1'))).size, 10 * 1024 * 1024);
 });
 
+test('stop-if-idle ignores stale request IDs and accepts only the current Worker reply', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-daemon-idle-correlation-'));
+  const home = path.join(root, 'instance');
+  const packageRoot = path.join(root, 'package');
+  const configFile = path.join(home, '.env');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
+  await fs.mkdir(path.dirname(workerFile), { recursive: true });
+  await fs.mkdir(home, { recursive: true });
+  await fs.writeFile(configFile, 'PORT=18891\n');
+  await fs.writeFile(workerFile, [
+    "process.send?.({ type: 'ready', pid: process.pid });",
+    'let checks = 0;',
+    "process.on('message', (message) => {",
+    "  if (message === 'shutdown') process.exit(0);",
+    "  if (message?.type !== 'stop-if-idle') return;",
+    '  checks += 1;',
+    "  if (checks === 1) {",
+    "    process.send?.({ type: 'stop-if-idle-result', requestId: 'stale_request', pid: process.pid, ok: true, idle: true });",
+    "    setTimeout(() => process.send?.({ type: 'stop-if-idle-result', requestId: message.requestId, pid: process.pid, ok: true, idle: false }), 10);",
+    '    return;',
+    '  }',
+    "  process.send?.({ type: 'stop-if-idle-result', requestId: message.requestId, pid: process.pid, ok: true, idle: true });",
+    '});',
+    "process.on('disconnect', () => process.exit(0));",
+  ].join('\n'));
+  let completed = false;
+  const daemon = runNativeDaemon({
+    home,
+    configFile,
+    packageRoot,
+    environment: {},
+    workerControlTimeoutMs: 200,
+  }).finally(() => { completed = true; });
+  t.onTestFinished(async () => {
+    if (!completed) await requestControl(home, 'stop').catch(() => undefined);
+    await daemon.catch(() => undefined);
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const running = await until(async () => {
+    const value = await requestControl(home, 'ping').catch(() => undefined);
+    return value?.phase === 'running' ? value : undefined;
+  });
+  const busy = await requestControl(home, 'stop-if-idle');
+  assert.equal(busy.idle, false);
+  assert.equal((await requestControl(home, 'ping')).workerPid, running.workerPid);
+
+  const stopped = await requestControl(home, 'stop-if-idle');
+  assert.equal(stopped.idle, true);
+  assert.equal(stopped.phase, 'stopping');
+  await daemon;
+});
+
+test('stop-if-idle Worker error and timeout fail closed without stopping the daemon', async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-daemon-idle-timeout-'));
+  const home = path.join(root, 'instance');
+  const packageRoot = path.join(root, 'package');
+  const configFile = path.join(home, '.env');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
+  await fs.mkdir(path.dirname(workerFile), { recursive: true });
+  await fs.mkdir(home, { recursive: true });
+  await fs.writeFile(configFile, 'PORT=18892\n');
+  await fs.writeFile(workerFile, [
+    "process.send?.({ type: 'ready', pid: process.pid });",
+    'let checks = 0;',
+    "process.on('message', (message) => {",
+    "  if (message === 'shutdown') process.exit(0);",
+    "  if (message?.type !== 'stop-if-idle') return;",
+    '  checks += 1;',
+    "  if (checks === 1) process.send?.({ type: 'stop-if-idle-result', requestId: message.requestId, pid: process.pid + 1, ok: true, idle: true });",
+    '});',
+    "process.on('disconnect', () => process.exit(0));",
+  ].join('\n'));
+  let completed = false;
+  const daemon = runNativeDaemon({
+    home,
+    configFile,
+    packageRoot,
+    environment: {},
+    workerControlTimeoutMs: 25,
+  }).finally(() => { completed = true; });
+  t.onTestFinished(async () => {
+    if (!completed) await requestControl(home, 'stop').catch(() => undefined);
+    await daemon.catch(() => undefined);
+    await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+  });
+
+  const running = await until(async () => {
+    const value = await requestControl(home, 'ping').catch(() => undefined);
+    return value?.phase === 'running' ? value : undefined;
+  });
+  await assert.rejects(
+    requestControl(home, 'stop-if-idle'),
+    /PID does not match/u,
+  );
+  assert.equal((await requestControl(home, 'ping')).workerPid, running.workerPid);
+  await assert.rejects(
+    requestControl(home, 'stop-if-idle'),
+    /Worker idle check timed out/u,
+  );
+  const after = await requestControl(home, 'ping');
+  assert.equal(after.phase, 'running');
+  assert.equal(after.workerPid, running.workerPid);
+  assert.ok(readDaemonRecord(home));
+  await fs.access(path.join(home, 'data/daemon.lock'));
+
+  await requestControl(home, 'stop');
+  await daemon;
+});
+
 test('iLink daemon launches its worker and honors a last-account shutdown request', async (t) => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-ilink-daemon-'));
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/ilink.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, '');
@@ -143,7 +273,7 @@ test('iLink daemon launches its worker and honors a last-account shutdown reques
     home,
     configFile,
     packageRoot,
-    mode: 'ilink',
+    mode: 'shared',
     environment: {},
   });
   t.onTestFinished(async () => {
@@ -157,7 +287,7 @@ test('iLink daemon launches its worker and honors a last-account shutdown reques
     return response?.phase === 'running' ? response : undefined;
   });
   assert.ok(running.workerPid);
-  assert.equal(readDaemonRecord(home)?.mode, 'ilink');
+  assert.equal(readDaemonRecord(home)?.mode, 'shared');
   await daemon;
   await assert.rejects(fs.access(daemonRecordPath(home)), { code: 'ENOENT' });
   const log = await fs.readFile(path.join(home, 'data/logs/kintio.log'), 'utf8');
@@ -169,17 +299,17 @@ test('real iLink worker publishes readiness and drains after daemon shutdown', a
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kintio-real-ilink-daemon-'));
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
-  const workerFile = path.join(packageRoot, 'dist/ilink.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.writeFile(
     workerFile,
-    `await import(${JSON.stringify(pathToFileURL(path.resolve('ilink.ts')).href)});\n`,
+    `await import(${JSON.stringify(pathToFileURL(path.resolve('worker.ts')).href)});\n`,
   );
   const daemon = runNativeDaemon({
     home,
     configFile: path.join(home, '.env'),
     packageRoot,
-    mode: 'ilink',
+    mode: 'shared',
     environment: {},
   });
   t.onTestFinished(async () => {
@@ -193,12 +323,15 @@ test('real iLink worker publishes readiness and drains after daemon shutdown', a
     return response?.phase === 'running' ? response : undefined;
   });
   assert.ok(running.workerPid);
-  assert.equal((await requestControl(home, 'stop')).ok, true);
+  const stopped = await requestControl(home, 'stop-if-idle');
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.idle, true);
+  assert.equal(stopped.phase, 'stopping');
   await daemon;
   await assert.rejects(fs.access(daemonRecordPath(home)), { code: 'ENOENT' });
   assert.match(
     await fs.readFile(path.join(home, 'data/logs/kintio.log'), 'utf8'),
-    /Kintio iLink runtime is active[\s\S]+daemon stopped/u,
+    /Kintio shared runtime is active[\s\S]+daemon stopped/u,
   );
 });
 
@@ -208,7 +341,7 @@ test('restart exhaustion remains observable until an explicit stop', async (t) =
   const home = path.join(root, 'instance');
   const packageRoot = path.join(root, 'package');
   const configFile = path.join(home, '.env');
-  const workerFile = path.join(packageRoot, 'dist/index.js');
+  const workerFile = path.join(packageRoot, 'dist/worker.js');
   await fs.mkdir(path.dirname(workerFile), { recursive: true });
   await fs.mkdir(home, { recursive: true });
   await fs.writeFile(configFile, 'PORT=18890\n');
@@ -251,6 +384,9 @@ test('restart exhaustion remains observable until an explicit stop', async (t) =
   assert.match(failed?.message || '', /restart limit exceeded/u);
   assert.equal(completed, false);
   assert.equal((await requestControl(home, 'ping')).phase, 'failed');
-  assert.equal((await requestControl(home, 'stop')).ok, true);
+  const stopped = await requestControl(home, 'stop-if-idle');
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.idle, true);
+  assert.equal(stopped.phase, 'stopping');
   await daemon;
 });

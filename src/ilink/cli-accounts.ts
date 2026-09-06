@@ -6,6 +6,7 @@ import {
   type IlinkOperatorAccount,
   type IlinkOperatorControl,
 } from './cli-login.ts';
+import { assertIlinkAccountRevision } from './store-types.ts';
 
 export type IlinkAccountCommand = 'list' | 'start' | 'stop' | 'delete';
 
@@ -15,18 +16,22 @@ export interface IlinkAccountCommandResult {
   readonly selectedAccountKey?: `ia_${string}`;
 }
 
+export interface IlinkAccountSnapshot {
+  readonly accounts: readonly IlinkOperatorAccount[];
+  readonly mode: 'runtime' | 'standalone';
+}
+
 function choices(
   accounts: readonly IlinkOperatorAccount[],
   runtimeActive: boolean,
 ): string {
   return accounts.map((account, index) =>
-    `  ${index + 1}. ${JSON.stringify(account.providerAccountId)} ` +
-    `${account.accountKey} [` +
+    `  ${index + 1}. ${JSON.stringify(account.providerAccountId)} [` +
     `${runtimeActive && account.runtimeEnabled ? 'running' : 'stopped'}]`
   ).join('\n');
 }
 
-function selectAccount(
+export function resolveIlinkAccount(
   accounts: readonly IlinkOperatorAccount[],
   selector: string | undefined,
   runtimeActive: boolean,
@@ -52,9 +57,37 @@ function selectAccount(
   return matches[0]!;
 }
 
+export async function readIlinkAccountSnapshot({
+  config,
+  packageRoot,
+  signal,
+  openControl,
+}: {
+  readonly config: Pick<IlinkEnrollmentConfig, 'state' | 'ilink'>;
+  readonly packageRoot: string;
+  readonly signal: AbortSignal;
+  readonly openControl?: () => Promise<IlinkOperatorControl>;
+}): Promise<IlinkAccountSnapshot> {
+  if (!openControl && !fs.existsSync(config.state.databaseFile)) {
+    return Object.freeze({ accounts: Object.freeze([]), mode: 'standalone' });
+  }
+  const control = await (openControl?.() ||
+    openIlinkOperatorControl(config, packageRoot, signal));
+  try {
+    return Object.freeze({
+      accounts: Object.freeze([...(await control.listAccounts())]),
+      mode: control.mode,
+    });
+  } finally {
+    await control.close();
+  }
+}
+
 export async function runIlinkAccountCommand({
   command,
   selector,
+  expectedAccount,
+  requiredMode,
   confirmed = false,
   config,
   packageRoot,
@@ -65,6 +98,8 @@ export async function runIlinkAccountCommand({
 }: {
   readonly command: IlinkAccountCommand;
   readonly selector?: string;
+  readonly expectedAccount?: IlinkOperatorAccount;
+  readonly requiredMode?: 'runtime' | 'standalone';
   readonly confirmed?: boolean;
   readonly config: Pick<IlinkEnrollmentConfig, 'state' | 'ilink'>;
   readonly packageRoot: string;
@@ -81,8 +116,11 @@ export async function runIlinkAccountCommand({
     throw new Error('No iLink account is enrolled; run "kintio ilink login" first');
   }
   const control = await (openControl?.() ||
-    openIlinkOperatorControl(config, packageRoot, signal));
+    openIlinkOperatorControl(config, packageRoot, signal, requiredMode));
   try {
+    if (requiredMode && control.mode !== requiredMode) {
+      throw new Error('The iLink account control mode changed; select the account again');
+    }
     const accounts = await control.listAccounts();
     const runtimeActive = control.mode === 'runtime';
     if (command === 'list') {
@@ -94,7 +132,15 @@ export async function runIlinkAccountCommand({
         runningCount: accounts.filter((account) => account.runtimeEnabled).length,
       };
     }
-    const account = selectAccount(accounts, selector, runtimeActive);
+    const account = expectedAccount
+      ? accounts.find((candidate) => candidate.accountKey === expectedAccount.accountKey)
+      : resolveIlinkAccount(accounts, selector, runtimeActive);
+    if (!account) {
+      assertIlinkAccountRevision(undefined, expectedAccount!);
+      throw new Error('The selected iLink account changed; select it again');
+    }
+    if (expectedAccount) assertIlinkAccountRevision(account, expectedAccount);
+    signal.throwIfAborted();
     if (command === 'start' && control.mode === 'standalone' && deferStandaloneStart) {
       return {
         runtimeRequired: true,
@@ -109,9 +155,18 @@ export async function runIlinkAccountCommand({
         'repeat with --yes',
       );
     }
+    const expected = {
+      generation: account.generation,
+      incarnation: account.incarnation,
+    };
+    signal.throwIfAborted();
     const result = command === 'delete'
-      ? await control.deleteAccount(account.accountKey)
-      : await control.setAccountRuntime(account.accountKey, command === 'start');
+      ? await control.deleteAccount(account.accountKey, expected)
+      : await control.setAccountRuntime(
+          account.accountKey,
+          command === 'start',
+          expected,
+        );
     stdout(
       `${command === 'delete' ? 'Deleted' : command === 'start' ? 'Started' : 'Stopped'} ` +
       `${JSON.stringify(account.providerAccountId)}.\n`,

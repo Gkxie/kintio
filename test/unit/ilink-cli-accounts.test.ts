@@ -4,7 +4,10 @@ import path from 'node:path';
 
 import { test } from 'vitest';
 
-import { runIlinkAccountCommand } from '../../src/ilink/cli-accounts.ts';
+import {
+  readIlinkAccountSnapshot,
+  runIlinkAccountCommand,
+} from '../../src/ilink/cli-accounts.ts';
 import type {
   IlinkOperatorAccount,
   IlinkOperatorControl,
@@ -12,11 +15,15 @@ import type {
 
 const ACCOUNT_A: IlinkOperatorAccount = {
   accountKey: `ia_${'a'.repeat(40)}`,
+  generation: 1,
+  incarnation: `ii_${'a'.repeat(64)}`,
   providerAccountId: 'bot-a@im.bot',
   runtimeEnabled: true,
 };
 const ACCOUNT_B: IlinkOperatorAccount = {
   accountKey: `ia_${'b'.repeat(40)}`,
+  generation: 2,
+  incarnation: `ii_${'b'.repeat(64)}`,
   providerAccountId: 'bot-b@im.bot',
   runtimeEnabled: false,
 };
@@ -49,17 +56,25 @@ function control({
       calls.push('list');
       return accounts;
     },
-    async setAccountRuntime(accountKey, enabled) {
+    async setAccountRuntime(accountKey, enabled, expected) {
       calls.push(`${enabled ? 'start' : 'stop'}:${accountKey}`);
       const source = accounts.find((account) => account.accountKey === accountKey)!;
+      assert.deepEqual(expected, {
+        generation: source.generation,
+        incarnation: source.incarnation,
+      });
       return {
         account: { ...source, runtimeEnabled: enabled },
         runningCount: enabled ? 1 : 0,
       };
     },
-    async deleteAccount(accountKey) {
+    async deleteAccount(accountKey, expected) {
       calls.push(`delete:${accountKey}`);
       const source = accounts.find((account) => account.accountKey === accountKey)!;
+      assert.deepEqual(expected, {
+        generation: source.generation,
+        incarnation: source.incarnation,
+      });
       return {
         account: { ...source, runtimeEnabled: false },
         runningCount: 0,
@@ -69,6 +84,21 @@ function control({
   };
   return { calls, value };
 }
+
+test('account snapshots close operator control before returning to interactive code', async () => {
+  const fake = control({ accounts: [ACCOUNT_A, ACCOUNT_B] });
+  const snapshot = await readIlinkAccountSnapshot({
+    config: config('kintio-snapshot'),
+    packageRoot: path.resolve('.'),
+    signal: new AbortController().signal,
+    openControl: async () => fake.value,
+  });
+  assert.deepEqual(snapshot, {
+    accounts: [ACCOUNT_A, ACCOUNT_B],
+    mode: 'standalone',
+  });
+  assert.deepEqual(fake.calls, ['list', 'close']);
+});
 
 test('iLink list prints directly reusable provider account IDs only', async () => {
   for (const mode of ['standalone', 'runtime'] as const) {
@@ -177,6 +207,49 @@ test('iLink delete requires --yes before permanently deleting the selected accou
   });
   assert.deepEqual(accepted.calls, ['list', `delete:${ACCOUNT_A.accountKey}`, 'close']);
   assert.match(output.join(''), /Deleted "bot-a@im\.bot"/u);
+});
+
+test('stale generation, deletion, or same-key re-enrollment cannot mutate a new account', async () => {
+  for (const [index, accounts] of [
+    [{ ...ACCOUNT_A, generation: ACCOUNT_A.generation + 1 }],
+    [{ ...ACCOUNT_A, incarnation: `ii_${'c'.repeat(64)}` as const }],
+    [],
+  ].entries()) {
+    const fake = control({ accounts });
+    await assert.rejects(() => runIlinkAccountCommand({
+      command: 'delete',
+      expectedAccount: ACCOUNT_A,
+      confirmed: true,
+      config: config(`kintio-stale-${index}`),
+      packageRoot: path.resolve('.'),
+      signal: new AbortController().signal,
+      stdout() {},
+      openControl: async () => fake.value,
+    }), /selected iLink account changed/u);
+    assert.deepEqual(fake.calls, ['list', 'close']);
+  }
+});
+
+test('an abort after revision read cannot dispatch an account mutation', async () => {
+  const controller = new AbortController();
+  const fake = control({ accounts: [ACCOUNT_A] });
+  const list = fake.value.listAccounts;
+  fake.value.listAccounts = async () => {
+    const accounts = await list();
+    controller.abort();
+    return accounts;
+  };
+  await assert.rejects(() => runIlinkAccountCommand({
+    command: 'delete',
+    expectedAccount: ACCOUNT_A,
+    confirmed: true,
+    config: config('kintio-aborted-mutation'),
+    packageRoot: path.resolve('.'),
+    signal: controller.signal,
+    stdout() {},
+    openControl: async () => fake.value,
+  }), /abort/iu);
+  assert.deepEqual(fake.calls, ['list', 'close']);
 });
 
 test('an absent database is an empty list and cannot start an account', async () => {

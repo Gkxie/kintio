@@ -163,6 +163,33 @@ test('configured iLink login origin is preserved from QR creation through status
   assert.deepEqual(polledOrigins, [baseUrl]);
 });
 
+test('terminal login busy state follows polling work without requiring a status read', async (t) => {
+  const created = await fixture(t);
+  let release!: (value: IlinkQrStatusResponse) => void;
+  const status = new Promise<IlinkQrStatusResponse>((resolve) => { release = resolve; });
+  const manager = new IlinkLoginManager({
+    offers: created.offers,
+    accounts: created.accounts,
+    secretBox: created.secretBox,
+    client: {
+      async createQr() {
+        return { qrcode: 'tracked-terminal', qrcode_img_content: 'weixin://tracked' };
+      },
+      async getQrStatus() { return await status; },
+      resolveRedirectBaseUrl(host: string) { return `https://${host}/`; },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  t.onTestFinished(() => manager.close());
+  await manager.start();
+  await manager.offer({ kind: 'terminal' });
+  assert.equal(manager.hasActiveLocalOperatorLogin(), true);
+
+  release({ status: 'expired' });
+  await eventually(() => !manager.hasActiveLocalOperatorLogin());
+  assert.equal(manager.hasActiveLocalOperatorLogin(), false);
+});
+
 test('cancelling QR creation leaves no login offer or account', async (t) => {
   const created = await fixture(t);
   const controller = new AbortController();

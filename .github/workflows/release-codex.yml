@@ -1,63 +1,93 @@
-name: Real Codex validation
+name: Release Codex validation
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [master]
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - .github/workflows/real-codex.yml
-      - codex-workspace/**
+      - CHANGELOG.md
       - package.json
-      - pnpm-lock.yaml
-      - src/agent/**
-      - src/config.ts
-      - src/domain/**
-      - src/mcp/**
-      - src/runtime.ts
-      - src/services/codex-agent.ts
-      - src/services/codex-app-server.ts
-      - src/services/conversation-processor.ts
-      - src/services/image-stager.ts
-      - src/services/media-gateway.ts
-      - src/state/**
-      - src/types.ts
-      - test/opt-in/real-codex.integration.ts
-      - vitest.config.ts
-  workflow_dispatch:
+      - src/version.ts
 
 permissions:
   contents: read
 
 concurrency:
-  group: real-codex-validation-${{ github.event.pull_request.number || github.ref }}
+  group: release-codex-validation-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
-  validate:
-    name: Approved synthetic smoke test
+  authorize:
+    name: Authorize deterministic Release
     if: >-
       github.repository == 'Gkxie/kintio' &&
+      github.event_name == 'pull_request_target' &&
       github.run_attempt == 1 &&
-      ((github.event_name == 'workflow_dispatch' &&
-        (github.ref == 'refs/heads/master' ||
-         startsWith(github.ref, 'refs/heads/codex/')) &&
-        github.actor == 'Gkxie' &&
-        github.triggering_actor == 'Gkxie') ||
-       (github.event_name == 'pull_request' &&
-        github.event.pull_request.draft == false &&
-        github.event.pull_request.base.ref == 'master' &&
-        github.event.pull_request.head.repo.full_name == github.repository &&
-        github.event.pull_request.user.login == 'Gkxie' &&
-        github.actor == 'Gkxie' &&
+      github.event.pull_request.draft == false &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.base.ref == 'master' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'release/next' &&
+      github.event.pull_request.user.login == 'kintio-release[bot]' &&
+      ((github.actor == 'kintio-release[bot]' &&
+        github.triggering_actor == 'kintio-release[bot]') ||
+       (github.actor == 'Gkxie' &&
         github.triggering_actor == 'Gkxie'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      authorized: ${{ steps.release.outputs.authorized }}
+      head_sha: ${{ steps.release.outputs.head_sha }}
+    steps:
+      - name: Check out the trusted Release validator
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+      - name: Check out the exact Release candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+      - name: Verify and bind the deterministic Release candidate
+        id: release
+        working-directory: candidate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          RELEASE_BOT_LOGIN: kintio-release[bot]
+        run: |
+          test "$(git rev-parse HEAD)" = "$HEAD_SHA"
+          node --experimental-strip-types \
+            ../trusted/.github/scripts/reconcile-release.ts verify
+          printf 'authorized=true\nhead_sha=%s\n' "$HEAD_SHA" >> "$GITHUB_OUTPUT"
+
+  validate:
+    name: Approved Release Codex smoke test
+    needs: authorize
+    if: needs.authorize.outputs.authorized == 'true'
     environment: codex-eval
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ needs.authorize.outputs.head_sha }}
           persist-credentials: false
+      - name: Confirm the approved immutable source
+        env:
+          AUTHORIZED_HEAD_SHA: ${{ needs.authorize.outputs.head_sha }}
+        run: test "$(git rev-parse HEAD)" = "$AUTHORIZED_HEAD_SHA"
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
