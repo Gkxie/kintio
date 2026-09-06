@@ -90,20 +90,23 @@ For each acceptance row:
 Default tests use temporary data, fake providers, and fake Agent processes.
 They do not modify the active service or its data. Real Codex/channel runs need
 separate approval; delete test threads when such a run is authorized.
+Real-model end-to-end validation for this remediation remains outstanding;
+synthetic results do not establish live approval behaviour.
 
 ## Progress ledger
 
 | Work | State | Evidence / next action |
 | --- | --- | --- |
 | Plan and scope | Recorded | Tracking issue #102; this document. |
-| A1 | PR checks | [#105](https://github.com/Gkxie/kintio/pull/105); fatal transport, early notifications, startup/running failure, normal shutdown tested. Full suite: 674 tests / 92 files passed; independent review completed. |
-| A2 | In progress | #101 merged; active and waiting recovery promotion tests in an isolated branch. |
+| A1 | Merged | [#105](https://github.com/Gkxie/kintio/pull/105); fatal transport, early notifications, startup/running failure, normal shutdown tested. Full suite: 674 tests / 92 files passed; independent review completed. |
+| A2 | Merged | [#106](https://github.com/Gkxie/kintio/pull/106); live input and recovery share admission and scheduling, including active-turn steering and waiting recovery promotion. |
 | A3 | Merged | [#103](https://github.com/Gkxie/kintio/pull/103); 667 tests passed locally; independent review and all hosted checks passed. |
-| A4 | Pending | Protocol verified; explicit, scoped approval interaction still to implement. |
-| C1 | In progress | Shared operator ownership and per-connection terminal offers; foreground and cancellation regressions. |
-| C2 | Pending | Remove dead modes and relocate cohesive update/lifecycle logic after C1. |
-| R1 / D1 | Merged | [#104](https://github.com/Gkxie/kintio/pull/104); 672 tests passed locally; independent authorization review and all hosted checks passed. |
-| R2 | In progress | Pure manifest, file-scope, and Changelog rules; privileged boundary checks remain separate. |
+| A4 | Final acceptance pending | Final acceptance, including real-model end-to-end validation, remains outstanding. |
+| C1 | Merged | [#108](https://github.com/Gkxie/kintio/pull/108); shared writer, per-terminal QR ownership, foreground operation, cancellation, run-bound rollback, and read-only status behaviour covered by synthetic regressions. |
+| C2 | PR pending | Implemented shared daemon-client and runtime-update modules and removed internal single-value mode plumbing; wire tags are unchanged. Independent review completed. Full suite: 746 tests / 94 files passed in 91.64 seconds; line coverage 90.98%, branch coverage 81.23%. |
+| R1 | Merged | [#104](https://github.com/Gkxie/kintio/pull/104); 672 tests passed locally; independent authorization review and all hosted checks passed. |
+| R2 | Merged | [#107](https://github.com/Gkxie/kintio/pull/107); shared pure release-plan rules with independent privileged boundary checks. |
+| D1 | Merged | [#104](https://github.com/Gkxie/kintio/pull/104); maintenance guidance matches the Release-only optional Codex validation workflow. |
 
 When a batch finishes, update its state and link its PR/tests here. A green test
 suite or merged unrelated PR must not mark unfinished acceptance rows complete.
